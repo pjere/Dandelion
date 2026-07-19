@@ -1,0 +1,82 @@
+# ============================================================================
+# dispatch_model (step vi) — multi-zone economic dispatch → zonal marginal prices.
+# Zone-agnostic: zones listed here; FR is simply the zone whose stack is unit-resolved.
+# A degraded 1-zone mode (France + parametric border supply curves) is supported for
+# early end-to-end integration (set run.mode: single_zone).
+# ============================================================================
+run:
+  seed: 20260714
+  mode: "multi_zone"            # "multi_zone" (7 zones) | "single_zone" (FR + border supply curves)
+  models_dir: "models"
+  reports_dir: "reports"
+  output_dir: "output"
+  resolution: "1h"             # LP time step (hourly LP; 15-min shaping deferred to step vii)
+
+# --- Zones (7-zone bidding-zone topology) ------------------------------------
+zones:
+  FR:      { name: "France",        unit_resolved: true,  entsoe: "FR" }
+  DE_LU:   { name: "Germany-Lux",   unit_resolved: false, entsoe: "DE_LU" }
+  BE:      { name: "Belgium",       unit_resolved: false, entsoe: "BE" }
+  GB:      { name: "Great Britain", unit_resolved: false, entsoe: "GB" }
+  CH:      { name: "Switzerland",   unit_resolved: false, entsoe: "CH" }
+  IT_NORTH: { name: "Italy North",  unit_resolved: false, entsoe: "IT_NORD" }
+  ES:      { name: "Spain",         unit_resolved: false, entsoe: "ES" }
+  # Virtual aggregate of DE-LU's out-of-model neighbours (NL+AT+DK+PL+CZ). Not a real bidding zone:
+  # it exists to give DE-LU its true ~10.2 GW of export headroom (measured p99.5 of 2019 flows) instead
+  # of the 8 GW the 7-zone set allowed. Price-responsive (own demand/RES/stack), so it also carries the
+  # negative-price contagion into FR/BE/CH. No observed price series -> modelled but never scored.
+  DE_REST: { name: "DE neighbours (NL+AT+DK+PL+CZ)", unit_resolved: false, entsoe: "", virtual: true }
+
+# undirected coupling graph; both directions get an NTC-bounded flow variable
+borders:
+  - [FR, DE_LU]
+  - [FR, BE]
+  - [FR, GB]
+  - [FR, CH]
+  - [FR, IT_NORTH]
+  - [FR, ES]
+  - [DE_LU, BE]
+  - [DE_LU, CH]
+  - [CH, IT_NORTH]
+  - [BE, GB]
+
+# --- Historical inputs (pricemodeling DB) ------------------------------------
+data:
+  sqlite_path: "../data/pricemodeling.db"
+  entsoe:
+    prices_table: "entsoe_day_ahead_prices"
+    load_table: "entsoe_load"
+    generation_table: "entsoe_generation"
+    flows_table: "entsoe_flows"
+  # upstream step outputs (projection mode)
+  demand_output: "../demand_model/output"          # step iii
+  res_output: "../res_model/output"                # step iv
+  availability_output: "../availability_model/output"  # step v
+  weathergen_output: "../weathergen/output/simulation.nc"  # shared weather cube
+
+# --- Backtest / calibration years --------------------------------------------
+backtest:
+  years: [2019, 2022, 2023, 2024]   # normal / crisis / high-RES
+  price_zone_ref: "FR"
+
+# --- Scarcity pricing (duals must be meaningful) -----------------------------
+scarcity:
+  voll_eur_mwh: 15000            # value of lost load (FR ~ RTE/CRE practice); per-zone override in workbook
+  price_cap_eur_mwh: 4000        # EU day-ahead technical cap (trajectory in workbook)
+  price_floor_eur_mwh: -500
+
+# --- Solver ------------------------------------------------------------------
+solver:
+  name: "highs"
+  rolling_window_days: 7
+  lookahead_days: 2
+  threads: 0                     # 0 = auto
+
+# --- Projection --------------------------------------------------------------
+projection:
+  horizon: { start_year: 2027, end_year: 2046 }
+  n_draws: 50
+
+assumptions:
+  workbook: "../scenarios.xlsx"
+  scenario: "reference"

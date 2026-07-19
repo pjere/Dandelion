@@ -1,0 +1,91 @@
+# ============================================================================
+# res_model (step iv) — weather-to-power conversion. Single YAML drives the
+# pipeline; no hard-coded path/constant elsewhere. Mirrors step (iii) conventions.
+# ============================================================================
+run:
+  seed: 20260708
+  models_dir: "models"
+  reports_dir: "reports"
+  output_dir: "output"
+
+# --- Perimeter (fixed, cf. DECISIONS.md) -------------------------------------
+perimeter:
+  output_basis: "potential"        # available production BEFORE market curtailment (curtailment = step vi)
+  losses: "technical_only"         # intrinsic availability/technical losses only
+  technologies: [pv, wind_onshore, wind_offshore, hydro_ror]
+
+# --- Historical sources (pricemodeling DB) -----------------------------------
+data:
+  sqlite_path: "../data/pricemodeling.db"
+  production:
+    per_type_table: "rte_generation_per_type"          # national production by fuel (MW)
+    per_unit_table: "rte_generation_per_unit"          # plant-level (EIC) — offshore farms
+    capacity_type_table: "rte_installed_capacities_per_type"   # time-varying installed capacity (MW)
+    series_keys:
+      pv: "SOLAR"
+      wind_onshore: "WIND_ONSHORE"
+      wind_offshore: "WIND_OFFSHORE"
+      hydro_ror: "HYDRO_RUN_OF_RIVER_AND_POUNDAGE"
+  registry:
+    unit_table: "dim_production_unit"                   # eic_code, canonical_name, fuel_type (no coords)
+    station_table: "dim_station"                        # station_id, lat/lon/alt, department, REGION
+  era5_table: "era5_point_hourly"                       # ingested ERA5 100 m wind + SSRD (scripts/ingest_era5_db.py)
+  # offshore farms live in the workbook (coords + commissioning); DB per-unit labels used to match history
+  period: { start: "2015-01-01", end: "2026-06-30" }
+  # data-quality thresholds
+  qc:
+    cf_max: 1.05                    # capacity-factor upper bound (normalisation sanity)
+    ramp_up_days: 30                # exclude commissioning ramp-up window
+    flatline_hours: 12              # flag suspiciously flat runs (outage/curtailment)
+
+# --- Weather interface (SHARED with step iii) --------------------------------
+weather:
+  source: "weathergen"
+  weathergen_output: "../weathergen/output/simulation.nc"
+  bbox: { lat_min: 41.0, lat_max: 52.0, lon_min: -6.0, lon_max: 10.0 }   # métropole
+  irradiance:
+    method: "clearsky_cloud"        # REUSE step (iii): clear-sky (pvlib Haurwitz) × cloud attenuation
+  # station→region weighting comes from dim_station.region + fleet distribution (workbook)
+
+# --- ERA5 100 m wind + SSRD (cf. DECISIONS §2.A) ------------------------------
+# Downloaded to cache_dir (scripts/pull_era5.py), then INGESTED INTO THE DB
+# (scripts/ingest_era5_db.py -> data.era5_table). The predictive model reads 100 m wind from the DB;
+# the zips are just a raw download cache (like data/raw/synop/).
+era5:
+  cache_dir: "era5_cache"           # raw ARCO/CDS download cache (zips)
+  source: "arco"                    # reuse weathergen's ARCO fast-path pattern
+  variables: [u100, v100, ssrd]
+
+# --- Assumptions workbook (§4) -----------------------------------------------
+assumptions:
+  workbook: "../scenarios.xlsx"
+  scenarios: ["reference"]
+
+# --- Calibration (§5) --------------------------------------------------------
+calibration:
+  granularity: "national"           # national now; code kept region/cohort-resolved
+  holdout_years: [2025]
+  pv:
+    bias_bins: { month: 12, hour_angle: 8 }   # month × hour-angle multiplicative correction grid
+  wind_onshore:
+    curve_smoothing_init: 2.0       # m/s aggregate-curve smoothing width (fitted)
+    cut_out_ms: 25.0
+
+# --- Projection (§5.5) -------------------------------------------------------
+projection:
+  horizon: { start_year: 2027, end_year: 2046 }
+  n_weather_draws: 50
+  residual_paths: 20
+  pv_segments: [pv_utility, pv_distributed, pv_btm]
+  # coherent with step iii: same weather-draw ID + seed convention
+
+# --- Validation acceptance bands (§6) ----------------------------------------
+validation:
+  monthly_energy_bias_pct: 3.0
+  cf_bands:                          # national capacity-factor anchors (current fleet)
+    pv: { low: 0.13, high: 0.15 }
+    wind_onshore: { low: 0.24, high: 0.27 }
+    wind_offshore: { low: 0.35, high: 0.42 }
+  pv_seasonal_ratio: { low: 4.0, high: 5.0 }   # July/December energy ratio
+  interannual_wind_spread_pct: { low: 8.0, high: 10.0 }
+  dunkelflaute: { window_h: 72, wind_cf_max: 0.15, pv_cf_max: 0.05 }

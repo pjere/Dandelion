@@ -1,0 +1,206 @@
+# Registre déclaratif des ressources de l'API data.rte-france.com à extraire.
+#
+# Chaque entrée décrit une ressource REST. Pour l'activer il faut avoir souscrit
+# l'API correspondante depuis votre application sur https://data.rte-france.com
+# (sinon l'appel renverra 403). Mettez `enabled: false` pour la sauter.
+#
+# Champs :
+#   api          : segment d'URL de l'API   -> open_api/<api>/<version>/<resource>
+#   version      : version d'URL (v1, v2, ...)
+#   resource     : nom de la ressource REST
+#   table        : table SQLite de destination (données brutes)
+#   chunk_days   : taille max de fenêtre par appel (imposée par RTE)
+#   start_date   : 1er jour de disponibilité de la donnée
+#   params       : style des paramètres de date
+#                    - "start_end"   -> start_date / end_date  (cas général)
+#                    - "none"        -> ressource sans paramètre de date (snapshot)
+#   category     : étiquette libre (production, conso, marche, reseaux, echanges)
+#   enabled      : extraire ou non
+#
+# NOTE : certains noms de ressources/versions évoluent. En cas d'erreur 404 au 1er
+# appel, ajustez ici sans toucher au code Python.
+
+resources:
+
+  # ---- Production -------------------------------------------------------
+  - name: generation_per_type
+    api: actual_generation
+    version: v1
+    resource: actual_generations_per_production_type
+    table: rte_generation_per_type
+    chunk_days: 155
+    start_date: "2014-12-15"
+    params: start_end
+    category: production
+    enabled: true
+
+  - name: generation_per_unit          # *** production par groupe (clé EIC) ***
+    api: actual_generation
+    version: v1
+    resource: actual_generations_per_unit
+    table: rte_generation_per_unit
+    chunk_days: 7
+    start_date: "2014-12-15"
+    params: start_end
+    category: production
+    enabled: true
+
+  - name: water_reserves               # *** stock hydraulique (hebdo) ***
+    api: actual_generation
+    version: v1
+    resource: water_reserves
+    table: rte_water_reserves
+    chunk_days: 366
+    start_date: "2014-12-15"
+    params: start_end
+    category: production
+    enabled: true
+
+  - name: generation_mix_15min
+    api: actual_generation
+    version: v1
+    resource: generation_mix_15min_time_scale
+    table: rte_generation_mix_15min
+    chunk_days: 14
+    start_date: "2017-01-01"
+    params: start_end
+    category: production
+    enabled: true
+
+  - name: generation_forecast          # *** productions prévues (+ obligation d'achat) ***
+    api: generation_forecast
+    version: v3
+    resource: forecasts
+    table: rte_generation_forecast
+    chunk_days: 14               # max ~14 j/appel (volume élevé : tous types × horizons)
+    start_date: "2014-12-15"
+    params: start_end
+    category: production
+    enabled: true
+
+  - name: installed_capacities         # *** capacités de production ***
+    api: generation_installed_capacities
+    version: v1
+    resource: capacities_per_production_type
+    table: rte_installed_capacities_per_type
+    chunk_days: 365              # ignoré : params=yearly impose des fenêtres année civile
+    start_date: "2014-12-15"
+    params: yearly               # cette API exige des fenêtres 1er janv. -> 1er janv.
+    category: production
+    enabled: true
+
+  - name: installed_capacities_per_unit
+    api: generation_installed_capacities
+    version: v1
+    resource: capacities_per_production_unit
+    table: rte_installed_capacities_per_unit
+    chunk_days: 366
+    start_date: "2014-12-15"
+    params: start_end
+    category: production
+    enabled: true
+
+  # ---- Consommation -----------------------------------------------------
+  - name: consumption_short_term
+    api: consumption
+    version: v1
+    resource: short_term
+    table: rte_consumption_short_term
+    chunk_days: 155
+    start_date: "2014-12-15"
+    params: start_end
+    category: conso
+    enabled: true
+
+  - name: consumption_weekly_forecast
+    api: consumption
+    version: v1
+    resource: weekly_forecasts
+    table: rte_consumption_weekly_forecast
+    chunk_days: 155
+    start_date: "2014-12-15"
+    params: start_end
+    category: conso
+    enabled: true
+
+  - name: consolidated_consumption       # conso historique consolidée (puissance)
+    api: consolidated_consumption
+    version: v1
+    resource: consolidated_power_consumption
+    table: rte_consolidated_consumption
+    chunk_days: 155
+    start_date: "2014-12-15"
+    params: start_end
+    category: conso
+    enabled: true
+
+  # ---- Échanges aux frontières -----------------------------------------
+  - name: physical_flows
+    api: physical_flow
+    version: v1
+    resource: physical_flows
+    table: rte_physical_flows
+    chunk_days: 60               # 155 j -> ~21 Mo (JSON tronqué) ; 60 j ~2,5 Mo
+    start_date: "2014-12-15"
+    params: start_end
+    category: echanges
+    enabled: true
+
+  - name: ntc                            # capacités d'échange prévues aux frontières (NTC)
+    api: ntc
+    version: v2
+    resource: ntc
+    table: rte_ntc
+    chunk_days: 60              # 155 j refusé (période trop longue) ; 60 j OK
+    start_date: "2015-01-01"
+    params: start_end
+    category: echanges
+    enabled: true
+
+  # ---- Marché -----------------------------------------------------------
+  - name: wholesale_market_prices        # prix Spot France (EPEX). ATTENTION : sans historique.
+    api: wholesale_market
+    version: v3
+    resource: france_power_exchanges
+    table: rte_market_prices
+    chunk_days: 155
+    start_date: "2014-12-15"
+    params: none          # l'API ne renvoie QUE la dernière publication (jour J / J+1)
+    category: marche
+    enabled: true
+
+  - name: tempo_calendar                 # signal Tempo (jours bleu/blanc/rouge)
+    api: tempo_like_supply_contract
+    version: v1
+    resource: tempo_like_calendars
+    table: rte_tempo_calendar
+    chunk_days: 300
+    start_date: "2014-12-15"
+    params: start_end
+    category: marche
+    enabled: true
+
+  # ---- Réseaux (indisponibilités) --------------------------------------
+  # NB : ces ressources v7 utilisent un format de date d'entrée différent (non géré par le
+  # client générique start_end) -> laissées désactivées, à traiter spécifiquement si besoin.
+  - name: generation_unavailabilities
+    api: unavailability_additional_information
+    version: v7
+    resource: generation_unavailabilities
+    table: rte_generation_unavailabilities
+    chunk_days: 31
+    start_date: "2015-01-01"
+    params: start_end
+    category: reseaux
+    enabled: false
+
+  - name: transmission_unavailabilities
+    api: unavailability_additional_information
+    version: v7
+    resource: transmission_network_unavailabilities
+    table: rte_transmission_unavailabilities
+    chunk_days: 31
+    start_date: "2015-01-01"
+    params: start_end
+    category: reseaux
+    enabled: false

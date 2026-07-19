@@ -1,0 +1,10 @@
+# Normalize line endings: text as LF in the repo, binaries untouched.
+* text=auto eol=lf
+
+*.xlsx binary
+*.png binary
+*.nc binary
+*.parquet binary
+*.db binary
+*.duckdb binary
+*.npz binary

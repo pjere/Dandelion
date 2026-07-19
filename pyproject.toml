@@ -1,0 +1,23 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["data", "**/era5_cache", "**/output", "**/models", "**/.cache", "**/__pycache__"]
+
+[tool.ruff.lint]
+# pycodestyle(E,W) · pyflakes(F) · isort(I) · pep8-naming(N) · pyupgrade(UP) · bugbear(B) · comprehensions(C4)
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4"]
+ignore = [
+    "E741",   # ambiguous var name (l/I) — occasional in math code
+    "B905",   # zip strict= — not adding everywhere at once
+    "E702",   # multiple statements on one line (;) — deliberate compact style in this numeric codebase
+    "N806",   # non-lowercase local (T, D, U, NTC, …) — domain math convention (matrices / arrays)
+    "N803",   # arg name (T, D) — same domain convention
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/*" = ["N802", "N803", "N806", "E501"]   # test helpers use math-style names / long asserts
+"**/scripts/*" = ["E402", "F401", "N806"]
+
+[tool.ruff.lint.pep8-naming]
+# domain glossary allows these short physical-quantity names as identifiers/args
+extend-ignore-names = ["T", "D", "R", "P50_err", "P5_err", "P95_err", "cf"]

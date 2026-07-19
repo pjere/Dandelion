@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "weathergen"
+version = "0.1.0"
+description = "Multi-site hourly stochastic weather generator with EVT tails and external climate trend."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.11",
+    "xarray>=2024.0",
+    "netCDF4>=1.6",
+    "bottleneck>=1.3",     # xarray gap-aware interpolate_na (QC short-gap fill)
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Heavy statistical stack, imported lazily by the phase that needs it.
+stats = [
+    "statsmodels>=0.14",   # harmonics, VAR
+    "scikit-learn>=1.3",   # Ledoit-Wolf, PCA/EOF
+    "pyextremes>=2.3",     # POT / GPD tails
+    "xclim>=0.50",         # sdba QDM trend
+]
+viz = ["matplotlib>=3.8", "jinja2>=3.1"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+weathergen = "weathergen.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["weathergen*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

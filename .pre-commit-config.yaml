@@ -1,0 +1,19 @@
+# Quality gates (§5). Install once: `pip install pre-commit && pre-commit install`.
+# The naming/style convention is enforced by ruff (config in pyproject.toml); the golden harness
+# (tools/golden.py) guards numerical results and is run in CI, not as a per-commit hook (too slow).
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.21
+    hooks:
+      - id: ruff            # lint (pep8-naming, pyflakes, isort, pyupgrade, bugbear)
+        args: [--fix]
+      - id: ruff-format     # formatting
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+        args: [--maxkb=5000]        # block accidental data/model commits (cube, DB, parquet)
+      - id: check-merge-conflict
+      - id: debug-statements         # no stray breakpoints/pdb

@@ -1,0 +1,127 @@
+# ============================================================================
+# weathergen — configuration unique du générateur stochastique de météo.
+# Aucun "magic number" dans le code : tout paramètre de modélisation vit ici.
+# ============================================================================
+
+run:
+  seed: 20260629                 # graine unique -> reproductibilité totale
+  models_dir: "models"           # objets ajustés sérialisés (gitignore)
+  reports_dir: "reports"         # rapports de validation (gitignore)
+
+# --- Source de données -------------------------------------------------------
+data:
+  source: "pricemodeling_sqlite" # 'pricemodeling_sqlite' | 'synthetic' (smoke)
+  sqlite_path: "../data/pricemodeling.db"
+  master_table: "master_hourly"
+  station_table: "dim_station"
+  # Filtre des stations : métropole uniquement (cf. DECISIONS.md).
+  station_filter:
+    bbox: { lat_min: 41.0, lat_max: 52.0, lon_min: -6.0, lon_max: 10.0 }
+    ids: []                      # vide => toutes celles dans la bbox
+  period: { start: "2014-12-15", end: "2026-01-31" }
+  # Fusion ERA5 (station = vérité, ERA5 = extension tails/saisonnalité). Actif dès la Phase 1.
+  era5:
+    enabled: true
+    source: "arco"               # 'arco' (point time-series rapide) | 'cds' (grille mensuelle) | 'file'
+    path: "../data/era5/era5_stations.nc"   # NetCDF ERA5 (grille ou déjà collocalisé)
+    collocated: false            # true si déjà aux points station ; false => interpolation bilinéaire
+    start: "1979-01-01"          # début de l'extension ERA5
+    # Téléchargement CDS (utilisé si source: cds ; nécessite ~/.cdsapirc)
+    cds:
+      dataset: "reanalysis-era5-single-levels"
+    # Correspondance variable ERA5 -> variable interne (conversions d'unités gérées en code).
+    variable_map:
+      "2t": temperature_c        # K -> °C
+      "2d": dew_point_c          # K -> °C
+      msl: pressure_sea_hpa      # Pa -> hPa
+      "10u": _u_wind             # composantes -> wind_speed_ms = sqrt(u²+v²)
+      "10v": _v_wind
+      tcc: cloud_cover_pct       # fraction [0,1] -> %
+      lcc: cloud_cover_low       # fraction -> (échelle station via bias-correction)
+      tp: precip_1h_mm           # m (cumul horaire) -> mm
+      # humidity_pct : dérivée de 2t & 2d (Magnus) si absente d'ERA5
+    fusion:
+      mode: "extend"             # 'extend' (préfixe ERA5 corrigé avant le début station) | 'off'
+      bias_correction: "mean_std_monthly"  # DECISION P1 : léger ; upgrade quantile-mapping possible
+      infill_long_gaps: true     # combler les longues lacunes station par ERA5 corrigé (flaggé)
+
+# --- Variables modélisées ----------------------------------------------------
+# Chaque variable : colonne master_hourly (moyenne France) ou motif par station,
+# son type (pour le transform Phase 3) et ses bornes physiques (QC Phase 1).
+variables:
+  temperature_c:
+    kind: gaussian               # quasi-gaussien après climatologie
+    bounds: [-40.0, 55.0]
+    tails: [lower, upper]        # EVT : chaud ET froid
+  wind_speed_ms:
+    kind: positive_skew          # >=0, asymétrique -> Yeo-Johnson/Weibull
+    bounds: [0.0, 75.0]
+    tails: [upper]
+    zero_inflated: true          # calmes (0)
+  pressure_sea_hpa:
+    kind: gaussian
+    bounds: [930.0, 1080.0]
+    tails: [lower, upper]
+  dew_point_c:
+    kind: gaussian
+    bounds: [-45.0, 40.0]
+    tails: [lower, upper]
+  # humidity_pct: NOT modeled directly (D3.2) — RH saturates at 100% (logit backfires) and
+  # is derivable from temperature + dew point. It is derived post-hoc in simulate.py.
+  cloud_cover_pct:
+    kind: bounded_01
+    bounds: [0.0, 100.0]
+    tails: []
+  precip_1h_mm:
+    kind: intermittent           # occurrence + intensité (hurdle / latent censuré)
+    bounds: [0.0, 60.0]          # borne physique horaire France (~40-50mm max)
+    tails: []                    # corps empirique seul : l'EVT sur précip (log→expm1) explose (D8.1)
+    wet_threshold_mm: 0.1        # seuil pluie/pas pluie
+
+# --- Phase 2 : climatologie (régression harmonique) --------------------------
+climatology:
+  use_local_solar_time: true
+  seasonal_harmonics: 3          # annuel + semi-annuel + ...
+  diurnal_harmonics: 3
+  interact_seasonal_diurnal: true
+  fit_variance: true             # log σ²(doy,hour) hétéroscédastique
+
+# --- Phase 4 : marginales EVT ------------------------------------------------
+marginals:
+  body: "empirical"              # corps empirique interpolé
+  tail_dist: "genpareto"         # GPD (peaks-over-threshold)
+  threshold_quantile: 0.95       # point de départ ; affiné par MRL/stabilité
+  season_stratified: false       # DECISION Phase 4 : par défaut tails poolées
+
+# --- Phase 5 : dépendance ----------------------------------------------------
+dependence:
+  copula: "t"                    # 't' (tail dependence) | 'gaussian'
+  spatial_model: "matern"        # 'matern' (gd-cercle) | 'shrinkage' (Ledoit-Wolf)
+  eof_variance: 0.90             # rang k = nb de PC pour ~90% de variance
+  var_order: 6                   # ordre du VAR latent (persistance courte ; AR(1) résiduel pour le reste)
+
+# --- Phase 6 : tendance climatique (externe, jamais estimée) -----------------
+trend:
+  enabled: false                 # off par défaut -> sortie stationnaire au climat observé
+  method: "qdm"                  # quantile delta mapping
+  ssp: "ssp245"                  # input simulation : 'ssp245' | 'ssp585' | ...
+  cmip6_deltas_path: null        # npz : 'quantiles' (nq) + (12,nq) par variable
+  baseline_year: 2020            # climat de référence (présent) du générateur
+  target_year: 2050              # horizon auquel les deltas CMIP6 s'appliquent
+  trend_variability: true        # deltas par quantile (changements variance/queues) vs médiane seule
+
+# --- Phase 7 : simulation ----------------------------------------------------
+simulate:
+  horizon_years: 20              # >= 20 ans
+  start_year: 2027
+  output_format: "netcdf"        # 'netcdf' | 'parquet'
+  enforce_constraints: true
+  # co-génère le vent 100 m conditionné au vent 10 m simulé (pour step iv EnR ; cf. wind100.py).
+  # Ajuster une fois via scripts/fit_wind100.py ; ignoré si le fichier est absent.
+  wind100_model: "models/wind100.pkl"
+
+# --- Phase 8 : validation ----------------------------------------------------
+validate:
+  acf_max_lag_h: 48
+  holdout_years: []              # ex. [2024, 2025] pour validation hors-échantillon
+  spell_focus: true              # pondère fortement persistance/épisodes

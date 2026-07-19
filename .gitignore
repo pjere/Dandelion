@@ -1,0 +1,60 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PriceModeling — commit CODE + DOCS + FIXTURES only. Everything a run produces
+# (data, caches, fitted models, reports, figures, the weather cube, the lake) is
+# regenerated from the pipeline and is NOT versioned. See docs/INSTALL.md.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# --- secrets ---------------------------------------------------------------
+.env
+.env.local
+*.cdsapirc
+
+# --- raw data, databases, the lake, the weather cube (all rebuildable) ------
+/data/
+*.db
+*.sqlite
+*.sqlite3
+*.duckdb
+*.nc
+*.parquet
+
+# --- per-model generated artifacts (calibrations, projections, caches) ------
+**/output/
+**/models/
+**/.cache/
+**/era5_cache/
+
+# --- generated reports & figures (committed docs are *.md, kept) ------------
+**/reports/*.json
+**/reports/*.html
+**/reports/*.csv
+**/reports/*.png
+**/reports/*.npz
+**/reports/figures/
+
+# --- legacy per-model workbooks (superseded by the root scenarios.xlsx, ADR-5)
+#     and generated workbook templates. Keep only scenarios.xlsx.
+assumptions*.xlsx
+**/assumptions*.xlsx
+*_template.xlsx
+**/*_template.xlsx
+
+# --- generated API docs (built on demand via scripts/build_docs.py) ---------
+/docs/api/
+
+# --- golden harness: keep baseline.json, ignore backups ---------------------
+golden/*.bak
+
+# --- logs -------------------------------------------------------------------
+*.log
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/

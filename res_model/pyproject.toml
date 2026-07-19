@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "res_model"
+version = "0.1.0"
+description = "Weather-to-RES production conversion for France (PV / onshore / offshore / run-of-river), step iv."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.11",
+    "xarray>=2023.12",
+    "pyarrow>=14",
+    "pyyaml>=6.0",
+    "pydantic>=2.5",
+    "pandera>=0.18",
+    "pvlib>=0.10",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+res-model = "res_model.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["res_model*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,22 @@
+# Corrections manuelles de la réconciliation des groupes de production.
+# Éditez ce fichier après avoir consulté le rapport data/reconciliation_report.csv,
+# puis relancez `python -m pricemodeling reconcile-units`.
+
+# Seuil de similarité (0-100) pour rattacher par fuzzy matching un libellé sans
+# EIC fiable à un groupe canonique existant.
+fuzzy_threshold: 92
+
+# Fusion d'EIC : différents codes EIC désignant en réalité le MÊME groupe.
+#   <eic_alias>: <eic_canonique>
+eic_merge: {}
+#   17W100P100P0721A: 17W100P100P0698Q
+
+# Nom canonique forcé pour un EIC donné (sinon nom le plus fréquent).
+#   <eic>: "Nom canonique"
+canonical_names: {}
+#   17W100P100P0698Q: "CHOOZ B 1"
+
+# Rattachement explicite d'un libellé brut (sans EIC exploitable) à un EIC.
+#   "<NOM BRUT>": <eic>
+name_to_eic: {}
+#   "TRANCHE GAZ CYCOFOS": 17W100P100P0xxxX

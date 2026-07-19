@@ -1,0 +1,69 @@
+# Configuration générale du pipeline PriceModeling.
+# Les secrets (identifiants API RTE) ne sont PAS ici : voir le fichier .env
+
+# Période globale d'extraction (UTC). La date de début effective de chaque source
+# est bornée par sa propre disponibilité (cf. start_date dans rte_catalog.yaml).
+period:
+  start: "2014-01-01"
+  end: "2026-12-31"        # borné automatiquement à "aujourd'hui" si dans le futur
+
+paths:
+  data_dir: "data"          # racine (relative au projet) pour le cache et la base
+  raw_subdir: "raw"         # data/raw/... : fichiers bruts (SYNOP .csv.gz, JSON RTE)
+  database: "pricemodeling.db"   # data/pricemodeling.db
+
+# --- Météo SYNOP -----------------------------------------------------------
+meteo:
+  enabled: true
+  # Liste de numéros de station à conserver. Vide => toutes les stations métropole.
+  stations: []
+  # Paramètres SYNOP à extraire (codes Météo-France) -> nom de colonne lisible.
+  # Voir https://donneespubliques.meteofrance.fr (doc "Données SYNOP essentielles OMM").
+  # ~22 paramètres : ils alimentent à la fois la moyenne France (master_hourly) ET le
+  # détail par station (table meteo_stations_hourly).
+  parameters:
+    t: temperature_c          # température (K -> °C)
+    td: dew_point_c           # point de rosée (K -> °C)
+    tw: wet_bulb_c            # température thermomètre mouillé (K -> °C)
+    tn12: temp_min_12h_c      # température minimale sur 12 h (K -> °C)
+    tx12: temp_max_12h_c      # température maximale sur 12 h (K -> °C)
+    u: humidity_pct           # humidité relative %
+    ff: wind_speed_ms         # vitesse du vent moy. 10 min (m/s)
+    dd: wind_dir_deg          # direction du vent (°)
+    raf10: gust_10min_ms      # rafale sur 10 min (m/s)
+    rafper: gust_period_ms    # rafale sur la période (m/s)
+    pmer: pressure_sea_hpa    # pression au niveau de la mer (Pa -> hPa)
+    pres: pressure_station_hpa # pression à la station (Pa -> hPa)
+    tend: pressure_tend_3h_hpa # tendance baro. 3 h (Pa -> hPa)
+    tend24: pressure_tend_24h_hpa # tendance baro. 24 h (Pa -> hPa)
+    n: cloud_cover_pct        # nébulosité totale %
+    nbas: cloud_cover_low     # nébulosité des nuages bas (octas)
+    hbas: cloud_base_m        # hauteur de base des nuages bas (m)
+    vv: visibility_m          # visibilité horizontale (m)
+    rr1: precip_1h_mm         # précipitations 1 h (mm)
+    rr3: precip_3h_mm         # précipitations 3 h (mm)
+    rr24: precip_24h_mm       # précipitations 24 h (mm)
+    ht_neige: snow_depth_m    # hauteur totale de neige (m)
+
+# --- RTE -------------------------------------------------------------------
+rte:
+  enabled: true
+  sandbox: false             # true => utilise les endpoints /sandbox (test sans souscription)
+  # Throttle minimal entre deux appels (s). RTE recommande de rester raisonnable.
+  min_interval_s: 1.0
+  # Le détail des API/ressources est dans config/rte_catalog.yaml
+
+# --- ENTSO-E (prix de marché historiques) ----------------------------------
+# Source : ENTSO-E Transparency Platform (https://transparency.entsoe.eu).
+# Token API : créer un compte gratuit, puis demander l'accès "Restful API" au support
+# (transparency@entsoe.eu) -> renseigner ENTSOE_TOKEN dans le fichier .env
+entsoe:
+  enabled: true
+  bidding_zone: "10YFR-RTE------C"   # zone de marché France (code EIC)
+  start: "2015-01-01"                # historique day-ahead disponible
+  # prix day-ahead = documentType A44 ; chunk max 1 an / appel
+
+# --- Fusion ----------------------------------------------------------------
+merge:
+  master_freq: "1h"          # pas de la table maître
+  timezone_local: "Europe/Paris"

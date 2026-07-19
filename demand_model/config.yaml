@@ -1,0 +1,88 @@
+# ============================================================================
+# demand_model — configuration unique (pas de chemin/constante en dur ailleurs).
+# ============================================================================
+run:
+  seed: 20260707
+  models_dir: "models"
+  reports_dir: "reports"
+  output_dir: "output"
+
+# --- Périmètre (fixé, cf. DECISIONS.md §3) -----------------------------------
+perimeter:
+  # cible = consommation RTE REALISED - pompage (le pompage relève du dispatch, step vi)
+  subtract_pumping: true
+  losses_embedded: true          # pertes réseau incluses (cohérent prix spot RTE)
+  demand_basis: "gross"          # demande brute + module BTM-PV explicite (netting)
+  resolution: "1h"               # natif 15 min agrégé à l'heure
+
+# --- Sources historiques (base pricemodeling) --------------------------------
+data:
+  sqlite_path: "../data/pricemodeling.db"
+  load:
+    table: "rte_consumption_short_term"
+    series: "REALISED"           # consommation réalisée
+    pumping_series_table: "rte_generation_per_type"
+    pumping_series_key: "HYDRO_PUMPED_STORAGE"   # négatif = pompage
+  weather:
+    master_table: "master_hourly"        # météo par station (meteo_<id>_<var>)
+    station_table: "dim_station"
+    bbox: { lat_min: 41.0, lat_max: 52.0, lon_min: -6.0, lon_max: 10.0 }  # métropole
+  period: { start: "2015-01-01", end: "2026-06-30" }
+  # fenêtres anomalies à flaguer/exclure de la tendance (cf. §7)
+  anomaly_windows:
+    covid: { start: "2020-03-15", end: "2021-06-30" }
+    sobriety: { start: "2022-09-01", end: "2023-04-30" }   # crise prix / sobriété
+
+# --- Météo effective (§5) ----------------------------------------------------
+effective_temperature:
+  weight_source: "population"     # 'consumption' | 'population' (poids dans workbook)
+  smoothing_halflives_h: [12, 60] # inertie thermique bâtiments (~12h, ~48-72h)
+  lagged_daily_means: [1, 2]      # T moyenne D-1, D-2
+  heating_threshold_c: null       # null => estimé sur données (14-16°C attendu)
+  cooling_threshold_c: null       # null => estimé (18-22°C attendu)
+
+irradiance:
+  method: "clearsky_cloud"        # GHI = clear-sky(pvlib) × f(nébulosité) (cf. DECISIONS)
+  clearsky_model: "ineichen"
+
+# --- Assumptions workbook (§6) -----------------------------------------------
+assumptions:
+  workbook: "../scenarios.xlsx"
+  scenarios: ["reference"]        # multi-scénario : liste des scénarios à projeter
+
+# --- Calibration (§7 Stage 1) ------------------------------------------------
+calibration:
+  estimator: "gam"                # 'gam' (pyGAM) | 'ridge'
+  holdout_years: [2025]           # backtest hors-échantillon
+  day_types: [mon, tue_thu, fri, sat, sun, holiday, pont]
+
+# --- Couche résiduelle stochastique (§7 Stage 3) -----------------------------
+residual:
+  ar_order: 2                     # AR(2) sur résidus standardisés
+  min_bucket_count: 50            # seuil sous lequel σ retombe sur la σ globale
+  innovations: "bootstrap"        # 'bootstrap' (queues épaisses) | 'gaussian'
+
+# --- Projection (§7 Stage 2) -------------------------------------------------
+projection:
+  horizon: { start_year: 2027, end_year: 2046 }
+  n_weather_draws: 50
+  weather_source: "weathergen"    # cube NetCDF produit par le générateur météo
+  weathergen_output: "../weathergen/output/simulation.nc"
+  anchor_year: 2026               # année de gel de la tendance calibrée (base figée ici)
+  residual_paths: 20              # tirages stochastiques de la couche résiduelle par scénario
+  # rescale composants statistiques par drivers (cf. Q&R phase 5)
+  base_shares: { residential: 0.45, tertiary: 0.40, industry: 0.15 }  # somme=1
+  # intensités bottom-up VE par segment (le workbook ne porte que la voiture)
+  ev_segments:
+    car: { km_per_year_var: km_per_car_year, kwh_per_km_var: kwh_per_km_car }
+    lcv: { km_per_year: 18000, kwh_per_km: 0.30 }   # utilitaire léger
+    hgv: { km_per_year: 90000, kwh_per_km: 1.30 }   # poids lourd
+  ev_cold_penalty_per_c: 0.0      # surconso VE par °C sous 5°C (0 = désactivé, flaggable)
+  btm_pv_performance_ratio: 0.80  # PR panneaux (GHI→génération)
+  outputs:
+    save_hourly_scenarios: ["reference"]   # scénarios dont on sauve la charge horaire complète
+
+# --- Validation (§8) ---------------------------------------------------------
+validation:
+  mape_target_pct: 3.0
+  winter_gradient_gw_per_c: { low: 2.0, high: 2.8 }   # ancrage RTE ~2.4 ±15%

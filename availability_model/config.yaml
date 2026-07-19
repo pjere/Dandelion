@@ -1,0 +1,74 @@
+# ============================================================================
+# availability_model (step v) — unit-level stochastic availability of the FR
+# dispatchable fleet. Single YAML drives the pipeline; mirrors steps (iii)/(iv).
+# ============================================================================
+run:
+  seed: 20260710
+  models_dir: "models"
+  reports_dir: "reports"
+  output_dir: "output"
+
+# --- Historical sources (pricemodeling DB) -----------------------------------
+# NB: there is NO REMIT/outage table in the DB (RTE unavailability API disabled/broken).
+# Outage history is INFERRED from per-unit production; see DECISIONS.md (D1).
+data:
+  sqlite_path: "../data/pricemodeling.db"
+  per_unit_table: "rte_generation_per_unit"              # per-unit production (outage proxy)
+  capacity_unit_table: "rte_installed_capacities_per_unit"
+  registry_table: "dim_production_unit"                  # eic_code, canonical_name, fuel_type
+  ntc_table: "rte_ntc"
+  water_reserves_table: "rte_water_reserves"
+  period: { start: "2015-01-01", end: "2026-06-30" }
+  # weather draws shared with steps (iii)/(iv)
+  weathergen_output: "../weathergen/output/simulation.nc"
+  # outage-inference thresholds (fraction of unit capacity)
+  inference:
+    # Production is a valid availability proxy ONLY for must-run units: a nuclear reactor at ~0 for
+    # weeks is on outage. For merit-order peakers/mid-merit (gas/oil/coal/pumped) low output is
+    # economic idling, not unavailability, so we do NOT infer their outages — their forced/planned
+    # rates come from the workbook EFOR defaults (Phase 2). RoR/reservoir low output is drought
+    # (owned by the res_model inflow side), also not an equipment outage.
+    inferable_techs: ["nuclear"]
+    outage_cf_max: 0.05          # daily CF below this => on outage
+    full_cf_min: 0.90            # daily CF above this => at full availability
+    min_outage_days: 2           # ignore sub-daily dips
+    derate_band: [0.05, 0.90]    # partial-derating state
+
+# --- Calibration windows (cf. DECISIONS D5) ----------------------------------
+calibration:
+  baseline_exclude:              # stress-corrosion crisis: OUT of baseline forced fit,
+    - { start: "2021-10-01", end: "2023-06-30" }   # USED to calibrate common_mode instead
+  planned_types:                 # nuclear planned-outage classes by duration (days)
+    ASR: { min: 25, max: 60 }    # simple refuelling
+    VP:  { min: 60, max: 110 }   # visite partielle
+    VD:  { min: 120, max: 300 }  # visite décennale (heavy right tail)
+  forced_max_days: 20            # inferred spells shorter than a planned type => forced
+  # REMIT ground-truth split (#81): of total nuclear unavailability, only ~8-13% is disclosed as UNPLANNED
+  # (businessType A54); the duration heuristic mislabels extended scheduled maintenance as forced (~40%). We
+  # fix forced to this share of the baseline and realise the rest as *extended planned* (scheduler duration
+  # multiplier), preserving the observed Kd. Set to null to restore the old residual-into-forced anchoring.
+  forced_share_nuclear: 0.10
+
+# --- Assumptions workbook (§5) -----------------------------------------------
+assumptions:
+  workbook: "../scenarios.xlsx"
+  scenarios: ["reference"]
+  # ±10% correction applies to the forced-outage TREND SLOPE by default (D2); switch to
+  # 'level' to apply it to the frequency level instead.
+  forced_correction_target: "slope"   # 'slope' | 'level'
+
+# --- Projection (§6.5) -------------------------------------------------------
+projection:
+  horizon: { start_year: 2027, end_year: 2046 }
+  n_draws: 50
+  outage_state_resolution: "1D"       # daily outage states, expanded to hourly on write
+  save_hourly: true
+  nuclear_max_concurrent_planned: 22  # grid-security cap on simultaneous nuclear planned outages (EDF)
+  vd_period_years: 10                 # décennale cadence (visite décennale every ~10 years)
+
+# --- Validation acceptance (§7) ----------------------------------------------
+validation:
+  nuclear_kd_noncrisis: { low: 0.73, high: 0.78 }   # historical non-crisis mean band
+  nuclear_kd_crisis_2022: 0.54
+  common_mode_return_years: { low: 15, high: 30 }
+  monthly_availability_tol_gw: 2.0
