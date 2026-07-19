@@ -36,15 +36,20 @@ def trigger_hours(year: int) -> int:
 
 def scheme_shares(zone: str, year: int, floors: dict[str, float],
                   new_build_mw: dict[str, float] | None = None,
-                  support_term: int = SUPPORT_TERM_YEARS) -> list[dict]:
+                  support_term: int = SUPPORT_TERM_YEARS, reg: pd.DataFrame | None = None) -> list[dict]:
     """Year-`year` RES bid tranches for `zone`, from the registry fleet + roll-off + new build.
 
     `floors` = {scheme: bid_floor} (economic constants, from the workbook). Subsidised schemes take the
     year's §51 trigger; `merchant` never triggers. `new_build_mw` = {scheme: MW} added for vintages beyond
     the registry (TYNDP trajectory) — defaults to none (existing-fleet roll-off only).
+
+    `reg` is the raw ``registry.read(zone=zone)`` frame; pass it to avoid re-reading the lake once per
+    projection year (the read is year-independent — the year only enters ``active``/roll-off below). When
+    None, the registry is read on demand (the standalone / test path).
     """
     from powersim_core import registry
-    reg = registry.read(zone=zone)
+    if reg is None:
+        reg = registry.read(zone=zone)
     reg = reg[reg["tech"].isin(RES_TECHS) & reg["scheme"].notna()].copy()
     reg = registry.active(reg, year)
     reg["cap"] = pd.to_numeric(reg["capacity_mw"], errors="coerce").fillna(0.0)

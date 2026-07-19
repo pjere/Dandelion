@@ -124,12 +124,16 @@ Docstrings carry the full contract; below is the "where do I look" index.
 - `stacks/fr_stack.py` (`build_fr_stack`, `srmc`), `stacks/costs.py` (SRMC constants / `EFF_RANGE`).
 - `neighbours/blocks.py` — aggregated stacks (`build_neighbour_stack`), DE unit-level
   (`build_de_unit_stack`), measured CHP must-run, `neighbour_netload`, zone aggregates (DE_REST).
-- `lp/multi_zone.py` (`solve_multizone` — the LP, price = balance dual), `lp/single_zone.py`.
+- `lp/multi_zone.py` (`solve_multizone` — the LP, price = balance dual; `_BACKEND` selects the solver),
+  `lp/highs_solver.py` (the default **direct-highspy** fast path — builds the same LP as sparse arrays,
+  byte-identical duals, no linopy per-window rebuild), `lp/single_zone.py`.
 - `res_schemes.py` — RES subsidy bid stack + §51 trigger fixed point (`solve_with_triggers`).
 - `rules.py` — per-zone/period market rules (IT/ES negative-price floors). `hydro/guide_curves.py`.
 - `rolling/windows.py` — shared per-window assembly (`fr_window`, `nb_window`, `fr_stack_base`).
 - `rolling/backtest.py` (`run_backtest`), `rolling/projection.py` (`project_year`,
   `project_trajectory`), `rolling/assemble.py` (`flow_derived_ntc`, coincident NTC).
+- `rolling/montecarlo.py` — **parallel Monte-Carlo** ensemble (`run_ensemble`, `ensemble_stats`): draws
+  across a process pool, each byte-identical to serial (deterministic `powersim_core.rng` per draw).
 - `markup.py` — the SMC→spot wedge (`build_panel`, `fit_markup`, `apply_markup`).
 - `tyndp.py` — capacity trajectories (`load_tyndp`, `tyndp_factors`, `flex_capacity_mw`).
 - `scheme_evolution.py` — year-varying RES tranches (`scheme_shares`, `trigger_hours`).

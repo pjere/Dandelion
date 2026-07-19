@@ -160,8 +160,11 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         w["musttake_res_mw"] = w["musttake_res_mw"] * nb_fac[z][1]
         nb_nl[z] = w
 
-    # year-varying RES subsidy tranches (roll-off + new build + §51 trigger schedule)
-    schemes = {z: scheme_shares(z, target_year, floors.get(z, {})) or ref["static"].get(z, []) for z in zones}
+    # year-varying RES subsidy tranches (roll-off + new build + §51 trigger schedule). The registry read
+    # is hoisted into `_preload` (`res_registry`) so it is not re-read from the lake once per year.
+    res_registry = ref.get("res_registry") or {}
+    schemes = {z: scheme_shares(z, target_year, floors.get(z, {}), reg=res_registry.get(z))
+               or ref["static"].get(z, []) for z in zones}
 
     price_chunks = []
     for w0, w1 in zip(ref["weeks"][:-1], ref["weeks"][1:]):
@@ -246,8 +249,18 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
     if avail_years:                                # #80: REMIT neighbour availability spread (opt-in; slow)
         from ..neighbour_availability import load_zone_stats
         avail_stats = load_zone_stats(neigh, avail_years)
+    from powersim_core import registry  # read each zone's registry ONCE (year-independent) and keep only
+
+    from ..scheme_evolution import RES_TECHS  # the RES rows scheme_shares needs — the full registry is
+    res_registry = {}                              # ~170k rows/zone; the RES slice is tiny (matters for the
+    for z in zones:                                # parallel MC, which holds `ref` once per worker).
+        try:
+            rz = registry.read(zone=z)
+            res_registry[z] = rz[rz["tech"].isin(RES_TECHS) & rz["scheme"].notna()].copy()
+        except (FileNotFoundError, KeyError, ValueError):
+            res_registry[z] = None
     return {"zones": zones, "neigh": neigh, "wb": wb, "ref_year": ref_year, "markup": markup,
-            "avail_stats": avail_stats, "tyndp": load_tyndp(wb),
+            "avail_stats": avail_stats, "tyndp": load_tyndp(wb), "res_registry": res_registry,
             "cm": CommodityModel.from_workbook(wb), "basis": load_zone_basis(wb),
             "floors": {z: {t["scheme"]: t["floor"] for t in static.get(z, [])} for z in zones},
             "static": static, "growth": _load_growth(wb),

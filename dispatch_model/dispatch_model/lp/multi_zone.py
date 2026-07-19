@@ -23,6 +23,11 @@ import xarray as xr
 
 _EPS_FLOW = 1e-3          # €/MWh gross-flow penalty → removes loop flows, keeps duals clean
 
+# Solver backend for the window LP. "highs" builds the LP directly in highspy (fast path,
+# byte-identical duals — see lp/highs_solver.py); "linopy" is the reference construction kept for
+# cross-checking. The linopy build dominates the 20-year projection wall-clock, so "highs" is default.
+_BACKEND = "highs"
+
 
 def _as_time_array(v, n: int) -> np.ndarray:
     a = np.asarray(v, float)
@@ -48,6 +53,10 @@ def solve_multizone(times, zones_data: dict, borders: list, ntc: dict,
 
     Returns per-zone prices, dispatch, flows, and water values.
     """
+    if _BACKEND == "highs":
+        from .highs_solver import solve_multizone_highs
+        return solve_multizone_highs(times, zones_data, borders, ntc, res_bid=res_bid, voll=voll,
+                                     price_floor=price_floor, res_tranches=res_tranches)
     T = pd.DatetimeIndex(times)
     zones = list(zones_data)
     m = linopy.Model()

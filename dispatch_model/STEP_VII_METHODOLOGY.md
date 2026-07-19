@@ -280,6 +280,46 @@ Monte-Carlo draw loop** — the same missing piece as the weathergen ensemble; t
 
 ---
 
+## Performance — the solver backend (`lp/highs_solver.py`)
+
+The window LP is solved thousands of times (21 years × 52 weeks × up to 3 §51 fixed-point iterations).
+Profiling the 20-year projection showed **~90 % of the wall-clock was linopy's model *construction*** —
+`xarray` index-alignment/merge on every `+`/`*`/`.sum()`, rebuilt from scratch for every solve — while the
+HiGHS solve itself was milliseconds. `lp/multi_zone.py` now defaults (`_BACKEND = "highs"`) to
+`lp/highs_solver.solve_multizone_highs`, which assembles the **identical** LP directly as a sparse ±1
+column matrix (every coefficient is ±1 — a pure balance/flow network) and hands it to HiGHS once. The
+linopy construction is retained as a cross-check backend.
+
+**Byte-identical**: the 2019 backtest prices are unchanged to machine precision (max abs diff ~1e-15,
+0 hours differing > 1e-6) — the golden artifact is untouched. The duals that define each zone's price come
+straight from the HiGHS row duals (`price = +row_dual` of the energy balance).
+
+Secondary result-neutral wins: the per-year plant-registry read is hoisted into `_preload`
+(`scheme_shares(..., reg=)`); one resident `Highs()` instance is reused across solves (avoids the ~85 ms
+constructor each time); the flows long-frame is built directly (the per-solve `melt` was a hotspot); and
+`stacks.fr_stack.srmc` is vectorised (was a per-unit `itertuples`). **Net: a 20-year projection's solve
+loop went from ~1 h (linopy) to ~11 min (~32 s/year × 21) — ≈5×** — with a one-time ~250 s preload
+(amortised across Monte-Carlo draws, which reuse the same reference).
+
+### Parallel Monte-Carlo (`rolling/montecarlo.py`)
+
+A single trajectory is ~11 min, so a large weathergen ensemble is run **across CPU cores** — the draws are
+embarrassingly parallel and each stays exact. `run_ensemble(config_path, years, draws, …)` distributes
+draws over a `ProcessPoolExecutor`; each worker does the deterministic ~250 s preload **once** and reuses
+it for every draw it handles. Two invariants make a parallel run **byte-identical to the serial one**: the
+preload is draw-independent, and every draw's randomness comes from `powersim_core.rng.draw_rng(seed,
+draw)` — a `SeedSequence` child keyed by the draw id, independent of process and order. Validated on real
+data: 3 draws (2030) with the #80 REMIT-availability spread give **max abs diff 0.0** between the serial
+and 2-worker runs, while the draws genuinely differ (cross-draw mean-price spread ≈3.9 €/MWh; BE
+121.5–125.4, CH 119.3–121.5, …). `ensemble_stats` returns the cross-draw P5/P50/P95 per (year, zone). The
+stochastic source is pluggable — #80 availability (`avail_years`) and/or the #77 weather-shape provider.
+
+Reaching *seconds per trajectory* (rather than per ensemble) would additionally need the **hourly
+decomposition** — the LP is separable by hour except for the weekly hydro-budget coupling (price hydro at
+its water value and each hour is an independent tiny dispatch) — which changes the solution method and so
+needs its own accuracy validation at degenerate price kinks. The parallel harness above is the
+accuracy-preserving route and is done.
+
 ## Contract & provenance
 
 - **Input**: step (vi) SMC (LP zonal duals). **Output**: hourly zonal day-ahead spot, historical (backtest)

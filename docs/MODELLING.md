@@ -151,8 +151,10 @@ dispatch prices badly. Detail: `dispatch_model/STEP_VII_METHODOLOGY.md`.
   national CF), not station-resolved weather — a full build would extend weathergen and the demand/RES
   models to each neighbour.
 - The headline 2026–2046 projection is a **deterministic central path on a fixed reference-year weather
-  shape**, not a weather-ensemble distribution — the machinery to run ensembles exists (`weather_shapes`
-  + per-draw availability) but the shipped trajectory is one path.
+  shape**, not a weather-ensemble distribution. The machinery to run ensembles is in place — the
+  `weather_shapes` hook + per-draw REMIT availability, and a **parallel Monte-Carlo harness**
+  (`dispatch_model/rolling/montecarlo.py`) that runs draws across cores byte-identically to serial — but
+  the *headline* figures quoted here are one central path, not a distribution.
 - **IT-North** markup quality is poor (negative R²) — a dispatch-side problem (IT scarcity premium / gas
   basis), documented not hidden.
 - 2040 capacity is a **starter TYNDP trajectory** (editable in `scenarios.xlsx`), and raw RTE/ENTSO-E
