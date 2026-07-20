@@ -63,6 +63,73 @@ MASTER_SOURCES = [
 ]
 
 
+# --- Repli ENTSO-E pour les trous de publication RTE -------------------------------------------------
+#
+# RTE est la source primaire de la production française, mais elle n'est pas infaillible : du 16 sept au
+# 13 oct 2024 la série `actual_generations_per_production_type` publie du nucléaire tantôt nul (149 h),
+# tantôt fortement déprimé (552 h sous 80 % de la référence), alors qu'ENTSO-E est complète sur la même
+# fenêtre. Vérifié en re-téléchargeant : RTE renvoie ces valeurs à l'identique, ce n'est pas un cache
+# périmé. Non corrigé, le proxy de disponibilité nucléaire y voyait une panne fantôme de ~25 GW, la France
+# passait 265 h sur l'effacement à 1767 EUR/MWh et le backtest 2024 sortait à +190 % d'erreur baseload
+# avec une corrélation de -0,007.
+#
+# Règle : là où une contrepartie ENTSO-E existe, on substitue quand RTE est manquant, ou nul face à une
+# production ENTSO-E franche, ou sous `FALLBACK_REL` de celle-ci. Le plancher absolu évite de déclencher
+# sur les petites filières où l'écart relatif est du bruit.
+#
+# `prod_hydro_pumped_storage` est volontairement EXCLU : RTE publie le pompage en net et l'ingestion
+# ENTSO-E écarte la jambe consommation, donc les deux divergent dans les 48 mois par construction. C'est
+# une différence de convention, pas un défaut — substituer y écraserait des données correctes.
+ENTSOE_FALLBACK = {
+    "prod_nuclear": "Nuclear",
+    "prod_fossil_gas": "Fossil Gas",
+    "prod_fossil_hard_coal": "Fossil Hard coal",
+    "prod_fossil_oil": "Fossil Oil",
+    "prod_biomass": "Biomass",
+    "prod_waste": "Waste",
+    "prod_hydro_water_reservoir": "Hydro Water Reservoir",
+    "prod_hydro_run_of_river_and_poundage": "Hydro Run-of-river and poundage",
+    "prod_solar": "Solar",
+    "prod_wind_onshore": "Wind Onshore",
+    "prod_wind_offshore": "Wind Offshore",
+}
+FALLBACK_FLOOR_MW = 200.0   # sous ce niveau ENTSO-E, l'écart relatif n'est pas significatif
+FALLBACK_REL = 0.80         # RTE sous 80 % d'ENTSO-E ⇒ défaut de publication, pas un écart de méthode
+
+
+def _entsoe_fr_hourly(engine: Engine, grid: pd.DatetimeIndex) -> pd.DataFrame:
+    """Production FR ENTSO-E ramenée au pas horaire, colonnes nommées comme leurs jumelles RTE."""
+    if not _table_exists(engine, "entsoe_generation"):
+        return pd.DataFrame(index=grid)
+    inv = {v: k for k, v in ENTSOE_FALLBACK.items()}
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            text("SELECT ts_utc, sub_key, value FROM entsoe_generation WHERE series_key='FR'"), conn)
+    if df.empty:
+        return pd.DataFrame(index=grid)
+    df = df[df["sub_key"].isin(inv)]
+    if df.empty:
+        return pd.DataFrame(index=grid)
+    df["hour"] = pd.to_datetime(df["ts_utc"], utc=True, format="mixed").dt.floor("h")
+    wide = df.pivot_table(index="hour", columns="sub_key", values="value", aggfunc="mean")
+    return wide.rename(columns=inv).reindex(grid)
+
+
+def _apply_entsoe_fallback(master: pd.DataFrame, ent: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Substitue ENTSO-E là où la série RTE est défaillante. Retourne (master, compte par colonne)."""
+    report: dict[str, int] = {}
+    for col in ENTSOE_FALLBACK:
+        if col not in master.columns or col not in ent.columns:
+            continue
+        rte, e = pd.to_numeric(master[col], errors="coerce"), pd.to_numeric(ent[col], errors="coerce")
+        usable = e.notna() & (e >= FALLBACK_FLOOR_MW)
+        bad = usable & (rte.isna() | (rte < FALLBACK_REL * e))
+        if bad.any():
+            master.loc[bad, col] = e[bad]
+            report[col] = int(bad.sum())
+    return master, report
+
+
 def _slug(value: str) -> str:
     s = re.sub(r"[^0-9A-Za-z]+", "_", str(value).strip()).strip("_").lower()
     return s or "na"
@@ -252,6 +319,9 @@ def build_master(
             continue
         master = master.join(_pivot_hourly(_read_long(engine, table), prefix, agg, grid))
 
+    # 1bis) Repli ENTSO-E là où la publication RTE est défaillante (cf. ENTSOE_FALLBACK)
+    master, fallback = _apply_entsoe_fallback(master, _entsoe_fr_hourly(engine, grid))
+
     # 2) Météo moyenne France
     master = master.join(_meteo_france_mean(engine, grid))
 
@@ -289,4 +359,7 @@ def build_master(
         "master_cols": out.shape[1],
         "fact_long_rows": detail_rows,
         "period": f"{start} -> {end}",
+        # heures substituées depuis ENTSO-E, par colonne : à surveiller, une hausse signale un nouveau
+        # trou de publication RTE plutôt qu'un problème de modèle
+        "entsoe_fallback_hours": fallback,
     }
