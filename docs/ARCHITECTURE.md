@@ -138,6 +138,16 @@ Docstrings carry the full contract; below is the "where do I look" index.
   `project_trajectory`), `rolling/assemble.py` (`flow_derived_ntc`, coincident NTC).
 - `rolling/montecarlo.py` — **parallel Monte-Carlo** ensemble (`run_ensemble`, `ensemble_stats`): draws
   across a process pool, each byte-identical to serial (deterministic `powersim_core.rng` per draw).
+- `surrogate/` — the **learned marginal-tranche model**. **PARKED: it failed the held-out-2024 price gate
+  and is not enabled anywhere** (see [MODELLING.md §7b](MODELLING.md) for the numbers and the reason).
+  Retained, tested and documented so the negative result is not re-derived; the LP is the only price path.
+  `tranches.py` — the 2019→2046-stable tranche taxonomy + the single exogenous-price SRMC entry point
+  (`tranche_srmc`, `srmc_vector`, `fuel_spreads`); `labels.py` — weak-supervised label derivation from
+  ENTSO-E alone (`derive_labels`, `label_quality`), Δ-response as filter + price proximity as selector,
+  defined over the price-**coupled** area; `features.py` — projection-available features only
+  (`zone_features`, `supply_curves`, `add_neighbour_context`, `assert_no_leakage`), ratios not levels;
+  `dataset.py` — the train/holdout panel (`build_panel`, `split`, `panel_summary`), CH excluded, split
+  **by year never by hour**.
 - `markup.py` — the SMC→spot wedge (`build_panel`, `fit_markup`, `apply_markup`).
 - `tyndp.py` — capacity trajectories (`load_tyndp`, `tyndp_factors`, `flex_capacity_mw`).
 - `scheme_evolution.py` — year-varying RES tranches (`scheme_shares`, `trigger_hours`).

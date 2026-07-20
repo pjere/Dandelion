@@ -120,6 +120,74 @@ it degrades gracefully in the high-RES/high-price 2040 regime instead of extrapo
 a multi-regime panel (2019 normal + 2022 gas crisis + 2023) with a quality gate that drops zone-years the
 dispatch prices badly. Detail: `dispatch_model/STEP_VII_METHODOLOGY.md`.
 
+## 7b. The learned marginal-tranche surrogate (opt-in, under construction)
+
+A 20-year hourly trajectory costs ~11 min of LP solving, which bounds how large a weathergen Monte-Carlo
+can be. The surrogate (`dispatch_model/surrogate/`) aims to predict **which tranche is marginal** and map
+that to a price analytically, **deferring to the exact LP whenever it is unsure**. The LP path is
+untouched and remains the default; the surrogate is opt-in and gated on beating LP+markup on held-out data.
+
+Four decisions define it, and each one is a guard against a way this could quietly go wrong:
+
+- **The target is latent.** ENTSO-E publishes prices, generation per production type, load, flows and
+  REMIT outages — never "which unit set the price". So the label is *constructed*: the Δ-generation
+  response is the **filter** (which plant could physically be marginal — it moved with residual demand),
+  and proximity to the observed clearing price is the **selector**. Every label carries a `confidence`
+  used as a sample weight; ambiguous hours are down-weighted, not silently guessed. Ranking movers by
+  *magnitude* rather than *cost* was measured and rejected (it finds the fleet's shock-absorber, not the
+  price-setter: ~48 % of FR hours mislabelled nuclear, 24-52 €/MWh implied-price error).
+- **Labels live on the price-coupled area, not the zone.** France shares an identical clearing price with
+  a neighbour in ~61-65 % of hours, so "which *French* tech is marginal" is wrong by construction there.
+  Pooling the coupled area's merit order lifted FR label agreement 68 %→90 % (2019).
+- **Features are projection-available and expressed as ratios.** Observed price and observed generation
+  are *forbidden* as inputs (`features.assert_no_leakage` enforces this) — they do not exist in 2046.
+  Tightness, RES share and fuel *spreads* recur across regimes where absolute megawatts never do, so a
+  2046 hour can land in seen ratio-space. The strongest single feature is `srmc_at_residual` — where
+  residual load sits on the zone's own supply curve — which turns the task into learning the *corrections*
+  (coupling, ramp, scarcity) rather than a price level from scratch.
+- **Splits are by year, never by hour**, since neighbouring hours are near-duplicates: train 2019 + 2022 +
+  2023 (normal / crisis / transition), hold out 2024 untouched.
+
+**Switzerland is excluded from training.** It is hydro-dominated, and hydro's opportunity cost is an
+endogenous water value (the LP's budget dual), not an SRMC — so an SRMC-derived label cannot represent it.
+Measured: 15-23 % agreement and 37-104 €/MWh error, against 5-7 €/MWh elsewhere. Including it would train
+the model on noise; fixing it needs a water-value head, which is deliberately out of scope for now.
+
+### Outcome: PARKED, and why (2026-07)
+
+The surrogate was built through the held-out-2024 price gate and **did not clear it**. The code remains in
+the tree, fully tested, behind a flag that is **not enabled**; the LP is and remains the only price path.
+Recorded here so the result is not rediscovered at cost:
+
+| held-out 2024, MAE €/MWh | label_oracle *(ceiling)* | merit_order *(no ML)* | surrogate_crf | surrogate_flat |
+|---|---|---|---|---|
+| BE | 29.5 | 32.1 | **29.4** | 30.7 |
+| DE_LU | 20.8 | 37.4 | 24.3 | **22.3** |
+| ES | 21.9 | **28.1** | 32.6 | 34.8 |
+| FR | 24.9 | **38.3** | 32.9 | 35.6 |
+| IT_NORTH | 25.9 | **16.7** | 17.9 | 17.7 |
+
+1. **The ceiling is too low to be worth chasing.** `label_oracle` — the price implied by the *true* derived
+   label — still errs by 21-30 €/MWh. That is label quality, not model capacity, so no amount of training
+   closes it. In IT_NORTH the oracle (25.9) is *worse than the trivial merit order* (16.7).
+2. **It loses to a no-ML baseline in 2 of 5 zones** (ES, IT_NORTH), where reading residual load off the
+   supply curve simply beats the trained model.
+3. **The Markov structure did not clearly earn its place.** Tranche accuracy was 59.9 % against a 56.1 %
+   majority-class floor, and the *best* accuracy in the whole sweep (61.7 %) came from the **chain-free**
+   variant. The CRF did win on price in 3 of 5 zones, which is the metric that matters — but from a level
+   that fails anyway.
+4. Negative and scarcity hours behaved as predicted: unrecoverable from a tranche label (scarcity MAE
+   150-300 €/MWh, and positive bias on every negative-price hour), confirming they must defer to the LP.
+
+**A methodological trap worth remembering**: the training split was briefly filtered to confidently-labelled
+hours. That punched holes in the hourly grid, sequences broke at every hole, FR training fragmented to a
+median 9 h block, most data was silently discarded, and the CRF's partial-supervision path never ran —
+holdout accuracy 38.8 % vs 60 % once fixed. `dataset.split` now keeps every hour and a regression test
+guards it.
+
+**If resumed**, the first move is label quality, not architecture — the oracle ceiling is the binding
+constraint. Hydro water value (which is why CH was dropped) and a setting-zone head are the obvious gaps.
+
 ## 8. Backtest vs projection
 
 - **Backtest** (`dispatch-model backtest`) clears a **historical** year against ENTSO-E actuals (real net
