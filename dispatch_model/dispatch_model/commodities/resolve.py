@@ -9,7 +9,7 @@ against synthetic fuel.
 
 This is the single read path for the exogenous price vector: `prices_at(ts)` replaces the old
 `rolling.assemble._month_prices`, and everything downstream (`stacks.fr_stack.srmc`,
-`surrogate.tranches.tranche_srmc`, the labels) consumes its output unchanged.
+`neighbours.blocks`) consumes its output unchanged.
 """
 from __future__ import annotations
 
