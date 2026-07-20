@@ -120,7 +120,11 @@ Docstrings carry the full contract; below is the "where do I look" index.
 
 ### `dispatch_model` — steps vi + vii (`dispatch-model <cmd>`)
 - `cli.py` / `pipeline.py` — `build-inputs`, `run` (projection), `backtest`, `validate`.
-- `commodities/model.py` — gas/CO₂/coal/oil, per-zone gas basis (`load_zone_basis`, `zone_prices`).
+- `commodities/model.py` — gas/CO₂/coal/oil scenario trajectory, per-zone gas basis (`zone_prices`);
+  `commodities/observed.py` — **dated observed price store** + `ingest_csv` (licensed or public, unit-
+  normalised); `commodities/resolve.py` — `PriceResolver`: **daily → monthly observed → scenario**
+  precedence with provenance (`explain`, `coverage_report`); `commodities/public_sources.py` — free
+  World Bank + ECB FX fallback; `commodities/gas_rules.py` — period gas rules (Iberian cap, hub basis).
 - `stacks/fr_stack.py` (`build_fr_stack`, `srmc`), `stacks/costs.py` (SRMC constants / `EFF_RANGE`).
 - `neighbours/blocks.py` — aggregated stacks (`build_neighbour_stack`), DE unit-level
   (`build_de_unit_stack`), measured CHP must-run, `neighbour_netload`, zone aggregates (DE_REST).

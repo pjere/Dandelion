@@ -280,6 +280,52 @@ Monte-Carlo draw loop** — the same missing piece as the weathergen ensemble; t
 
 ---
 
+## Fuel costs: real dated prices, not annual × seasonal shape
+
+Until this change every historical SRMC priced fuel as *annual level × a generic seasonal shape* (gas
+assumed to peak in winter). For 2022 — whose crisis peaked in **August** — that inverted the year: ~145
+€/MWh_th modelled in January against ~85 actual, and ~108 in August against **236**. Every 2022 SRMC was
+wrong by roughly 2× in both directions, which contaminated the crisis-year backtest *and* the markup
+(fitted on 2019+2022+2023).
+
+`commodities.resolve.PriceResolver` now resolves **daily observed → monthly observed → scenario** per
+commodity, with provenance (`explain`). Historical hours price against real dated fuel; projection years
+fall back to the scenario trajectory, unchanged. The shipped public default (World Bank Pink Sheet +
+ECB FX) reproduces actual TTF closely (2019 €14.6, 2022 €132.1, 2023 €41.4 /MWh_th); a licensed daily
+series drops in via `observed.ingest_csv` and takes precedence automatically. **EUA remains on the
+scenario path** — no open series was redistributable — and is the largest remaining fuel-input gap.
+
+`commodities.gas_rules` adds period gas rules: the **Iberian exception** (RDL 10/2022 — Spanish
+gas-for-power capped at €40/MWh_th from 15-Jun-2022, +€5/month thereafter) and a period-keyed hub basis.
+Both are *missing inputs, not wedges*: without them the markup absorbs a real regulatory regime as a fake
+"Spanish discount" and carries it into every projected year.
+
+**Measured effect** (mean over 6 zones):
+
+| year | \|baseload err\| | correlation |
+|---|---|---|
+| 2019 | 14.0% → **10.8%** | 0.619 → **0.668** |
+| 2022 | 21.0% → 25.4% | 0.352 → **0.464** |
+| 2023 | 17.5% → 17.5% | 0.673 → **0.705** |
+
+Correlation — the metric that matters at the SMC layer, since the markup can correct level but never
+timing — improved in all three years. The 2022 level regression is the ES cap slightly overshooting
+(cap-period ES went +48% → −27%, i.e. right direction, modest overshoot) plus the genuine scarcity wedge.
+
+Diagnostics that *ruled out* other explanations for the residual 2022 gap: the FR–ES NTC matches observed
+flows to the megawatt (p99.5 3337 MW vs actual max 3514) and the model reproduces the share of hours
+Spain is cheaper (86% vs 88% observed) while *under*-widening the spread — so coupling is not
+over-transmitting; and REMIT nuclear availability agrees with the output proxy to within 0.6 pp
+(annual 0.534 vs 0.528), so French supply is modelled correctly. The residual −50% FR gap in H2-2022 is
+scarcity/risk premium, i.e. the markup's job.
+
+**Markup refit on the corrected SMC improved every zone** — mean RMSE 58.4 → 54.4, mean R² 0.366 → 0.428,
+markup reduces price error in 6/6 zones. ES gained most (RMSE 46.7 → 37.0, R² 0.536 → 0.708), the direct
+payoff of moving the Iberian cap out of the wedge. Golden was deliberately re-baselined; all 34 deltas are
+confined to `dispatch/backtest_prices/year=2019` (max 14.4 €, mean 2.9 €).
+
+---
+
 ## Performance — the solver backend (`lp/highs_solver.py`)
 
 The window LP is solved thousands of times (21 years × 52 weeks × up to 3 §51 fixed-point iterations).

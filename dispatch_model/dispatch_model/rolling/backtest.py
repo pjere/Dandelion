@@ -15,14 +15,16 @@ import pandas as pd
 
 from powersim_core import lake
 
+from ..commodities.gas_rules import load_gas_rules
 from ..commodities.model import CommodityModel, load_zone_basis, zone_prices
+from ..commodities.resolve import PriceResolver
 from ..config import Config
 from ..io.entsoe_hist import load_generation_hist
 from ..io.fr_history import load_fr_netload
 from ..neighbours.blocks import build_neighbour_stack, constituents, neighbour_netload
 from ..res_schemes import load_res_schemes, solve_with_triggers
 from ..rules import rules_at
-from .assemble import _EXCLUDE_DISPATCH, NTC, _month_prices, flow_derived_ntc
+from .assemble import _EXCLUDE_DISPATCH, NTC, flow_derived_ntc
 from .windows import fr_stack_base, fr_window, nb_window
 
 
@@ -49,6 +51,10 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     wb = config.resolve(config.section("assumptions")["workbook"])
     cm = CommodityModel.from_workbook(wb)
     basis = load_zone_basis(wb)                                 # per-zone gas hub (PSV/MIBGAS vs TTF)
+    # Real dated fuel/ETS prices where they have been ingested, scenario trajectory otherwise. With an
+    # empty observed store this resolves exactly to the old `_month_prices` path (byte-identical).
+    resolver = PriceResolver(cm)
+    gas_rules = load_gas_rules(wb)          # hub basis + Iberian gas-for-power cap (RDL 10/2022)
     res_schemes = load_res_schemes(wb)                          # RES subsidy bid tranches per zone (§51)
 
     # ---- preload the year ----
@@ -95,10 +101,12 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         T = fr.loc[(fr.index >= w0) & (fr.index < w1)].index
         if len(T) < 24:
             continue
-        prices = _month_prices(cm, w0)
-        zd = {"FR": fr_window(fr, fr_stack, zone_prices(prices, "FR", basis), T, nuc_unavail_daily=nuc_unavail)}
+        prices = resolver.prices_at(w0)
+        zd = {"FR": fr_window(fr, fr_stack, zone_prices(prices, "FR", basis, w0, gas_rules), T,
+                          nuc_unavail_daily=nuc_unavail)}
         for z in neigh:
-            zd[z] = nb_window(z, nb_stack[z], nb_nl[z], nb_res[z], zone_prices(prices, z, basis), T)
+            zd[z] = nb_window(z, nb_stack[z], nb_nl[z], nb_res[z],
+                              zone_prices(prices, z, basis, w0, gas_rules), T)
         borders = [b for b in NTC if b[0] in zd and b[1] in zd]
         # market rules effective in THIS window (IT/ES were floored at 0 before TIDE / Dec-2023)
         res_bid, price_floor = rules_at(wb, w0, list(zd))

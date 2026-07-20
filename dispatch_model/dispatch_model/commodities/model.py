@@ -73,9 +73,19 @@ def load_zone_basis(path) -> dict[str, float]:
     return {str(z): float(v) for z, v in zip(g["zone"], g["value"], strict=False)}
 
 
-def zone_prices(prices: dict, zone: str, basis: dict) -> dict:
-    """Commodity prices as seen by `zone` — gas at its own hub (TTF + basis); others are EU-wide."""
+def zone_prices(prices: dict, zone: str, basis: dict, ts=None, gas_rules=None) -> dict:
+    """Commodity prices as seen by `zone` — gas at its own hub (TTF + basis); others are EU-wide.
+
+    With `ts` and `gas_rules` (see `commodities.gas_rules`) the gas price additionally honours
+    period-specific rules: a time-varying hub basis and any regulatory ceiling on gas-for-power (the
+    Iberian exception capped ES gas from 15-Jun-2022, so Spanish CCGTs set the price off a capped fuel
+    cost while TTF traded far higher). Without them the behaviour is the original flat basis.
+    """
     b = float(basis.get(zone, 0.0))
+    if gas_rules:
+        from .gas_rules import adjust_gas
+        gas = adjust_gas(prices["gas"], zone, ts, gas_rules, flat_basis=b)
+        return {**prices, "gas": gas}
     return prices if b == 0.0 else {**prices, "gas": prices["gas"] + b}
 
 

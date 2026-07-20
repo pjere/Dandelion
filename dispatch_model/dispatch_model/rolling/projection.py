@@ -20,7 +20,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ..commodities.gas_rules import load_gas_rules
 from ..commodities.model import CommodityModel, load_zone_basis, zone_prices
+from ..commodities.resolve import PriceResolver
 from ..config import Config
 from ..io.entsoe_hist import load_generation_hist
 from ..io.fr_history import load_fr_netload
@@ -30,7 +32,7 @@ from ..res_schemes import load_res_schemes, solve_with_triggers
 from ..rules import rules_at
 from ..scheme_evolution import scheme_shares, trigger_hours
 from ..tyndp import flex_capacity_mw, load_tyndp, tyndp_factors
-from .assemble import _EXCLUDE_DISPATCH, NTC, _month_prices, flow_derived_ntc
+from .assemble import _EXCLUDE_DISPATCH, NTC, flow_derived_ntc
 from .windows import fr_stack_base, fr_window, nb_window
 
 # default structural CAGRs (editable — dispatch_projection tab). RES build-out dominates the negative-price
@@ -172,10 +174,12 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         if len(T) < 24:
             continue
         w0_t = w0 + pd.DateOffset(years=k)                     # commodity + market-rule year = the target
-        prices = _month_prices(cm, w0_t)
-        zd = {"FR": fr_window(fr, fr_stack, zone_prices(prices, "FR", basis), T)}
+        prices = ref["resolver"].prices_at(w0_t)
+        zd = {"FR": fr_window(fr, fr_stack,
+                              zone_prices(prices, "FR", basis, w0_t, ref.get("gas_rules")), T)}
         for z in neigh:
-            zd[z] = nb_window(z, nb_stack[z], nb_nl[z], ref["nb_res"][z], zone_prices(prices, z, basis), T)
+            zd[z] = nb_window(z, nb_stack[z], nb_nl[z], ref["nb_res"][z],
+                              zone_prices(prices, z, basis, w0_t, ref.get("gas_rules")), T)
         borders = [b for b in NTC if b[0] in zd and b[1] in zd]
         res_bid, price_floor = rules_at(wb, w0_t, list(zd))
         try:
@@ -230,6 +234,7 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
     zones = [z for z in config.all_zones if z != "GB"]
     neigh = [z for z in zones if z != "FR"]
     wb = config.resolve(config.section("assumptions")["workbook"])
+    cm = CommodityModel.from_workbook(wb)
     fr = load_fr_netload(config, f"{ref_year}-01-01", f"{ref_year + 1}-01-01").set_index("timestamp_utc")
     nb_stack = {z: build_neighbour_stack(config, z, ref_year) for z in neigh}
     nb_stack = {z: s[~s["tech"].isin(_EXCLUDE_DISPATCH)].reset_index(drop=True) for z, s in nb_stack.items()}
@@ -261,7 +266,8 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
             res_registry[z] = None
     return {"zones": zones, "neigh": neigh, "wb": wb, "ref_year": ref_year, "markup": markup,
             "avail_stats": avail_stats, "tyndp": load_tyndp(wb), "res_registry": res_registry,
-            "cm": CommodityModel.from_workbook(wb), "basis": load_zone_basis(wb),
+            "cm": cm, "basis": load_zone_basis(wb), "resolver": PriceResolver(cm),
+            "gas_rules": load_gas_rules(wb),
             "floors": {z: {t["scheme"]: t["floor"] for t in static.get(z, [])} for z in zones},
             "static": static, "growth": _load_growth(wb),
             "fr": fr, "fr_stack": fr_stack_base(config), "nb_stack": nb_stack,
