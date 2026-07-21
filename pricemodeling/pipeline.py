@@ -235,5 +235,24 @@ def cmd_status():
         typer.echo(f"  {name:40s} {n:>12,} lignes")
 
 
+@app.command("qc-sources")
+def cmd_qc_sources(
+    strict: bool = typer.Option(False, help="Sort en code 1 s'il reste des divergences inexpliquées"),
+):
+    """Compare la production RTE et ENTSO-E, mois par mois et par filière.
+
+    À lancer après une extraction : le repli de `build-master` répare les trous RTE en silence, donc sans
+    ce contrôle un nouveau défaut de source deviendrait invisible. `--strict` permet de l'utiliser comme
+    garde-fou automatique.
+    """
+    from .qc import report
+
+    engine, _ = _engine_and_settings()
+    text_out, n = report(engine)
+    typer.echo(text_out)
+    if strict and n:
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     app()

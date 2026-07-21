@@ -78,7 +78,13 @@ Docstrings carry the full contract; below is the "where do I look" index.
 
 ### `pricemodeling` — ETL (`python -m pricemodeling <cmd>`)
 - `pipeline` — the Typer CLI: `init-db`, `rte-token`, `extract-meteo`, `extract-rte`, `extract-entsoe`,
-  `ingest-remit`, `reconcile-units`, `build-master`, `all`, `status`.
+  `ingest-remit`, `reconcile-units`, `build-master`, `all`, `status`, `qc-sources`.
+- `qc.py` — **contrôle de cohérence RTE ↔ ENTSO-E** (`source_divergence`, `unexplained`, `report`).
+  `build-master` replie sur ENTSO-E là où RTE est défaillant (voir `merge/build_master.ENTSOE_FALLBACK`),
+  ce qui répare le symptôme mais rendrait un nouveau défaut de source invisible : ce contrôle le garde
+  observable. Symétrique (contrairement au repli, qui ne traite que les creux), et il distingue les
+  incidents instruits (`KNOWN_INCIDENTS`) de ce qui reste à investiguer. `qc-sources --strict` sort en
+  code 1 en présence de divergences inexpliquées.
 - `meteo/synop.py`, `meteo/stations.py` — SYNOP download/parse → `synop_obs`, `dim_station`.
 - `rte/` — `auth.py` (OAuth2), `client.py` (chunk/retry/cache), `catalog.py`, `extract.py`.
 - `entsoe/` — `series.py` (prices/load/gen/flows), `unavailability.py` (**REMIT**:
