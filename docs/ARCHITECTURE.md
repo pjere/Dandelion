@@ -131,7 +131,16 @@ Docstrings carry the full contract; below is the "where do I look" index.
   normalised); `commodities/resolve.py` — `PriceResolver`: **daily → monthly observed → scenario**
   precedence with provenance (`explain`, `coverage_report`); `commodities/public_sources.py` — free
   World Bank + ECB FX fallback; `commodities/gas_rules.py` — period gas rules (Iberian cap, hub basis).
-- `stacks/fr_stack.py` (`build_fr_stack`, `srmc`), `stacks/costs.py` (SRMC constants / `EFF_RANGE`).
+- `stacks/fr_stack.py` (`build_fr_stack`, `srmc`, `_topup_to_installed`), `stacks/costs.py` (SRMC
+  constants / `EFF_RANGE`). Avec `year`, le parc est **millésimé** : unités réellement en service +
+  complément agrégé pour le parc diffus (voir `io/fr_fleet.py` : `active_units`, `installed_by_tech`,
+  `latest_fleet_year`). Sans `year`, comportement historique inchangé.
+- `hydro/water_value.py` — **valeur de l'eau en courbe de tranches** (`calibrate`, `curve_from_shares`,
+  `expand_stack`, `apply_water_value`, `load_curves`) : l'hydraulique de lac est offerte selon son coût
+  d'opportunité, calibré sur (prix, production) observés, avec une tranche de débit réservé offerte sous
+  zéro et une tranche résiduelle de rareté qui préserve la capacité totale.
+- `price_metrics.py` — **métriques de valorisation** (`capture_price`, `capture_rate`,
+  `duration_curve_distance`, `tail_counts`, `valuation_report`) : ce que le baseload ne montre pas.
 - `neighbours/blocks.py` — aggregated stacks (`build_neighbour_stack`), DE unit-level
   (`build_de_unit_stack`), measured CHP must-run, `neighbour_netload`, zone aggregates (DE_REST).
 - `lp/multi_zone.py` (`solve_multizone` — the LP, price = balance dual; `_BACKEND` selects the solver),

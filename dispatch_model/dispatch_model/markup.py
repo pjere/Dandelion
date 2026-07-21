@@ -93,7 +93,7 @@ def zone_drivers(config: Config, year: int) -> dict[str, pd.DataFrame]:
     zones = [z for z in config.all_zones if z != "GB"]
     out: dict[str, pd.DataFrame] = {}
 
-    frs = fr_stack_base(config)
+    frs = fr_stack_base(config, year)
     fr_firm = float(frs.loc[frs["tech"].isin(_FIRM), "capacity_mw"].sum())
     fr = load_fr_netload(config, f"{year}-01-01", f"{year + 1}-01-01")
     out["FR"] = pd.DataFrame({"timestamp_utc": pd.to_datetime(fr["timestamp_utc"], utc=True),
@@ -258,3 +258,59 @@ def save_model(config: Config, model: dict) -> str:
 
 def load_model(config: Config) -> dict:
     return json.loads((config.reports_dir / "markup_model.json").read_text())
+
+
+# ---------------------------------------------------------------------------------------------------
+# Variante monotone : corriger le niveau sans toucher à l'ordre des heures
+# ---------------------------------------------------------------------------------------------------
+# Le wedge par régression horaire corrige bien le niveau mais déforme la structure : mesuré sur FR 2024,
+# le taux de capture solaire passe de 0,697 (LP brut, contre 0,676 observé) à 1,104 — un taux supérieur à
+# 1 signifierait que le solaire produit aux heures chères, l'inverse de la cannibalisation réelle. Il
+# triple aussi la MAE en 2019 (8,3 -> 22,9) tout en aidant en 2022 : un wedge unique ne peut pas servir
+# des régimes dont l'écart varie d'un facteur cinq.
+#
+# Ici le wedge est une fonction **monotone du seul SMC**, ajustée par appariement de quantiles. Trois
+# propriétés en découlent :
+#   - l'ordre des heures est préservé exactement, donc la structure horaire du LP — qui est bonne — n'est
+#     pas abîmée ;
+#   - le niveau ET la forme de la distribution (négatifs, pointes) sont corrigés par construction ;
+#   - c'est une fonction pure du SMC, donc applicable en projection : quand la distribution des SMC se
+#     déplace avec la pénétration RES, l'image se déplace avec elle.
+# Le prix est la perte de la logique de rareté par driver (tightness) — que les mesures désignent
+# justement comme nuisible.
+N_QUANTILES = 199
+
+
+def fit_markup_monotone(panel: pd.DataFrame, n_q: int = N_QUANTILES) -> dict:
+    """Appariement de quantiles SMC → spot par zone. Renvoie les nœuds d'une interpolation monotone."""
+    out: dict[str, dict] = {}
+    qs = np.linspace(0.0, 1.0, n_q)
+    for z, g in panel.groupby("zone"):
+        s = pd.to_numeric(g["smc"], errors="coerce")
+        o = pd.to_numeric(g["observed"], errors="coerce")
+        ok = s.notna() & o.notna()
+        if ok.sum() < 200:
+            continue
+        xs = np.quantile(s[ok].to_numpy(float), qs)
+        ys = np.quantile(o[ok].to_numpy(float), qs)
+        # quantiles empiriques déjà triés ; on force la stricte croissance en x pour que np.interp
+        # reste bien défini quand le SMC est plat (FR est à 7 EUR/MWh sur la moitié de l'année)
+        xs = np.maximum.accumulate(xs + np.arange(len(xs)) * 1e-9)
+        out[z] = {"x": xs.tolist(), "y": np.maximum.accumulate(ys).tolist()}
+    return {"kind": "monotone", "nodes": out, "n_q": int(n_q)}
+
+
+def apply_markup_monotone(model: dict, zone: str, smc: pd.Series,
+                          floor: float = -500.0, voll: float = 4000.0) -> pd.Series:
+    """Applique la carte monotone. Hors des nœuds, on prolonge par décalage constant plutôt que par
+    extrapolation linéaire : un SMC 2046 très au-delà de l'historique ne doit pas être amplifié."""
+    nd = model.get("nodes", {}).get(zone)
+    v = smc.to_numpy(float)
+    if not nd:
+        return smc.clip(floor, voll)
+    x, y = np.asarray(nd["x"], float), np.asarray(nd["y"], float)
+    out = np.interp(v, x, y, left=np.nan, right=np.nan)
+    lo, hi = v < x[0], v > x[-1]
+    out[lo] = v[lo] + (y[0] - x[0])
+    out[hi] = v[hi] + (y[-1] - x[-1])
+    return pd.Series(np.clip(out, floor, voll), index=smc.index)

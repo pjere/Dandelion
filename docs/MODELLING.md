@@ -108,6 +108,42 @@ market premiums, merchant ≈0) with the German **§51 EEG trigger** cancelling 
 negative hours, solved as a fixed point. Hydro reservoirs get weekly energy budgets from historical guide
 curves, and their water value is the dual of the budget cap. Detail: `dispatch_model/METHODOLOGY.md`.
 
+### 6b. Le parc français est millésimé, et l'hydraulique a une valeur de l'eau (2026-07)
+
+Deux corrections structurelles du cœur du dispatch, mesurées et documentées ici parce qu'elles déplacent
+tous les prix.
+
+**Le stack FR était le parc *maximum historique*, pas celui de l'année modélisée.** Le scan de capacité
+portait sur tout l'historique sans filtre de déclassement, et seules les unités déclarées groupe par
+groupe par RTE y entraient. D'où, face à la capacité installée : +156 % de charbon (Vitry, Bouchain, La
+Maxe, fermées en 2015, y figuraient encore), +134 % de fioul (Aramon, Porcheville), Flamanville 3 présente
+dès 2019 — et à l'inverse −75 % d'hydraulique de lac (2 140 MW contre 8 702 installés), −33 % de gaz,
+−88 % de biomasse, tout le parc diffus étant absent. `io.fr_fleet` filtre désormais sur les unités
+réellement en service dans l'année et comble l'écart avec l'installé RTE par un bloc agrégé, pris au bas
+de la bande de rendement (les unités trop petites pour être déclarées sont les moins performantes).
+
+*Effet mesuré, et il faut le lire correctement* : FR 2024 passe de −52,9 % à **−65,1 %** d'erreur baseload.
+Le stack corrigé **dégrade** la métrique de niveau — parce que l'ancien compensait une erreur par une
+autre : 6,3 GW de charbon et fioul morts soutenaient artificiellement les prix. La vraie sous-évaluation
+est de −65 %, elle était simplement masquée. Les taux de capture, eux, s'améliorent (solaire FR 2024 :
+écart au réel de −0,057 à +0,020). Une erreur masquée est pire qu'une erreur exposée, a fortiori en
+projection où la compensation par du charbon mort ne survivrait pas.
+
+**L'hydraulique de lac est offerte en courbe de tranches** (`hydro/water_value.py`), plus en bloc unique au
+VOM. Un budget dur et une valeur de l'eau scalaire sont équivalents dans un LP — le dual du budget *est* la
+valeur de l'eau — et produisent un comportement tout-ou-rien. La courbe, calibrée sur les couples (prix
+observé, production observée), reproduit ce qu'un scalaire ne peut pas : 13-25 % de la capacité produit
+**même à prix négatif** (débit réservé, offert sous zéro, ce qui préserve la queue négative là où un
+`min_gen_frac` dur la supprimerait), et l'élasticité est graduelle car un parc agrège des retenues aux
+coûts d'opportunité différents.
+
+*Effet mesuré, mitigé et à connaître* : FR 2024 gagne (MAE 40,3 → 34,7, corrélation 0,59 → 0,66),
+IT_NORTH gagne en niveau (−7,1 → −1,3 %), mais **CH se dégrade** (+29,7 → +37,5 %, MAE 27,9 → 32,7) et
+reste à instruire. Surtout, l'objectif déclaré **n'est pas atteint** : la distribution française reste
+dégénérée, 69 % des heures à 7,0 €/MWh. La cause est arithmétique — 63 GW de nucléaire à prix unique
+contre 8,7 GW d'hydraulique différenciée. **Différencier l'offre nucléaire est le prochain verrou**, et
+c'est aussi ce qui rend le markup insoluble aujourd'hui (voir §7).
+
 ## 7. Step vii — the SMC→spot markup (the "wedge")
 
 The LP returns *marginal cost*; real **day-ahead spot** sits above it on average and is more volatile
@@ -119,6 +155,24 @@ extrapolate to 2040). Economic sign constraints keep the wedge non-decreasing in
 it degrades gracefully in the high-RES/high-price 2040 regime instead of extrapolating absurdly. Fitted on
 a multi-regime panel (2019 normal + 2022 gas crisis + 2023) with a quality gate that drops zone-years the
 dispatch prices badly. Detail: `dispatch_model/STEP_VII_METHODOLOGY.md`.
+
+**Ce markup est un problème mal posé aujourd'hui, et le savoir évite de le réajuster en boucle.** Mesuré
+hors échantillon (ajusté sur 2019+2022, testé sur 2023/2024) puis après correction du stack :
+
+- il **triple l'erreur** en 2019 (FR : MAE 8,3 brut → 22,9 avec markup) tout en aidant en 2022 — un wedge
+  unique ne peut pas servir des régimes dont l'écart varie d'un facteur cinq ;
+- il **détruit la métrique de valorisation** : capture solaire FR 2024 à 1,104 contre 0,676 observé, là où
+  le LP brut sort 0,697. Un taux supérieur à 1 signifierait que le solaire produit aux heures chères ;
+- il est **instable** : retirer une seule année d'entraînement dégrade *toutes* les cellules.
+
+Une variante monotone (appariement de quantiles SMC→spot, préservant l'ordre des heures) a été essayée et
+**échoue** : 6 864 heures négatives contre 352 observées en FR 2024. La raison vaut d'être retenue —
+la distribution des SMC est **dégénérée** (69 % des heures à 7,0 €/MWh), et aucune transformation, additive,
+multiplicative ou monotone, ne peut extraire une distribution réaliste d'une masse ponctuelle. Le code de
+cette variante reste dans `markup.py` (`fit_markup_monotone`) mais **n'est pas utilisé**.
+
+**Conclusion : le markup ne pourra être ajusté correctement qu'après avoir cassé la dégénérescence**, donc
+après avoir différencié l'offre nucléaire (§6b). Le réajuster avant est du réglage sur un problème mal posé.
 
 ## 7b. A learned surrogate was tried and rejected (2026-07)
 

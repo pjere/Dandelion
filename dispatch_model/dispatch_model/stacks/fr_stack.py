@@ -23,11 +23,17 @@ FLEX = {
 _THERMAL = {"gas", "coal", "lignite", "oil", "biomass"}
 
 
-def build_fr_stack(config: Config, fleet: pd.DataFrame | None = None) -> pd.DataFrame:
-    """→ per-unit stack with static attributes (efficiency, min_gen, ramp). SRMC added per month by `srmc`."""
+def build_fr_stack(config: Config, fleet: pd.DataFrame | None = None,
+                   year: int | None = None) -> pd.DataFrame:
+    """→ per-unit stack with static attributes (efficiency, min_gen, ramp). SRMC added per month by `srmc`.
+
+    Avec `year`, le parc est celui de l'année (unités réellement en service) et l'écart avec la capacité
+    installée RTE est comblé par un bloc agrégé par filière — voir `io.fr_fleet` pour les deux défauts
+    corrigés. Sans `year`, comportement historique inchangé.
+    """
     if fleet is None:
         from ..io.fr_fleet import load_fr_fleet
-        fleet = load_fr_fleet(config)
+        fleet = load_fr_fleet(config, year)
     rng = np.random.default_rng(config.seed)
     rows = []
     for _, u in fleet.sort_values("unit_id").iterrows():
@@ -38,7 +44,39 @@ def build_fr_stack(config: Config, fleet: pd.DataFrame | None = None) -> pd.Data
         rows.append({"unit_id": u["unit_id"], "name": u["name"], "tech": tech,
                      "capacity_mw": float(u["capacity_mw"]), "efficiency": eff,
                      "min_gen_frac": mn, "ramp_frac": ramp, "vom": VOM.get(tech, 2.5)})
-    return pd.DataFrame(rows)
+    st = pd.DataFrame(rows)
+    if year is not None:
+        st = _topup_to_installed(config, st, year, rng)
+    return st
+
+
+def _topup_to_installed(config: Config, st: pd.DataFrame, year: int, rng) -> pd.DataFrame:
+    """Comble l'écart entre la capacité installée RTE et la somme des unités déclarées, par filière.
+
+    Le parc diffus (petites centrales, cogénération, hydraulique de vallée) n'est pas publié groupe par
+    groupe et manquait donc entièrement : -6 562 MW de lac, -4 151 MW de gaz, -1 266 MW de biomasse en 2024.
+
+    Le bloc de complément prend le **bas** de la bande de rendement : ce sont précisément les unités trop
+    petites ou trop anciennes pour être déclarées individuellement, donc les moins performantes du parc.
+    Leur attribuer le rendement médian les placerait à tort trop bas dans l'ordre de mérite.
+    """
+    from ..io.fr_fleet import MIN_TOPUP_MW, installed_by_tech
+
+    inst = installed_by_tech(config, year)
+    if not inst:
+        return st
+    have = st.groupby("tech")["capacity_mw"].sum().to_dict()
+    extra = []
+    for tech, cap_inst in inst.items():
+        gap = float(cap_inst) - float(have.get(tech, 0.0))
+        if gap < MIN_TOPUP_MW or tech not in FLEX and tech not in EFF_RANGE:
+            continue
+        lo, hi = EFF_RANGE.get(tech, (np.nan, np.nan))
+        mn, ramp = FLEX.get(tech, (0.0, 1.0))
+        extra.append({"unit_id": f"FR_{tech}_diffus", "name": f"{tech} diffus", "tech": tech,
+                      "capacity_mw": gap, "efficiency": float(lo) if np.isfinite(lo) else np.nan,
+                      "min_gen_frac": mn, "ramp_frac": ramp, "vom": VOM.get(tech, 2.5)})
+    return pd.concat([st, pd.DataFrame(extra)], ignore_index=True) if extra else st
 
 
 def srmc(stack: pd.DataFrame, prices_month: dict[str, float]) -> pd.Series:

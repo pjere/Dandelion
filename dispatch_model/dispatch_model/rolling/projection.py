@@ -256,6 +256,7 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
         avail_stats = load_zone_stats(neigh, avail_years)
     from powersim_core import registry  # read each zone's registry ONCE (year-independent) and keep only
 
+    from ..io.fr_fleet import latest_fleet_year
     from ..scheme_evolution import RES_TECHS  # the RES rows scheme_shares needs — the full registry is
     res_registry = {}                              # ~170k rows/zone; the RES slice is tiny (matters for the
     for z in zones:                                # parallel MC, which holds `ref` once per worker).
@@ -270,7 +271,7 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
             "gas_rules": load_gas_rules(wb),
             "floors": {z: {t["scheme"]: t["floor"] for t in static.get(z, [])} for z in zones},
             "static": static, "growth": _load_growth(wb),
-            "fr": fr, "fr_stack": fr_stack_base(config), "nb_stack": nb_stack,
+            "fr": fr, "fr_stack": fr_stack_base(config, latest_fleet_year(config)), "nb_stack": nb_stack,
             "nb_nl": nb_nl, "nb_res": nb_res, "ntc": flow_derived_ntc(config, ref_year),
             "weeks": pd.date_range(f"{ref_year}-01-01", f"{ref_year + 1}-01-01", freq="7D", tz="UTC")}
 

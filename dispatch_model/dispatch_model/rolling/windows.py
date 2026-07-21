@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+from ..hydro.water_value import apply_water_value
 from ..neighbours.blocks import heat_factor, measured_chp_mw
 from ..stacks.fr_stack import build_fr_stack, srmc
 from .assemble import _EXCLUDE_DISPATCH
@@ -25,9 +26,13 @@ GB_IMPORT_TRANCHES = {"GB_IMP1": (2500.0, 52.0), "GB_IMP2": (1500.0, 110.0)}
 _DSR = [(0.03, 300.0), (0.03, 1000.0), (0.05, 4000.0)]
 
 
-def fr_stack_base(config) -> pd.DataFrame:
-    """FR unit-level stack (dispatchables only) + the GB border-import tranches."""
-    st = build_fr_stack(config)
+def fr_stack_base(config, year: int | None = None) -> pd.DataFrame:
+    """FR unit-level stack (dispatchables only) + the GB border-import tranches.
+
+    `year` sélectionne le parc de l'année : unités réellement en service, et complément agrégé pour le
+    parc diffus absent du reporting groupe par groupe (voir `io.fr_fleet`).
+    """
+    st = build_fr_stack(config, year=year)
     st = st[~st["tech"].isin(_EXCLUDE_DISPATCH)].reset_index(drop=True)
     gb = pd.DataFrame([{"unit_id": uid, "name": uid, "tech": "import", "capacity_mw": cap,
                         "min_gen_frac": 0.0, "efficiency": np.nan, "ramp_frac": 1.0, "vom": 0.0}
@@ -55,7 +60,8 @@ def fr_window(fr, stack, prices, T, nuc_unavail_daily=None) -> dict:
     rolling-max-of-output proxy), and the window's actual reservoir energy as the hydro budget."""
     h = fr.loc[T]
     s = price_gb_tranches(stack, srmc(stack, prices).to_numpy())
-    st = stack.assign(srmc_eur_mwh=s)
+    # la valeur de l'eau ecrase le SRMC des tranches hydrauliques : leur cout d'opportunite, pas leur VOM
+    st = apply_water_value(stack.assign(srmc_eur_mwh=s))
     st = pd.concat([st, dsr_tranches("FR", float(h["demand_mw"].max()))], ignore_index=True)
     nuc_cap = st.loc[st["tech"] == "nuclear", "capacity_mw"].sum()
     if nuc_unavail_daily is not None:
@@ -95,7 +101,7 @@ def apply_measured_mustrun(st, zone, T) -> pd.DataFrame:
 def nb_window(zone, stack, nl, res, prices, T) -> dict:
     """Neighbour zone dict for one window: block SRMC, measured seasonal must-run (DE_LU), DSR tranches,
     reservoir budget from the window's actual generation."""
-    st = stack.assign(srmc_eur_mwh=srmc(stack, prices).to_numpy())
+    st = apply_water_value(stack.assign(srmc_eur_mwh=srmc(stack, prices).to_numpy()))
     st = apply_measured_mustrun(st, zone, T)                     # DE_LU: MaStR-measured seasonal must-run
     w = nl.reindex(T).interpolate().ffill().bfill()
     st = pd.concat([st, dsr_tranches(zone, float(w["load_mw"].max()))], ignore_index=True)

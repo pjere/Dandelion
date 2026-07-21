@@ -59,7 +59,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
 
     # ---- preload the year ----
     fr = load_fr_netload(config, f"{year}-01-01", f"{year + 1}-01-01").set_index("timestamp_utc")
-    fr_stack = fr_stack_base(config)
+    fr_stack = fr_stack_base(config, year)
     nb_stack = {}
     for z in list(neigh):
         try:                                    # DE_REST (virtual NL+AT+DK+PL+CZ) only has generation for
@@ -72,6 +72,12 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
             neigh.remove(z)
             zones.remove(z)
     nb_stack = {z: s[~s["tech"].isin(_EXCLUDE_DISPATCH)].reset_index(drop=True) for z, s in nb_stack.items()}
+    # valeur de l'eau : le bloc hydraulique unique a 1 EUR/MWh devient une courbe de tranches calibree,
+    # calculee une fois par annee (cf. hydro.water_value)
+    from ..hydro.water_value import expand_stack, load_curves
+    curves = load_curves(config, year, tuple(["FR"] + list(neigh)))
+    fr_stack = expand_stack(fr_stack, curves, "FR")
+    nb_stack = {z: expand_stack(s, curves, z) for z, s in nb_stack.items()}
     nb_nl = {z: neighbour_netload(config, z, year).set_index("timestamp_utc") for z in neigh}
     for z in list(neigh):                       # a zone with load data missing for this year → drop it (else
         if nb_nl[z].empty:                      # its empty net-load yields a degenerate LP time coord)
