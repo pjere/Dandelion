@@ -44,6 +44,7 @@ ALL_BORDERS = BORDERS + DE_REST_BORDERS
 
 T_LOAD, T_GEN, T_FLOW, T_NTC = "entsoe_load", "entsoe_generation", "entsoe_flows", "entsoe_ntc"
 T_PRICE, T_CAP = "entsoe_day_ahead_prices", "entsoe_installed_capacity"
+T_HYDRO = "entsoe_hydro_storage"
 
 
 def _client(token: str):
@@ -145,6 +146,30 @@ def ingest_generation(engine, client, start: date, end: date, zones=None, force=
                 return frames
             total += _do(engine, lambda z=area, c0=c0, c1=c1: client.query_generation(z, start=c0, end=c1),
                          T_GEN, f"entsoe:gen:{z}", f"{z}_{c0.date()}", force, build)
+    return total
+
+
+def ingest_hydro_storage(engine, client, start: date, end: date, zones=None, force=False) -> int:
+    """Remplissage hebdomadaire des reservoirs (ENTSO-E 16.1.D), en MWh d'energie stockee.
+
+    C'est l'equivalent de `rte_water_reserves` pour les zones voisines : sans lui, la valeur de l'eau
+    structurelle (`dispatch_model.hydro.bellman`) ne peut etre calibree que pour la France, alors que la
+    Suisse — hydraulique a 80 % — est justement la zone ou le modele derape le plus.
+
+    La serie est hebdomadaire : un point par semaine, pas horaire comme les autres.
+    """
+    ensure_rte_table(engine, T_HYDRO)
+    total = 0
+    for z, area in (zones or ZONES).items():
+        for c0, c1 in _year_chunks(start, end):
+            def build(df, z=z):
+                if isinstance(df, pd.DataFrame):
+                    df = df.iloc[:, 0]
+                return [_long(df.index, z, "reservoir", "stored_mwh", df.values)]
+            total += _do(engine,
+                         lambda z=area, c0=c0, c1=c1:
+                             client.query_aggregate_water_reservoirs_and_hydro_storage(z, start=c0, end=c1),
+                         T_HYDRO, f"entsoe:hydro:{z}", f"{z}_{c0.date()}", force, build)
     return total
 
 

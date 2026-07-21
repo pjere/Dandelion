@@ -144,6 +144,59 @@ dégénérée, 69 % des heures à 7,0 €/MWh. La cause est arithmétique — 63
 contre 8,7 GW d'hydraulique différenciée. **Différencier l'offre nucléaire est le prochain verrou**, et
 c'est aussi ce qui rend le markup insoluble aujourd'hui (voir §7).
 
+### 6c. Valeur de l'eau structurelle : arbitrage de Bellman (2026-07)
+
+La courbe de §6b est **descriptive** — préférence révélée : on observe le comportement passé et on en
+déduit un prix de réserve implicite. Elle ne modélise aucun arbitrage et subit une circularité (calibrée
+sur des prix observés pour produire les prix du modèle). `hydro/bellman.py` calcule la vraie grandeur :
+
+    V_t(S) = E[ max_u  R_t(u) + V_{t+1}( min(S + I_t − u, S_max) ) ]        λ_t(S) = ∂V_t/∂S
+
+`λ_t(S)` est le prix auquel offrir l'eau. Trois éléments font le travail qu'un ajustement de courbe ne
+fait pas : `R_t(u)` est **concave** (l'eau va d'abord aux heures chères, ce qui étale la production
+structurellement) ; la récursion donne une valeur qui dépend **du stock et de la saison** ; le
+**déversement** est explicite, donc λ s'effondre à réservoir plein.
+
+Deux points de méthode, tous deux des corrections d'erreurs faites en chemin :
+- **itération sur la valeur relative** — sans actualisation V croît d'un gain annuel constant et ne
+  converge jamais en niveau ; seules ses différences convergent, et λ étant un gradient le décalage est
+  sans effet ;
+- **balayage Gauss-Seidel** — lire l'itération précédente ne propage l'information que d'une semaine par
+  balayage (λ encore en mouvement au 40ᵉ) ; réutiliser la valeur qui vient d'être calculée propage
+  l'année entière, et converge en 3 à 5 balayages.
+
+**Données** : `rte_water_reserves` (FR) et `entsoe_hydro_storage` (16.1.D — CH/ES/IT, ingéré par
+`pricemodeling.entsoe.series.ingest_hydro_storage`, série **hebdomadaire** contrairement aux autres).
+Les apports sont inférés par bilan `ΔStock + production`, sur **toute** la production tirant sur la
+retenue (STEP comprises) : n'y mettre que la filière « reservoir » sous-estime les soutirages donc les
+apports, et rendait l'eau trop chère. Le déversement n'étant pas publié, le stock est borné à `S_max` et
+les semaines à moins de 2 % du plafond sont écartées.
+
+**Validation — écart entre utilisation impliquée et observée du parc, 2024 :**
+
+| zone | sans débit réservé | avec | observée |
+|---|---|---|---|
+| FR | −4,8 pts | **−0,3** | 0,228 |
+| CH | −6,8 | **−1,8** | 0,275 |
+| IT_NORTH | −7,6 | **+2,7** | 0,398 |
+| ES | −3,4 | **−4,2** | 0,167 |
+
+Écart absolu moyen 5,65 → 2,25 points. Le **débit réservé** (turbinage minimal, calibré au 5ᵉ centile de
+la production observée) est une contrainte *physique* — obligations de débit, irrigation, navigation — que
+l'arbitrage pur ne peut pas produire ; sans lui la SDP sous-utilisait le parc de 15 à 25 % dans les quatre
+zones, biais de même signe partout.
+
+**Réserve : l'Espagne ne s'améliore pas.** Sa fonction valeur sature (λ 120,4 → 120,7 malgré des apports
+en hausse, plage [63..125] tassée en haut). Cause probable : `S_max` est pris au maximum observé, or les
+retenues espagnoles servent d'abord l'**irrigation** — on attribue au marché une capacité qui ne lui est
+pas disponible. Il faudrait une capacité utile pour l'électricité, faute de données non établie ici.
+
+**Non câblé dans le LP.** La SDP donne une valeur *par zone et par semaine* — l'agrégation en un réservoir
+équivalent écrase l'hétérogénéité du parc, que la courbe empirique de §6b capture. La synthèse visée est :
+λ_t(S_t) fixe le **niveau**, la dispersion empirique **étale** les tranches autour, le débit réservé reste
+une contrainte. Restent aussi des prix déterministes (seuls les apports sont aléatoires) et la circularité
+prix↔valeur de l'eau, à traiter par point fixe.
+
 ## 7. Step vii — the SMC→spot markup (the "wedge")
 
 The LP returns *marginal cost*; real **day-ahead spot** sits above it on average and is more volatile

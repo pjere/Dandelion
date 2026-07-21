@@ -68,6 +68,8 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
 
     # per-zone generation, RES tranches, ENS, DUMP
     zinfo = {}
+    # index de diagnostic (cf. lp.diagnostics) : renseignes ici, jamais lus par la resolution
+    res_cols, ens_cols, dump_cols, srmc_by_unit, res_schemes = {}, {}, {}, {}, {}
     floor_da = {z: (float(price_floor[z]) if isinstance(price_floor, dict) else float(price_floor)) for z in zones}
     for z in zones:
         st = zones_data[z]["stack"]
@@ -87,18 +89,24 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         t_idx = np.tile(np.arange(n), m)
         rows.append(zrow[z] + t_idx); cols.append(gbase + np.arange(m * n)); vals.append(np.ones(m * n))
         gen_cols[z] = (gbase, m, units, st["tech"].to_numpy())
+        srmc_by_unit[z] = srmc
+        srmc_by_unit[z] = srmc
 
         trs, rp = _tranches_for(z, zones_data, res_bid, res_tranches, n)
+        res_schemes[z] = [sc for _sh, _f, sc in trs]
         ntr = len(trs)
         r_up = np.concatenate([share * rp for share, _f, _s in trs])
         r_cost = np.concatenate([f for _sh, f, _s in trs])
         rbase = add_block(r_cost, np.zeros(ntr * n), r_up)
         rows.append(zrow[z] + np.tile(np.arange(n), ntr))
         cols.append(rbase + np.arange(ntr * n)); vals.append(np.ones(ntr * n))
+        res_cols[z] = (rbase, ntr)
 
         ebase = add_block(np.full(n, voll), np.zeros(n), np.full(n, _INF))    # ENS
+        ens_cols[z] = ebase
         rows.append(zrow[z] + np.arange(n)); cols.append(ebase + np.arange(n)); vals.append(np.ones(n))
         dbase = add_block(np.full(n, -floor_da[z]), np.zeros(n), np.full(n, _INF))   # DUMP (cost = -floor)
+        dump_cols[z] = dbase
         rows.append(zrow[z] + np.arange(n)); cols.append(dbase + np.arange(n)); vals.append(-np.ones(n))
 
         zinfo[z] = {"demand": np.asarray(zones_data[z]["demand"], float)}
@@ -146,6 +154,8 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         "col_cost": np.concatenate(col_cost), "col_lo": np.concatenate(col_lo), "col_up": np.concatenate(col_up),
         "row_lower": row_lower, "row_upper": row_upper, "coo": (R, C, V),
         "bal_dual_ix": bal_dual_ix, "flow_cols": flow_cols, "ecap_rows": ecap_rows, "T": T,
+        "gen_cols": gen_cols, "res_cols": res_cols, "ens_cols": ens_cols, "dump_cols": dump_cols,
+        "srmc_by_unit": srmc_by_unit, "res_schemes": res_schemes,
     }
 
 
@@ -173,7 +183,7 @@ def _get_highs():
     return _HIGHS
 
 
-def _solve_and_read(h, spec, price_sign):
+def _solve_and_read(h, spec, price_sign, diagnose: bool = False):
     if h.run() != highspy.HighsStatus.kOk or h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
         raise RuntimeError(f"highs LP not optimal: {h.getModelStatus()}")
     sol = h.getSolution()
@@ -191,12 +201,19 @@ def _solve_and_read(h, spec, price_sign):
     else:
         flows = pd.DataFrame(columns=["time", "border", "flow_mw"])
     water = {k: float(-rd[r]) for k, r in spec["ecap_rows"].items()}
-    return {"prices": prices, "flows": flows, "water_values": water, "objective": float(h.getObjectiveValue())}
+    out = {"prices": prices, "flows": flows, "water_values": water,
+           "objective": float(h.getObjectiveValue())}
+    if diagnose:                       # lecture seule de la solution primale (cf. lp.diagnostics)
+        from .diagnostics import binding_flows, marginal_report
+        out["diag"] = marginal_report(spec, cv, prices)
+        out["diag_flows"] = binding_flows(spec, cv, {})
+    return out
 
 
 def solve_multizone_highs(times, zones_data: dict, borders: list, ntc: dict,
                           res_bid=-10.0, voll: float = 15000.0, price_floor=-500.0,
-                          res_tranches: dict | None = None, price_sign: float = 1.0) -> dict:
+                          res_tranches: dict | None = None, price_sign: float = 1.0,
+                          diagnose: bool = False) -> dict:
     """Cold-build + solve one window's dispatch LP directly in HiGHS. Same contract as
     ``multi_zone.solve_multizone`` (returns per-zone prices, flows, water values, objective).
 
@@ -213,4 +230,4 @@ def solve_multizone_highs(times, zones_data: dict, borders: list, ntc: dict,
     lp.a_matrix_.start_ = indptr; lp.a_matrix_.index_ = indices; lp.a_matrix_.value_ = data
     h = _get_highs()
     h.passModel(model)
-    return _solve_and_read(h, spec, price_sign)
+    return _solve_and_read(h, spec, price_sign, diagnose)
