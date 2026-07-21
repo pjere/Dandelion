@@ -36,6 +36,10 @@ PARQUET_ARTIFACTS = [
     "data/lake/res/proj_drivers/realization=0/part.parquet",
     "data/lake/res/production/scenario=reference/realization=0/part.parquet",
     "data/lake/dispatch/backtest_prices/year=2019/part.parquet",
+    # 2024 est l'année qui a révélé le trou de publication RTE (FR à +190 % d'erreur baseload,
+    # corrélation -0,007) : la garder sous surveillance numérique évite qu'une régression du même type
+    # repasse inaperçue, d'autant que le repli ENTSO-E la corrige désormais en silence.
+    "data/lake/dispatch/backtest_prices/year=2024/part.parquet",
 ]
 JSON_ARTIFACTS = [
     "availability_model/reports/validation_report.json",
