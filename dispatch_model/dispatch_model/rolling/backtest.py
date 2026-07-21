@@ -45,7 +45,8 @@ def _observed_prices(config, year, zones):
 
 
 def run_backtest(config: Config, year: int, n_weeks: int | None = None,
-                 use_remit_nuclear_avail: bool = False, de_unit_level: bool = False) -> dict:
+                 use_remit_nuclear_avail: bool = False, de_unit_level: bool = False,
+                 nuclear_curve: bool = True) -> dict:
     zones = [z for z in config.all_zones if z != "GB"]
     neigh = [z for z in zones if z != "FR"]
     wb = config.resolve(config.section("assumptions")["workbook"])
@@ -78,6 +79,12 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     curves = load_curves(config, year, tuple(["FR"] + list(neigh)))
     fr_stack = expand_stack(fr_stack, curves, "FR")
     nb_stack = {z: expand_stack(s, curves, z) for z, s in nb_stack.items()}
+    # meme traitement pour le nucleaire FR : 63 GW a un prix unique rendaient le prix francais degenere
+    # (marginal 78,6 % des heures a exactement 7,0 EUR/MWh). Cf. stacks.nuclear_curve.
+    if nuclear_curve:
+        from ..stacks import nuclear_curve as nuc
+        nuc_installed = float(fr_stack.loc[fr_stack["tech"] == "nuclear", "capacity_mw"].sum())
+        fr_stack = nuc.expand_stack(fr_stack, nuc.load_curve(config, year, nuc_installed))
     nb_nl = {z: neighbour_netload(config, z, year).set_index("timestamp_utc") for z in neigh}
     for z in list(neigh):                       # a zone with load data missing for this year → drop it (else
         if nb_nl[z].empty:                      # its empty net-load yields a degenerate LP time coord)

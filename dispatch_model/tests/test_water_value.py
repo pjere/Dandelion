@@ -10,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from dispatch_model.hydro.water_value import (
+    BID_COL,
     DEFAULT_CURVE,
     MUSTFLOW_BID,
     SCARCITY_WV,
@@ -83,7 +84,7 @@ def test_capacite_totale_conservee_par_les_tranches():
 
 def test_vom_s_ajoute_a_la_valeur_de_l_eau():
     rows = tranche_rows("CH", 1000.0, HydroCurve("CH", ((0.2, 40.0),)), vom=2.5)
-    assert np.isclose(rows["water_value_eur_mwh"].iloc[0], 42.5)
+    assert np.isclose(rows[BID_COL].iloc[0], 42.5)
 
 
 def test_expansion_du_stack_remplace_le_bloc_unique():
@@ -104,7 +105,7 @@ def test_zone_sans_courbe_reste_inchangee():
 
 def test_application_ecrase_le_srmc_hydraulique_seulement():
     st = pd.DataFrame({"tech": ["gas", "hydro_reservoir"], "srmc_eur_mwh": [90.0, 1.0],
-                       "water_value_eur_mwh": [np.nan, 41.0]})
+                       BID_COL: [np.nan, 41.0]})
     out = apply_water_value(st)
     assert out["srmc_eur_mwh"].tolist() == [90.0, 41.0]
 

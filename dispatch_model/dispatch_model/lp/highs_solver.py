@@ -90,7 +90,6 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         rows.append(zrow[z] + t_idx); cols.append(gbase + np.arange(m * n)); vals.append(np.ones(m * n))
         gen_cols[z] = (gbase, m, units, st["tech"].to_numpy())
         srmc_by_unit[z] = srmc
-        srmc_by_unit[z] = srmc
 
         trs, rp = _tranches_for(z, zones_data, res_bid, res_tranches, n)
         res_schemes[z] = [sc for _sh, _f, sc in trs]

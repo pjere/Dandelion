@@ -23,141 +23,67 @@ Deux faits que le bloc unique ne peut pas reproduire :
 
 La courbe est calibrée par zone sur les couples (prix observé, production observée), rendue monotone, puis
 convertie en tranches. Le budget énergétique reste en garde-fou mais ne devrait plus mordre.
+
+Le moteur de calibration lui-même est dans `stacks.revealed` — il est générique et sert aussi au nucléaire
+(`stacks.nuclear_curve`). Ici ne restent que les constantes propres à l'eau et le chargement par zone.
+Voir aussi `hydro.bellman` : la valeur de l'eau **structurelle** par programmation dynamique, qui donne le
+niveau de λ là où cette courbe-ci en donne la dispersion.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from functools import lru_cache
 
 import numpy as np
-import pandas as pd
+
+from ..stacks import revealed
+from ..stacks.revealed import BID_COL, MIN_HOURS_PER_BIN, SupplyCurve, apply_bids
 
 #: bornes de prix pour la calibration (EUR/MWh) — resserrées là où la densité d'heures est forte
 PRICE_BINS = (-np.inf, 0.0, 10.0, 25.0, 40.0, 60.0, 80.0, 120.0, np.inf)
-#: valeur de l'eau attribuée à chaque tranche : borne basse de la classe, la première offrant sous zéro
-#: (débit réservé : l'eau s'écoule même payée négativement)
+#: valeur de l'eau attribuée à la première tranche : le débit réservé, qui s'écoule même payé négativement
 MUSTFLOW_BID = -15.0
-MIN_HOURS_PER_BIN = 20
 #: valeur de l'eau de la tranche residuelle. La courbe empirique mesure la production *habituelle*, pas la
 #: capacite *disponible* : le reste du parc peut produire en tension, on ne l'observe simplement jamais aux
-#: prix historiques. L'omettre revient a effacer de la capacite reelle — mesure sur CH, ou tronquer a 39,9 %
-#: retirait 3,5 GW et faisait passer l'erreur baseload de +29,7 a +68,5 %. Cette valeur n'est pas calibree
-#: (l'observation ne la contient pas) : c'est une hypothese, volontairement au-dessus du SRMC thermique.
+#: prix historiques. Cette valeur n'est pas calibree (l'observation ne la contient pas) : c'est une
+#: hypothese, volontairement au-dessus du SRMC thermique.
 SCARCITY_WV = 200.0
 DEFAULT_CURVE = ((0.15, MUSTFLOW_BID), (0.10, 25.0), (0.10, 60.0), (0.10, 120.0))
 
+#: nom historique de la courbe hydraulique ; le moteur est générique depuis l'ajout du nucléaire
+HydroCurve = SupplyCurve
+#: `apply_water_value` reste le nom d'appel côté hydraulique
+apply_water_value = apply_bids
 
-@dataclass(frozen=True)
-class HydroCurve:
-    """Courbe d'offre hydraulique d'une zone : tranches (part de capacité, valeur de l'eau EUR/MWh).
-
-    `capacity_mismatch` est vrai quand la production observée dépassait la capacité déclarée : la courbe a
-    été écrêtée à 100 % et la capacité du stack de cette zone est à corriger en amont.
-    """
-    zone: str
-    tranches: tuple[tuple[float, float], ...]
-    capacity_mismatch: bool = False
-
-    @property
-    def total_share(self) -> float:
-        return float(sum(s for s, _ in self.tranches))
+__all__ = ["BID_COL", "DEFAULT_CURVE", "MIN_HOURS_PER_BIN", "MUSTFLOW_BID", "PRICE_BINS", "SCARCITY_WV",
+           "HydroCurve", "apply_water_value", "calibrate", "curve_from_shares", "empirical_shares",
+           "expand_stack", "load_curves", "tranche_rows"]
 
 
-def empirical_shares(price: pd.Series, output: pd.Series, capacity: float,
-                     bins=PRICE_BINS, min_hours: int = MIN_HOURS_PER_BIN) -> pd.DataFrame:
-    """Part moyenne de capacité produite par classe de prix. Les classes trop peu peuplées sont écartées."""
-    if capacity <= 0:
-        return pd.DataFrame(columns=["lo", "share", "hours"])
-    df = pd.DataFrame({"p": price, "q": pd.to_numeric(output, errors="coerce") / capacity}).dropna()
-    if df.empty:
-        return pd.DataFrame(columns=["lo", "share", "hours"])
-    df["bin"] = pd.cut(df["p"], bins=list(bins), right=False)
-    g = df.groupby("bin", observed=True)["q"].agg(["mean", "count"])
-    g = g[g["count"] >= min_hours]
-    return pd.DataFrame({"lo": [iv.left for iv in g.index], "share": g["mean"].to_numpy(),
-                         "hours": g["count"].to_numpy()})
+def empirical_shares(price, output, capacity, bins=PRICE_BINS, min_hours: int = MIN_HOURS_PER_BIN):
+    """Part moyenne de capacité produite par classe de prix, aux bornes hydrauliques."""
+    return revealed.empirical_shares(price, output, capacity, bins, min_hours)
 
 
-def curve_from_shares(zone: str, shares: pd.DataFrame) -> HydroCurve:
-    """Parts par classe de prix → tranches monotones cumulables.
-
-    La monotonie est imposée par cummax : une courbe d'offre ne peut pas décroître quand le prix monte, et
-    le bruit d'échantillonnage en produit (CH : 0,297 à 40-60 puis 0,225 à 60-80). Sans cette contrainte on
-    obtiendrait des tranches à part négative, économiquement absurdes.
-    """
-    if shares.empty:
-        return HydroCurve(zone, DEFAULT_CURVE)
-    s = shares.sort_values("lo").copy()
-    cum = np.maximum.accumulate(s["share"].to_numpy(float))
-    # Une part cumulée > 1 signifie que la production observée dépasse la capacité déclarée au stack :
-    # c'est une incohérence de données, pas une courbe. Mesuré sur FR 2024 : 155 % (production de lac
-    # jusqu'à 5 212 MW contre 2 140 MW au stack, alors que le parc lac+éclusée réel avoise 8-10 GW).
-    # On écrête plutôt que de fabriquer de la capacité, et `capacity_mismatch` le signale à l'appelant.
-    s["share"] = np.clip(cum, 0.0, 1.0)
-    lo = s["lo"].to_numpy(float)
-    lo = np.where(np.isfinite(lo), lo, MUSTFLOW_BID)
-    lo[0] = MUSTFLOW_BID                       # la première tranche est le débit réservé
-    inc = np.diff(np.concatenate([[0.0], s["share"].to_numpy(float)]))
-    tr = [(float(a), float(b)) for a, b in zip(inc, lo) if a > 1e-4]
-    reste = 1.0 - sum(a for a, _ in tr)
-    if reste > 1e-4:                       # conserver la capacite totale (cf. SCARCITY_WV)
-        tr.append((reste, SCARCITY_WV))
-    return HydroCurve(zone, tuple(tr) or DEFAULT_CURVE,
-                      capacity_mismatch=float(cum[-1]) > 1.0 + 1e-9)
+def curve_from_shares(zone: str, shares) -> SupplyCurve:
+    """Parts par classe de prix → tranches, avec le débit réservé et la rareté propres à l'eau."""
+    return revealed.curve_from_shares(zone, shares, MUSTFLOW_BID, SCARCITY_WV, DEFAULT_CURVE,
+                                      tech="hydro_reservoir")
 
 
-def calibrate(zone: str, price: pd.Series, output: pd.Series, capacity: float) -> HydroCurve:
+def calibrate(zone: str, price, output, capacity: float) -> SupplyCurve:
     """Calibre la courbe d'une zone sur ses observations."""
     return curve_from_shares(zone, empirical_shares(price, output, capacity))
 
 
-def tranche_rows(zone: str, capacity: float, curve: HydroCurve, tech: str = "hydro_reservoir",
-                 vom: float = 1.0) -> pd.DataFrame:
-    """Lignes de stack remplaçant le bloc hydraulique unique par la courbe.
-
-    Le VOM s'ajoute à la valeur de l'eau : le coût d'opportunité s'empile sur le coût variable réel.
-    `min_gen_frac` reste à 0 — c'est le **prix d'offre** de la première tranche, pas une contrainte dure,
-    qui reproduit le débit réservé. La différence est essentielle : une tranche qui offre à -15 EUR/MWh
-    laisse le prix descendre sous zéro, là où un plancher dur l'y bloquerait.
-    """
-    rows = []
-    for i, (share, wv) in enumerate(curve.tranches):
-        cap = float(share) * float(capacity)
-        if cap <= 0:
-            continue
-        rows.append({"unit_id": f"{zone}_{tech}_wv{i}", "zone": zone, "tech": tech,
-                     "capacity_mw": cap, "efficiency": np.nan, "min_gen_frac": 0.0,
-                     "water_value_eur_mwh": float(wv) + float(vom)})
-    return pd.DataFrame(rows)
+def tranche_rows(zone: str, capacity: float, curve: SupplyCurve, tech: str = "hydro_reservoir",
+                 vom: float = 1.0):
+    """Lignes de stack remplaçant le bloc hydraulique unique par la courbe."""
+    return revealed.tranche_rows(zone, capacity, curve, tech, vom=vom)
 
 
-def expand_stack(stack: pd.DataFrame, curves: dict[str, HydroCurve], zone: str,
-                 tech: str = "hydro_reservoir") -> pd.DataFrame:
-    """Remplace les lignes `tech` de `stack` par les tranches de valeur de l'eau de la zone.
-
-    Sans courbe pour la zone, le stack est renvoyé inchangé — on ne substitue jamais un défaut arbitraire
-    à une donnée absente.
-    """
-    curve = curves.get(zone)
-    if curve is None or not (stack["tech"] == tech).any():
-        return stack
-    cap = float(stack.loc[stack["tech"] == tech, "capacity_mw"].sum())
-    keep = stack[stack["tech"] != tech].copy()
-    new = tranche_rows(zone, cap, curve, tech)
-    if new.empty:
-        return stack
-    cols = list(dict.fromkeys(list(keep.columns) + list(new.columns)))
-    return pd.concat([keep.reindex(columns=cols), new.reindex(columns=cols)], ignore_index=True)
-
-
-def apply_water_value(stack: pd.DataFrame, srmc_col: str = "srmc_eur_mwh") -> pd.DataFrame:
-    """Écrase le SRMC des tranches hydrauliques par leur valeur de l'eau, après calcul des SRMC thermiques."""
-    if "water_value_eur_mwh" not in stack.columns:
-        return stack
-    out = stack.copy()
-    m = out["water_value_eur_mwh"].notna()
-    out.loc[m, srmc_col] = out.loc[m, "water_value_eur_mwh"].to_numpy(float)
-    return out
+def expand_stack(stack, curves: dict[str, SupplyCurve], zone: str, tech: str = "hydro_reservoir"):
+    """Remplace les lignes `tech` de `stack` par les tranches de valeur de l'eau de la zone."""
+    return revealed.expand_stack(stack, curves.get(zone), zone, tech, vom=1.0)
 
 
 @lru_cache(maxsize=8)
@@ -165,7 +91,7 @@ def _curve_cache(key: tuple) -> dict:
     return {}
 
 
-def load_curves(config, year: int, zones: tuple[str, ...]) -> dict[str, HydroCurve]:
+def load_curves(config, year: int, zones: tuple[str, ...]) -> dict[str, SupplyCurve]:
     """Calibre (et mémorise) la courbe de chaque zone sur les prix et productions observés de `year`.
 
     Imports différés : ce module est appelé depuis la construction des fenêtres du LP, et les lecteurs
