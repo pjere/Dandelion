@@ -30,10 +30,24 @@ def test_feature_matrix_shape():
 
 
 def test_fit_recovers_wedge_and_beats_raw_smc():
-    m = fit_markup(_panel())
+    m = fit_markup(_panel(), shrink=1.0)             # un-shrunk : teste la machinerie de fit elle-meme
     d = m["diagnostics"]["FR"]
     assert d["rmse_spot"] < 0.3 * d["rmse_smc"]     # the markup must cut price error substantially
     assert d["r2_spot"] > 0.95                       # known low-noise wedge → near-perfect recovery
+
+
+def test_shrink_scales_the_wedge_toward_zero():
+    """Le rétrécissement (defaut 0,5) divise le wedge applique par deux, niveau ET pente. Mesure hors
+    echantillon : le wedge plein calibre crise-inclus surcorrige le SMC ameliore ; le demi-wedge garde la
+    MAE au niveau du SMC brut en coupant quand meme l'erreur de niveau de moitie."""
+    df = _panel()
+    smc = df.set_index("timestamp_utc")["smc"]
+    drv = df[["timestamp_utc", "demand", "musttake_res", "firm_cap"]].set_index("timestamp_utc").reset_index()
+    drv.index = smc.index
+    full = apply_markup(fit_markup(df, shrink=1.0), "FR", smc, drv) - smc
+    half = apply_markup(fit_markup(df, shrink=0.5), "FR", smc, drv) - smc
+    assert np.allclose(half.to_numpy(), 0.5 * full.to_numpy(), atol=1e-6)
+    assert fit_markup(df)["shrink"] == 0.5           # 0,5 est le defaut de production
 
 
 def test_apply_is_bounded_and_adds_positive_markup_on_average():

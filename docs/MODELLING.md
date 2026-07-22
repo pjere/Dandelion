@@ -290,23 +290,44 @@ it degrades gracefully in the high-RES/high-price 2040 regime instead of extrapo
 a multi-regime panel (2019 normal + 2022 gas crisis + 2023) with a quality gate that drops zone-years the
 dispatch prices badly. Detail: `dispatch_model/STEP_VII_METHODOLOGY.md`.
 
-**Ce markup est un problème mal posé aujourd'hui, et le savoir évite de le réajuster en boucle.** Mesuré
-hors échantillon (ajusté sur 2019+2022, testé sur 2023/2024) puis après correction du stack :
+### 7a. Le markup était mal posé ; il ne l'est plus (2026-07)
 
-- il **triple l'erreur** en 2019 (FR : MAE 8,3 brut → 22,9 avec markup) tout en aidant en 2022 — un wedge
-  unique ne peut pas servir des régimes dont l'écart varie d'un facteur cinq ;
-- il **détruit la métrique de valorisation** : capture solaire FR 2024 à 1,104 contre 0,676 observé, là où
-  le LP brut sort 0,697. Un taux supérieur à 1 signifierait que le solaire produit aux heures chères ;
-- il est **instable** : retirer une seule année d'entraînement dégrade *toutes* les cellules.
+**Historique — pourquoi il était insoluble.** La distribution des SMC était **dégénérée** (69 % des heures
+FR à 7,0 €/MWh) : aucune transformation, additive, multiplicative ou monotone, ne peut extraire une
+distribution réaliste d'une masse ponctuelle. Le wedge par régression triplait alors l'erreur en 2019
+(FR : MAE 8,3 → 22,9) et détruisait la métrique de valorisation (capture solaire FR 2024 à 1,10 contre
+0,68 observé). La variante monotone (appariement de quantiles SMC→spot) sortait 6 864 heures négatives
+contre 352 observées. Conclusion de l'époque : le markup ne pourra être ajusté qu'après avoir cassé la
+dégénérescence.
 
-Une variante monotone (appariement de quantiles SMC→spot, préservant l'ordre des heures) a été essayée et
-**échoue** : 6 864 heures négatives contre 352 observées en FR 2024. La raison vaut d'être retenue —
-la distribution des SMC est **dégénérée** (69 % des heures à 7,0 €/MWh), et aucune transformation, additive,
-multiplicative ou monotone, ne peut extraire une distribution réaliste d'une masse ponctuelle. Le code de
-cette variante reste dans `markup.py` (`fit_markup_monotone`) mais **n'est pas utilisé**.
+**C'est fait (§6d, offre nucléaire différenciée), et le markup est devenu posable.** Ajusté sur 2019+2022,
+il réduit maintenant l'erreur de prix en échantillon avec des R²_spot de 0,77 à 0,81 pour FR/BE/DE/ES — là
+où la masse ponctuelle rendait la régression vide de sens. **C'est la validation de tout l'effort nucléaire
++ eau structurelle : casser la dégénérescence a rendu le wedge ajustable.**
 
-**Conclusion : le markup ne pourra être ajusté correctement qu'après avoir cassé la dégénérescence**, donc
-après avoir différencié l'offre nucléaire (§6b). Le réajuster avant est du réglage sur un problème mal posé.
+**Mais le wedge plein surcorrige hors échantillon, donc il est rétréci (`shrink=0,5`).** Le wedge est
+calibré sur une année normale et la crise 2022, d'où une moyenne ≈ +40 €/MWh. Or le SMC est maintenant si
+bon (nucléaire + eau) que l'écart résiduel 2023/2024 est plus petit : le wedge plein le dépasse (ES 2024
+−22 % → +31 %, MAE moyenne 26,3 → 31,2). **Le rétrécir de moitié** garde la MAE au niveau du SMC brut
+(26,4 vs 26,3) tout en corrigeant le niveau — indispensable pour la projection, où le SMC brut est 20-33 %
+trop bas et donc inutilisable :
+
+| baseload hors éch. | SMC brut | wedge ×0,5 |
+|---|---|---|
+| FR 2023 | −16,2 % | **−0,1** |
+| FR 2024 | −32,7 % | **−17,2** |
+| ES 2023 | −20,2 % | **−1,5** |
+| ES 2024 | −22,0 % | **+4,7** |
+
+Le levier est le **rétrécissement**, pas une reparamétrisation « régime-consciente » : des formes
+proportionnelles au SMC (les plus régime-conscientes) ont été testées et *dégradent* la MAE — la régression
+ridge porte déjà le régime par ses variables SMC/tightness ; son seul défaut était d'être trop grosse. On
+paie ce rétrécissement d'un fit en échantillon un peu moindre (R²_spot 0,81 → 0,77), compromis biais-variance
+assumé. La variante monotone (`fit_markup_monotone`) reste dans le code mais **n'est pas utilisée** : sur le
+SMC amélioré elle reste nettement pire (MAE 38,5).
+
+**Reste ouvert : IT-North**, dont le wedge garde un R²_spot < 0 (−2,11) — problème propre à la
+microstructure italienne, indépendant du rétrécissement, à traiter à part.
 
 ## 7b. A learned surrogate was tried and rejected (2026-07)
 

@@ -208,11 +208,22 @@ def _predict(model_z: dict, X: np.ndarray) -> np.ndarray:
     return ybar + ((X[:, 1:] - mu) / sd) @ beta_z
 
 
-def fit_markup(panel: pd.DataFrame, alpha_frac: float = 0.1) -> dict:
+def fit_markup(panel: pd.DataFrame, alpha_frac: float = 0.1, shrink: float = 0.5) -> dict:
     """Per-zone **ridge** fit of the wedge (observed − smc) on the (standardized, envelope-clamped) structural
     features. `alpha_frac` sets the ridge penalty as a fraction of n (≈ the standardized ZᵀZ diagonal), so it
     scales with sample size. Returns a serializable per-zone model {mu, sd, beta_z, ybar, bounds} plus
-    in-sample diagnostics (RMSE / R² of spot vs raw SMC — the markup must *reduce* price error)."""
+    in-sample diagnostics (RMSE / R² of spot vs raw SMC — the markup must *reduce* price error).
+
+    **`shrink` (default 0.5) scales the whole fitted wedge toward zero** — the level *and* the driver slopes.
+    Rationale, measured out-of-sample (fit 2019+2022, predict 2023/2024): the full wedge (shrink=1) is
+    calibrated across a normal year and the 2022 crisis, so its mean ≈ +40 €/MWh; applied to the now much
+    better SMC (nuclear supply curve + structural water value cut the residual gap), that full wedge
+    *overshoots* the smaller 2023/2024 gap — MAE 26,3 → 31,2, correlation down. Halving it keeps MAE at the
+    raw-SMC level while still cutting the baseload error roughly in half (|baseload| 14,6/24,2 → 6,2/15,3 %).
+    Regime-aware *reparametrisations* (a wedge proportional to SMC) were tried and were worse on MAE — the
+    ridge already carries the regime through its SMC/tightness features; the only defect was that it was too
+    big. So the lever is shrinkage, not reparametrisation. `shrink=1.0` recovers the un-shrunk fit.
+    """
     names = _feature_names()
     coefs, diag = {}, {}
     for z, g in panel.groupby("zone"):
@@ -220,8 +231,9 @@ def fit_markup(panel: pd.DataFrame, alpha_frac: float = 0.1) -> dict:
         X = _features(g, bounds)
         y = (g["observed"] - g["smc"]).to_numpy(float)         # the wedge
         mu, sd, beta_z, ybar = _ridge(X, y, alpha=alpha_frac * len(g), names=names)
+        beta_z, ybar = shrink * beta_z, shrink * ybar          # rétrécissement du wedge entier (cf. docstring)
         mz = {"mu": mu.tolist(), "sd": sd.tolist(), "beta_z": beta_z.tolist(), "ybar": ybar, "bounds": bounds}
-        markup = _predict(mz, X)
+        markup = _predict(mz, X)                               # already shrunk
         smc = g["smc"].to_numpy(float)
         obs = g["observed"].to_numpy(float)
         pred_spot = smc + markup
@@ -233,7 +245,7 @@ def fit_markup(panel: pd.DataFrame, alpha_frac: float = 0.1) -> dict:
                    "r2_spot": round(1 - np.sum((pred_spot - obs) ** 2) / sst, 3) if sst > 0 else np.nan,
                    "mean_markup": round(float(markup.mean()), 2)}
     return {"features": names, "coef": coefs, "diagnostics": diag, "alpha_frac": alpha_frac,
-            "years": sorted(panel["timestamp_utc"].dt.year.unique().tolist())}
+            "shrink": shrink, "years": sorted(panel["timestamp_utc"].dt.year.unique().tolist())}
 
 
 def apply_markup(model: dict, zone: str, smc: pd.Series, drivers: pd.DataFrame,
