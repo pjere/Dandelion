@@ -62,9 +62,12 @@ def _zone_tranches(zone, schemes, res_bid_z, n) -> list[dict]:
 
 
 def solve_with_triggers(times, zones_data, borders, ntc, schemes,
-                        res_bid, price_floor, max_iter: int = 3) -> dict:
+                        res_bid, price_floor, max_iter: int = 3, diagnose: bool = False) -> dict:
     """`solve_multizone` wrapped in the §51 fixed point: re-solve, zeroing premiums whose consecutive
-    negative-run exceeds their trigger, until the trigger pattern stops changing."""
+    negative-run exceeds their trigger, until the trigger pattern stops changing.
+
+    `diagnose` (opt-in, investigation only) fait remonter le rapport marginal par (zone, heure) de
+    `lp.diagnostics` sur chaque résolution ; le dernier point fixe porte le diag renvoyé."""
     n = len(times)
     zones = list(zones_data)
     rb = {z: (res_bid.get(z) if isinstance(res_bid, dict) else res_bid) for z in zones}
@@ -75,7 +78,8 @@ def solve_with_triggers(times, zones_data, borders, ntc, schemes,
     # and would "restore" the premium next iteration. Monotone accumulation converges.
     fired = {z: [np.zeros(n, bool) for _ in tranches[z]] for z in zones}
 
-    out = solve_multizone(times, zones_data, borders, ntc, price_floor=price_floor, res_tranches=tranches)
+    out = solve_multizone(times, zones_data, borders, ntc, price_floor=price_floor,
+                          res_tranches=tranches, diagnose=diagnose)
     for _ in range(max_iter - 1):
         changed = False
         for z in zones:

@@ -37,7 +37,7 @@ def _as_time_array(v, n: int) -> np.ndarray:
 def solve_multizone(times, zones_data: dict, borders: list, ntc: dict,
                     res_bid: float | dict = -10.0, voll: float = 15000.0,
                     price_floor: float | dict = -500.0, solver: str = "highs",
-                    res_tranches: dict | None = None) -> dict:
+                    res_tranches: dict | None = None, diagnose: bool = False) -> dict:
     """Solve the coupled dispatch over one window.
 
     zones_data[zone] = {"stack": df(unit_id,tech,capacity_mw,srmc_eur_mwh,min_gen_frac),
@@ -56,7 +56,7 @@ def solve_multizone(times, zones_data: dict, borders: list, ntc: dict,
     if _BACKEND == "highs":
         from .highs_solver import solve_multizone_highs
         return solve_multizone_highs(times, zones_data, borders, ntc, res_bid=res_bid, voll=voll,
-                                     price_floor=price_floor, res_tranches=res_tranches)
+                                     price_floor=price_floor, res_tranches=res_tranches, diagnose=diagnose)
     T = pd.DatetimeIndex(times)
     zones = list(zones_data)
     m = linopy.Model()

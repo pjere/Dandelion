@@ -46,7 +46,8 @@ def _observed_prices(config, year, zones):
 
 def run_backtest(config: Config, year: int, n_weeks: int | None = None,
                  use_remit_nuclear_avail: bool = False, de_unit_level: bool = False,
-                 nuclear_curve: bool = True, hydro_sdp_level: bool = True) -> dict:
+                 nuclear_curve: bool = True, hydro_sdp_level: bool = True,
+                 diagnose: bool = False) -> dict:
     zones = [z for z in config.all_zones if z != "GB"]
     neigh = [z for z in zones if z != "FR"]
     wb = config.resolve(config.section("assumptions")["workbook"])
@@ -115,7 +116,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     weeks = pd.date_range(f"{year}-01-01", f"{year + 1}-01-01", freq="7D", tz="UTC")
     if n_weeks:
         weeks = weeks[:n_weeks + 1]
-    price_chunks = []
+    price_chunks, diag_chunks = [], []
     for w0, w1 in zip(weeks[:-1], weeks[1:]):
         T = fr.loc[(fr.index >= w0) & (fr.index < w1)].index
         if len(T) < 24:
@@ -133,10 +134,12 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         res_bid, price_floor = rules_at(wb, w0, list(zd))
         try:
             out = solve_with_triggers(T, zd, borders, {b: ntc[b] for b in borders}, res_schemes,
-                                      res_bid=res_bid, price_floor=price_floor)
+                                      res_bid=res_bid, price_floor=price_floor, diagnose=diagnose)
         except RuntimeError:
             continue
         price_chunks.append(out["prices"])
+        if diagnose and out.get("diag") is not None:
+            diag_chunks.append(out["diag"])
 
     model = pd.concat(price_chunks).sort_index()
     metrics = _score(model, obs, zones)
@@ -144,7 +147,10 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     outdir.mkdir(parents=True, exist_ok=True)
     lake.write_table(model, "dispatch", "backtest_prices", year=year)
     metrics.to_csv(outdir / f"backtest_{year}_metrics.csv", index=False)   # CSV = human export (§6)
-    return {"model_prices": model, "observed": obs, "metrics": metrics}
+    res = {"model_prices": model, "observed": obs, "metrics": metrics}
+    if diagnose:                                # lecture de la solution primale (cf. lp.diagnostics), opt-in
+        res["diag"] = pd.concat(diag_chunks, ignore_index=True) if diag_chunks else pd.DataFrame()
+    return res
 
 
 def _score(model, obs, zones) -> pd.DataFrame:

@@ -226,6 +226,66 @@ empirique vs synthèse est donc équitable et le gain réel, mais aucune des deu
 hors échantillon. La levée passe par le point fixe prix↔valeur de l'eau, à traiter en projection. Restent
 aussi des prix déterministes dans la SDP (seuls les apports sont aléatoires).
 
+### 6e. Découplage suisse : plancher des NTC d'interconnexion (2026-07)
+
+La Suisse était le pire résidu du modèle (+37,5 % en 2024) et on l'attribuait à la valeur de l'eau. La
+**lecture du LP** (`lp.diagnostics`, désormais câblée jusqu'au backtest par un flag `diagnose` opt-in) dit
+autre chose : le prix CH est porté par l'hydraulique **domestique 82 % des heures**, l'interconnexion ne
+mord qu'à 3,9 %, et l'écart se concentre dans les heures **bon marché** (décile bas : modèle 50 contre 3,5
+observé). Dans ces heures, CH est **découplée** de ses voisins bon marché de **64 €/MWh** (contre 5
+observés) : la France est à 8, le modèle plante la Suisse à 67.
+
+Cause : `flow_derived_ntc` dérive la NTC du **p99.5 des flux réalisés** — elle mesure l'usage, pas la
+capacité, et sous-estime toute frontière non saturante. La Suisse, petite importatrice nette entourée de
+quatre marchés, répartit ses imports sur plusieurs frontières dont aucune ne mord : chacune est sous-lue
+(DE→CH à 960 MW contre ~4000 physiques ; la frontière CH-Autriche est en outre absente, l'Autriche étant
+dans le puits DE_REST). Faute de capacité d'import, l'hydraulique suisse (correctement valorisée) reste
+marginale au lieu de suivre le voisin bon marché.
+
+**Le total dérivé est bon, c'est sa répartition qui est fausse.** Mesuré sur CH 2024 : la somme des
+frontières dérivées donne 5 422 MW d'import contre **5 676 observés en p99.5 simultané** — le total est
+juste, parce que c'est lui que le facteur de coïncidence contraint. C'est l'allocation qui dérape
+(DE→CH lu à 960 MW pour ~4 000 physiques, les autres frontières compensant).
+
+**Correctif** (`assemble._apply_ntc_floor`) : porter chaque frontière suisse à sa capacité **physique**
+(table `NTC`), puis **renormaliser pour retrouver le total dérivé**, séparément dans chaque sens. DE→CH
+remonte ainsi de 960 à 2 437 MW tandis que l'import total reste à 5 422 MW et l'export à 6 886 (soit
+exactement le p99.5 observé). Résultat, backtest **année pleine** 2024 (|erreur baseload|) :
+
+| zone | avant | après |
+|---|---|---|
+| CH | +37,9 | **+24** |
+| IT_NORTH | −1,4 | −8 |
+| DE_LU | −31,8 | −28 |
+| BE | −19,4 | −19 |
+| FR | −32,7 | −35 |
+| ES | −22,0 | −23 |
+| **moyenne** | **24,2** | **22,8** |
+
+**Amélioration modeste, et encore un transfert partiel d'erreur** (CH −13,9 points, mais IT +6,6, FR +2,3).
+Assumé : le correctif traite un défaut de *données* démontré sans en introduire un de *physique*.
+
+**Variante rejetée, et c'est le point de méthode.** Plancher sans renormaliser score nettement mieux
+(moyenne **19,0**, CH à +6) — mais en donnant à la Suisse **9 144 MW** d'import simultané contre 5 676
+observés (+61 %) et 11 200 d'export contre 6 886. Elle achète son score avec une capacité de transit qui
+n'existe pas, et noie l'Italie (−18). Même raisonnement que pour le markup, où la variante « + coût
+combustible » gagnait 0,5 point en compensant un biais par un autre : **on ne garde pas un gain obtenu par
+une erreur qui en compense une autre.** Deux autres variantes rejetées : toutes frontières planchées
+(18,1, mais IT −28,1 et BE −24,5) et direction entrante seule (19,1, aucun gain).
+
+**Ce qui reste, et c'est le vrai correctif complet : la topologie est incomplète.** CH↔AT est absente
+(l'Autriche est dans le puits DE_REST), et IT_NORTH est amputée d'AT↔IT et SI↔IT — son import modélisé
+plafonne à 6 177 MW contre 7 786 observés, et l'écart correspond presque exactement aux deux frontières
+manquantes. Les ajouter donnerait aux deux zones leurs vraies options d'import sans gonfler aucun total
+(#141).
+
+*Note de méthode, apprise à mes dépens.* `tools/golden.py capture` **hashe le lac existant, il ne rejoue
+pas le backtest**. Après une série d'expériences qui écrasent chacune `data/lake/dispatch/backtest_prices`,
+capturer sans avoir régénéré le lac avec le code retenu fige les chiffres d'une *autre* variante. C'est
+arrivé ici : une première version de cette section annonçait une moyenne de 12,3 % qui était en réalité
+celle d'un run « toutes frontières » sur 10 semaines d'hiver. Toujours régénérer le lac avec le code
+commité **avant** `capture`.
+
 ### 6d. Offre nucléaire FR en courbe de tranches (2026-07)
 
 Le verrou identifié ci-dessus est levé par la **même méthode que l'hydraulique**, appliquée au nucléaire

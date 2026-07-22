@@ -30,6 +30,50 @@ NTC = {
 }
 _EXCLUDE_DISPATCH = {"hydro_psp", "hydro_ror", "solar", "wind_onshore", "wind_offshore", "waste"}
 
+# Zones dont les frontières sont **ré-allouées vers leurs proportions physiques, à total inchangé**.
+#
+# La NTC dérivée prend le p99.5 du flux *réalisé* : elle mesure l'usage, pas la capacité. Pour une zone dont
+# les imports se répartissent sur plusieurs frontières dont aucune ne sature, chaque frontière est sous-lue
+# individuellement — mais leur **somme** reste juste, car c'est le total simultané qui est physiquement
+# contraint. Mesuré sur CH 2024 : total d'import dérivé 5 422 MW contre 5 676 observés en p99.5 (le total
+# est bon), alors que DE→CH est lu à 960 MW contre ~4 000 physiques (la répartition est fausse).
+#
+# On corrige donc la **répartition** sans toucher au **total** : chaque frontière est portée à sa capacité
+# physique (table `NTC`), puis l'ensemble est renormalisé pour retrouver le total dérivé. Plancher sans
+# renormaliser a été essayé et rejeté — cela gonflait l'import simultané de CH à 9 144 MW (+61 % au-dessus
+# du p99.5 observé) et son export à 11 200 MW, faisant d'elle un nœud de transit non physique qui noyait
+# l'Italie (IT_NORTH −1,4 → −18 % de baseload).
+_NTC_FLOOR_ZONES = frozenset({"CH"})
+
+
+def _apply_ntc_floor(ntc: dict) -> dict:
+    """Ré-alloue les frontières de `_NTC_FLOOR_ZONES` vers leurs proportions physiques, **à total inchangé**.
+
+    Deux directions par zone, traitées séparément (import vers la zone, export depuis la zone) : chacune est
+    portée à la capacité physique de la table `NTC`, puis mise à l'échelle pour que sa somme égale celle de
+    la NTC dérivée. Le facteur de coïncidence de `flow_derived_ntc` — qui borne le transit *simultané* — est
+    ainsi préservé, alors qu'un simple plancher le contournait.
+    """
+    out = dict(ntc)
+    for z in _NTC_FLOOR_ZONES:
+        borders = [b for b in NTC if z in b and b in out]
+        if not borders:
+            continue
+        # index (border, position) des directions entrantes puis sortantes pour la zone z
+        imp = [(b, 0 if b[1] == z else 1) for b in borders]
+        exp = [(b, 0 if b[0] == z else 1) for b in borders]
+        for legs in (imp, exp):
+            derived = sum(out[b][i] for b, i in legs)
+            phys = sum(NTC[b][i] for b, i in legs)
+            if derived <= 0 or phys <= 0:
+                continue
+            k = derived / phys                       # renormalisation : conserve le total simultané
+            for b, i in legs:
+                pair = list(out[b])
+                pair[i] = NTC[b][i] * k
+                out[b] = tuple(pair)
+    return out
+
 
 def flow_derived_ntc(config: Config, year: int, coincident: bool = True) -> dict:
     """Effective NTC per border/direction from realized physical flow.
@@ -65,7 +109,7 @@ def flow_derived_ntc(config: Config, year: int, coincident: bool = True) -> dict
         base[(a, b)] = (float(va[va > 0].quantile(0.995)) if (va > 0).sum() > 100 else float(dab),
                         float(vb[vb > 0].quantile(0.995)) if (vb > 0).sum() > 100 else float(dba))
     if not coincident:
-        return base
+        return _apply_ntc_floor(base)
 
     # per-zone export coincidence: cap Σ(border p99.5) at the p99.5 of *total simultaneous* export
     zones = {z for bd in NTC for z in bd}
@@ -80,7 +124,7 @@ def flow_derived_ntc(config: Config, year: int, coincident: bool = True) -> dict
     out = {}
     for (a, b), (ab, ba) in base.items():
         out[(a, b)] = (ab * factor.get(a, 1.0), ba * factor.get(b, 1.0))
-    return out
+    return _apply_ntc_floor(out)
 
 
 def _month_prices(cm: CommodityModel, ts: pd.Timestamp) -> dict:
