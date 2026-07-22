@@ -55,13 +55,19 @@ def price_gb_tranches(stack: pd.DataFrame, srmc_values: np.ndarray) -> np.ndarra
     return s
 
 
-def fr_window(fr, stack, prices, T, nuc_unavail_daily=None) -> dict:
+def fr_window(fr, stack, prices, T, nuc_unavail_daily=None, wv_delta=None) -> dict:
     """FR zone dict for one window: SRMC, DSR tranches, nuclear availability (REMIT feed or the
-    rolling-max-of-output proxy), and the window's actual reservoir energy as the hydro budget."""
+    rolling-max-of-output proxy), and the window's actual reservoir energy as the hydro budget.
+
+    `wv_delta` (opt-in, #136) recentre les prix d'offre hydrauliques sur le λ structurel de la SDP pour la
+    semaine de la fenêtre — le niveau vient de Bellman, la dispersion reste empirique."""
     h = fr.loc[T]
     s = price_gb_tranches(stack, srmc(stack, prices).to_numpy())
     # la valeur de l'eau ecrase le SRMC des tranches hydrauliques : leur cout d'opportunite, pas leur VOM
     st = apply_water_value(stack.assign(srmc_eur_mwh=s))
+    if wv_delta is not None:
+        from ..hydro.synthesis import shift_hydro_bids
+        st = shift_hydro_bids(st, float(wv_delta))
     st = pd.concat([st, dsr_tranches("FR", float(h["demand_mw"].max()))], ignore_index=True)
     nuc_cap = st.loc[st["tech"] == "nuclear", "capacity_mw"].sum()
     if nuc_unavail_daily is not None:
@@ -98,10 +104,15 @@ def apply_measured_mustrun(st, zone, T) -> pd.DataFrame:
     return st
 
 
-def nb_window(zone, stack, nl, res, prices, T) -> dict:
+def nb_window(zone, stack, nl, res, prices, T, wv_delta=None) -> dict:
     """Neighbour zone dict for one window: block SRMC, measured seasonal must-run (DE_LU), DSR tranches,
-    reservoir budget from the window's actual generation."""
+    reservoir budget from the window's actual generation.
+
+    `wv_delta` (opt-in, #136) recentre les prix d'offre hydrauliques sur le λ structurel de la SDP."""
     st = apply_water_value(stack.assign(srmc_eur_mwh=srmc(stack, prices).to_numpy()))
+    if wv_delta is not None:
+        from ..hydro.synthesis import shift_hydro_bids
+        st = shift_hydro_bids(st, float(wv_delta))
     st = apply_measured_mustrun(st, zone, T)                     # DE_LU: MaStR-measured seasonal must-run
     w = nl.reindex(T).interpolate().ffill().bfill()
     st = pd.concat([st, dsr_tranches(zone, float(w["load_mw"].max()))], ignore_index=True)

@@ -186,16 +186,45 @@ la production observée) est une contrainte *physique* — obligations de débit
 l'arbitrage pur ne peut pas produire ; sans lui la SDP sous-utilisait le parc de 15 à 25 % dans les quatre
 zones, biais de même signe partout.
 
-**Réserve : l'Espagne ne s'améliore pas.** Sa fonction valeur sature (λ 120,4 → 120,7 malgré des apports
-en hausse, plage [63..125] tassée en haut). Cause probable : `S_max` est pris au maximum observé, or les
-retenues espagnoles servent d'abord l'**irrigation** — on attribue au marché une capacité qui ne lui est
-pas disponible. Il faudrait une capacité utile pour l'électricité, faute de données non établie ici.
+Cette validation utilise une métrique d'**utilisation impliquée** `P(prix > λ)` — imparfaite, à ne pas
+confondre avec l'objectif (l'erreur de prix). Elle a d'ailleurs mal orienté le cas espagnol (voir §6d).
 
-**Non câblé dans le LP.** La SDP donne une valeur *par zone et par semaine* — l'agrégation en un réservoir
-équivalent écrase l'hétérogénéité du parc, que la courbe empirique de §6b capture. La synthèse visée est :
-λ_t(S_t) fixe le **niveau**, la dispersion empirique **étale** les tranches autour, le débit réservé reste
-une contrainte. Restent aussi des prix déterministes (seuls les apports sont aléatoires) et la circularité
-prix↔valeur de l'eau, à traiter par point fixe.
+### 6d. Câblage de la SDP : synthèse niveau-Bellman × dispersion-empirique (2026-07)
+
+Les deux modèles de §6b et §6c ont chacun ce qui manque à l'autre. La courbe empirique capture la
+**dispersion** réelle du parc (des retenues aux coûts d'opportunité différents) mais son **niveau** est
+circulaire. La SDP donne un **niveau** λ_t(S) structurel, dépendant du stock et de la saison, mais son
+réservoir équivalent agrégé écrase la dispersion. `hydro/synthesis.py` les combine : on recentre la
+courbe empirique pour que sa valeur d'eau moyenne (tranches arbitrées, hors débit réservé et hors rareté)
+égale λ_t(S_t) à la semaine et au stock courants —
+
+    prix d'offre de la tranche i  =  λ_t(S_t)  +  (valeur empirique_i − moyenne empirique)
+
+Le décalage est additif et uniforme (monotonie préservée) ; le débit réservé et la tranche de rareté
+restent des ancres physiques. Câblé dans le backtest (`hydro_sdp_level`, actif par défaut), appliqué **par
+fenêtre** — le λ de la semaine, pas une médiane annuelle. La **projection** ne l'utilise pas : elle n'a
+pas de trajectoire de stock observée (il faudra une trajectoire projetée + le point fixe prix↔λ).
+
+**Résultat** (backtest, |erreur baseload| moyenne 4 zones hydro) : 2024 25,55 → **23,50**, 2019
+8,40 → **8,33**. Le gain vient surtout de l'Espagne (baseload −28,4 → **−22,0**, médiane −38,9 → **−11,9**,
+corrélation 0,729 → **0,730**). La version par fenêtre gagne aussi la corrélation FR 2024 (0,761 →
+**0,766**) ; la version statique (λ médian) était un cheveu meilleure en niveau mais perdait la
+saisonnalité, donc la corrélation.
+
+**Ce que ce résultat retourne (cf. réserve ES de §6c).** Le λ espagnol de 120,7 que la métrique
+d'utilisation faisait voir comme un *défaut* (« saturation, trop haut ») **améliore le backtest** quand il
+sert à fixer le niveau d'offre : l'empirique sous-price l'eau espagnole à 28 €/MWh, la SDP dit 121, et 121
+est plus proche du vrai. Le diagnostic complémentaire montre d'ailleurs que le bilan d'eau ES boucle
+(+10,4 %) et que `s_max` (série ENTSO-E déjà en énergie turbinable, max observé ≈ 80-86 % de la capacité
+technique) n'est **pas** sur-estimé : la vraie spécificité espagnole est un lâcher d'irrigation saisonnier
+price-agnostic, pas une capacité gonflée. Réduire `s_max` est écarté (#137 re-scopé sur un `min_release`
+saisonnier depuis MITECO).
+
+**Caveat de fuite, assumé.** La SDP calcule λ à partir des prix *observés* de l'année. Dans un backtest,
+c'est une fuite — comme l'était déjà la courbe empirique (calibrée sur prix observés). La comparaison
+empirique vs synthèse est donc équitable et le gain réel, mais aucune des deux n'est un résultat propre
+hors échantillon. La levée passe par le point fixe prix↔valeur de l'eau, à traiter en projection. Restent
+aussi des prix déterministes dans la SDP (seuls les apports sont aléatoires).
 
 ### 6d. Offre nucléaire FR en courbe de tranches (2026-07)
 

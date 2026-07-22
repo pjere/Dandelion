@@ -46,7 +46,7 @@ def _observed_prices(config, year, zones):
 
 def run_backtest(config: Config, year: int, n_weeks: int | None = None,
                  use_remit_nuclear_avail: bool = False, de_unit_level: bool = False,
-                 nuclear_curve: bool = True) -> dict:
+                 nuclear_curve: bool = True, hydro_sdp_level: bool = True) -> dict:
     zones = [z for z in config.all_zones if z != "GB"]
     neigh = [z for z in zones if z != "FR"]
     wb = config.resolve(config.section("assumptions")["workbook"])
@@ -79,6 +79,12 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     curves = load_curves(config, year, tuple(["FR"] + list(neigh)))
     fr_stack = expand_stack(fr_stack, curves, "FR")
     nb_stack = {z: expand_stack(s, curves, z) for z, s in nb_stack.items()}
+    # synthese SDP x empirique (#136) : le niveau de la courbe hydro vient du lambda structurel de Bellman,
+    # la dispersion reste empirique. Decalage par (zone, semaine) applique dans les fenetres. Opt-in.
+    wv_levels = {}
+    if hydro_sdp_level:
+        from ..hydro.synthesis import solve_levels
+        wv_levels = solve_levels(config, year, curves, tuple(["FR"] + list(neigh)))
     # meme traitement pour le nucleaire FR : 63 GW a un prix unique rendaient le prix francais degenere
     # (marginal 78,6 % des heures a exactement 7,0 EUR/MWh). Cf. stacks.nuclear_curve.
     if nuclear_curve:
@@ -115,11 +121,13 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         if len(T) < 24:
             continue
         prices = resolver.prices_at(w0)
+        wk = int(pd.Timestamp(w0).isocalendar().week)          # semaine ISO pour le decalage SDP
         zd = {"FR": fr_window(fr, fr_stack, zone_prices(prices, "FR", basis, w0, gas_rules), T,
-                          nuc_unavail_daily=nuc_unavail)}
+                          nuc_unavail_daily=nuc_unavail, wv_delta=wv_levels.get("FR", {}).get(wk))}
         for z in neigh:
             zd[z] = nb_window(z, nb_stack[z], nb_nl[z], nb_res[z],
-                              zone_prices(prices, z, basis, w0, gas_rules), T)
+                              zone_prices(prices, z, basis, w0, gas_rules), T,
+                              wv_delta=wv_levels.get(z, {}).get(wk))
         borders = [b for b in NTC if b[0] in zd and b[1] in zd]
         # market rules effective in THIS window (IT/ES were floored at 0 before TIDE / Dec-2023)
         res_bid, price_floor = rules_at(wb, w0, list(zd))
