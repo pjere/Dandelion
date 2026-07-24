@@ -9,7 +9,7 @@ from __future__ import annotations
 from dispatch_model.config import load_config
 from dispatch_model.rules import DEFAULT_PRICE_FLOOR, DEFAULT_RES_BID, rules_at
 
-ZONES = ["FR", "DE_LU", "IT_NORTH", "ES", "DE_REST"]
+ZONES = ["FR", "DE_LU", "IT_NORTH", "ES", "AT_SI"]
 
 
 def _wb():
@@ -41,7 +41,7 @@ def test_projection_horizon_has_no_floor_anywhere():
 
 def test_unlisted_zones_take_the_default():
     bid, floor = rules_at(_wb(), "2019-06-01", ZONES)
-    for z in ("FR", "DE_LU", "DE_REST"):                 # DE_REST is virtual and has no rule row
+    for z in ("FR", "DE_LU", "AT_SI"):                   # AT_SI is a virtual cluster with no rule row
         assert bid[z] == DEFAULT_RES_BID and floor[z] == DEFAULT_PRICE_FLOOR
 
 

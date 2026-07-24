@@ -31,6 +31,7 @@ niveau de λ là où cette courbe-ci en donne la dispersion.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import lru_cache
 
 import numpy as np
@@ -48,6 +49,15 @@ MUSTFLOW_BID = -15.0
 #: hypothese, volontairement au-dessus du SRMC thermique.
 SCARCITY_WV = 200.0
 DEFAULT_CURVE = ((0.15, MUSTFLOW_BID), (0.10, 25.0), (0.10, 60.0), (0.10, 120.0))
+
+#: proxy de valeur de l'eau pour les clusters voisins sans prix ni stock (split de DE_REST). Un cluster
+#: virtuel n'a ni prix observé (courbe empirique impossible) ni série `entsoe_hydro_storage` (SDP Bellman
+#: impossible) : ses deux voies de valorisation sont fermées et son hydro de lac serait offerte au plancher
+#: ~1 EUR/MWh. Elle déferlerait alors dans la zone modélisée la plus chère qu'elle borde — l'Italie, via
+#: IT↔AT/SI — écrasant son prix (mesuré : IT_NORTH baseload −11,7 → −15,6 % avec le split). On emprunte donc
+#: la courbe révélée d'une zone modélisée de même hydrologie. Ciblé : seul AT_SI porte une hydro de lac
+#: significative (~1,3 GW alpine) ; NL/DK ~0, PL_CZ modeste et non alpin, donc laissés au défaut.
+_WATER_VALUE_PROXY = {"AT_SI": "CH"}
 
 #: nom historique de la courbe hydraulique ; le moteur est générique depuis l'ajout du nucléaire
 HydroCurve = SupplyCurve
@@ -130,4 +140,9 @@ def load_curves(config, year: int, zones: tuple[str, ...]) -> dict[str, SupplyCu
             # mais le stack de cette zone est à corriger en amont plutôt qu'ici
             pass
         cache[z] = c
+    # clusters sans prix ni stock : emprunter la courbe d'une zone modélisée de même hydrologie (cf.
+    # _WATER_VALUE_PROXY) plutôt que laisser leur hydro de lac offerte au plancher ~1 EUR/MWh.
+    for cluster, proxy in _WATER_VALUE_PROXY.items():
+        if cluster in zones and cluster not in cache and cache.get(proxy) is not None:
+            cache[cluster] = replace(cache[proxy], zone=cluster)
     return cache

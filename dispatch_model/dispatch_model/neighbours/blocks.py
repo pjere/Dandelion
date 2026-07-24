@@ -30,13 +30,27 @@ _AVAIL_FACTOR = {"nuclear": 0.78, "gas": 0.90, "coal": 0.88, "lignite": 0.90, "o
 _MUST_RUN_DEFAULT = {"lignite": 0.45, "coal": 0.35, "gas": 0.15, "biomass": 0.50, "oil": 0.0}
 
 # --- aggregate (virtual) zones ---------------------------------------------------------------
-# DE_REST = DE-LU's out-of-model neighbours as ONE price-responsive zone. Without it DE-LU has only
-# ~8 GW of export headroom (FR 3 + BE 1 + CH 4) against a measured ~10.2 GW simultaneous export
-# capability to NL/AT/DK/PL/CZ (p99.5 of 2019 flows). That trapped surplus made DE price itself to the
-# RES bid for 665 h (vs 210 observed) and blocked the negative-price contagion that supplies ~85 % of
-# FR's, 79 % of BE's and 82 % of CH's observed negative hours. Aggregating keeps one extra zone (not
-# five) while staying price-responsive — an exogenous export schedule would not survive projection.
-ZONE_AGGREGATES = {"DE_REST": ["NL", "AT", "DK_1", "DK_2", "PL", "CZ"]}
+# DE-LU's out-of-model neighbours, as FOUR price-responsive clusters rather than one DE_REST block.
+# A single DE_REST bought back DE-LU's missing ~10.2 GW of export headroom (measured p99.5 of flows to
+# NL/AT/DK/PL/CZ) and unblocked the DE-coincident negative-price contagion into FR/BE/CH. But lumping
+# five real bidding zones into one sink hid the fact that they are **not in the same mode at the same
+# hours**: when DE is in a wind glut, NL may still be importing while PL/CZ export — the aggregate net
+# load never saturates (+41 GW, 0 % surplus hours in 2024), so DE-LU's surplus met a sink that was
+# always willing, and the regional negatives (#138) still under-fired. Splitting restores each cluster's
+# own tightness *and* its own out-of-DE borders, which the aggregate could not carry:
+#   NL    ── DE-LU, BE                     (NL borders both)
+#   DK    ── DE-LU                         (DK_1 west + DK_2 east, both to DE)
+#   PL_CZ ── DE-LU                         (Poland + Czechia)
+#   AT_SI ── DE-LU, CH, IT_NORTH           (Austria + Slovenia; closes the missing Alpine borders, #141)
+# The AT_SI cluster is what makes CH↔AT and IT_NORTH↔AT/SI exist at all — the 7-zone set amputated them,
+# over-tightening CH and IT-North. Each cluster is still price-responsive (own demand/RES/stack), so the
+# projection stays valid; none carries an observed spot series, so none is ever scored.
+ZONE_AGGREGATES = {
+    "NL": ["NL"],
+    "DK": ["DK_1", "DK_2"],
+    "PL_CZ": ["PL", "CZ"],
+    "AT_SI": ["AT", "SI"],
+}
 
 
 def constituents(zone: str) -> list[str]:
@@ -201,7 +215,7 @@ def build_de_unit_stack(config: Config, zone: str, year: int, min_mw: float = 10
 def neighbour_netload(config: Config, zone: str, year: int) -> pd.DataFrame:
     """→ hourly [timestamp_utc, load_mw, musttake_res_mw, netload_mw] from ENTSO-E actuals.
 
-    Aggregate zones (DE_REST) sum their constituents hour-by-hour.
+    Aggregate zones (DK / PL_CZ / AT_SI) sum their constituents hour-by-hour.
     """
     zs = constituents(zone)
     load = (load_demand_hist(config, year, zones=zs)

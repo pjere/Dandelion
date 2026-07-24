@@ -96,9 +96,10 @@ dispatch consumes. Detail: `availability_model/METHODOLOGY.md`.
 
 The price-formation core. A continuous **linear dispatch** (linopy/HiGHS, no unit commitment) over a
 7-zone European footprint — France **unit-resolved** (≈170 units, SRMC = fuel/η + CO₂·intensity/η·EUA +
-VOM), the neighbours DE-LU / BE / CH / IT-North / ES as aggregated technology-block stacks, a virtual
-DE-REST export sink (NL+AT+DK+PL+CZ), and GB as a border supply curve — coupled by NTC-bounded
-cross-border flows. Solved over rolling weekly windows.
+VOM), the neighbours DE-LU / BE / CH / IT-North / ES as aggregated technology-block stacks, **four virtual
+neighbour clusters** (NL / DK / PL_CZ / AT_SI — DE-LU's out-of-model neighbours, price-responsive; see §6f),
+and GB as a border supply curve — coupled by NTC-bounded cross-border flows. Solved over rolling weekly
+windows.
 
 The **price of each zone is the dual of its energy-balance constraint** (the system marginal cost, SMC).
 Scarcity, negative prices and cross-border spreads are therefore *duals, never post-processed*: unserved
@@ -277,7 +278,7 @@ une erreur qui en compense une autre.** Deux autres variantes rejetées : toutes
 (l'Autriche est dans le puits DE_REST), et IT_NORTH est amputée d'AT↔IT et SI↔IT — son import modélisé
 plafonne à 6 177 MW contre 7 786 observés, et l'écart correspond presque exactement aux deux frontières
 manquantes. Les ajouter donnerait aux deux zones leurs vraies options d'import sans gonfler aucun total
-(#141).
+(#141). **→ fait au §6f** : le split de DE_REST rouvre CH↔AT et IT↔AT/SI ; CH passe de +11,4 à +7,4.
 
 *Note de méthode, apprise à mes dépens.* `tools/golden.py capture` **hashe le lac existant, il ne rejoue
 pas le backtest**. Après une série d'expériences qui écrasent chacune `data/lake/dispatch/backtest_prices`,
@@ -285,6 +286,45 @@ capturer sans avoir régénéré le lac avec le code retenu fige les chiffres d'
 arrivé ici : une première version de cette section annonçait une moyenne de 12,3 % qui était en réalité
 celle d'un run « toutes frontières » sur 10 semaines d'hiver. Toujours régénérer le lac avec le code
 commité **avant** `capture`.
+
+### 6f. Split de DE_REST en quatre clusters voisins (2026-07)
+
+Le puits `DE_REST` (NL+AT+DK+PL+CZ agrégés en une zone) achetait à DE-LU ses ~10,2 GW d'export manquants,
+mais **agrégeait cinq marchés qui ne sont pas dans le même mode aux mêmes heures** : en abondance éolienne
+allemande, NL peut encore importer pendant que PL/CZ exportent, si bien que la charge nette agrégée ne sature
+jamais (+41 GW, 0 % d'heures de surplus en 2024). Deux conséquences : les négatifs régionaux restaient
+sous-tirés (#138) et les frontières alpines (CH↔AT, IT↔AT/SI) étaient impossibles à représenter (#141).
+
+Le split le remplace par **quatre clusters price-responsive** (chacun sa demande / son RES / son stack) :
+`NL` (bord DE-LU, BE), `DK` (DK_1+DK_2), `PL_CZ`, `AT_SI` (AT+SI ; bords DE-LU, CH, IT-North). Données
+ENTSO-E ré-extraites pour 2024 (charge, génération, flux — dont les nouvelles frontières BE↔NL, CH↔AT,
+IT↔AT, IT↔SI). La NTC de chaque frontière reste dérivée des flux réalisés (`flow_derived_ntc`).
+
+Backtest **année pleine** 2024, A/B à données identiques (|erreur baseload| SMC) :
+
+| zone | DE_REST | split | corr DE_REST → split |
+|---|---|---|---|
+| BE | −16,4 | **−2,5** | 0,76 → 0,77 |
+| CH | +11,4 | **+7,4** | 0,72 → **0,77** |
+| ES | −20,9 | −21,5 | — |
+| FR | −29,7 | −31,4 | — |
+| DE_LU | −11,1 | −17,6 | négatifs 346 → **502** (obs 457) |
+| IT_NORTH | −11,7 | **−15,6** | 0,61 → 0,61 |
+| **\|moyenne\|** | 16,9 | **16,0** | |
+
+**Le gain n'est pas dans la moyenne (quasi nulle) mais structurel** : les frontières alpines existent enfin
+(#141), BE et CH gagnent en niveau *et* en corrélation, et DE-LU cale ses négatifs sur l'observé (le −17,6
+est le prix d'un DE qui price *enfin* ses heures négatives). Coût assumé : **IT −4 pts**, dont moitié
+physique (import réel de nucléaire slovène bon marché via IT↔SI) et moitié une sous-tarification IT
+préexistante (−11,7 déjà sous DE_REST — cf. #142), qui survit au markup (~−13 %). **#138 n'est pas résolu**
+(non régressé) : le verrou des négatifs FR/BE/ES est domestique, pas topologique.
+
+**Valeur de l'eau des clusters sans prix.** Un cluster virtuel n'a ni prix observé (courbe empirique) ni
+série de stock réservoir (SDP Bellman) : son hydro de lac serait offerte au plancher ~1 €/MWh et déferlerait
+dans la zone modélisée la plus chère qu'elle borde. AT_SI (1,3 GW d'hydro alpine) **emprunte donc la courbe
+révélée de CH** (même hydrologie ; `_WATER_VALUE_PROXY` dans `hydro/water_value.py`). Effet sur le backtest
+2024 : neutre (l'import IT bon marché est dominé par le nucléaire SI, pas l'hydro), mais correct pour la
+projection, où le prix propre d'AT_SI compte.
 
 ### 6d. Offre nucléaire FR en courbe de tranches (2026-07)
 

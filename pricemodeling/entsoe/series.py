@@ -21,26 +21,29 @@ from ..db import already_ingested, ensure_rte_table, log_ingest, upsert_df
 ZONES = {"FR": "FR", "DE_LU": "DE_LU", "BE": "BE", "GB": "GB", "CH": "CH",
          "IT_NORTH": "IT_NORD", "ES": "ES"}
 
-# --- DE_REST constituents (data-only; aggregated into ONE virtual dispatch zone) ---------------
-# The 7-zone model gives DE-LU only ~8 GW of export headroom (FR 3 + BE 1 + CH 4), but the observed
-# 210 negative hours in 2019 imply ~14.5 GW. The gap is DE's NL/AT/DK/PL/CZ borders, which simply do
-# not exist in the zone set — so DE's surplus is trapped, it prices itself to the RES bid for 665 h,
-# and the negative prices never propagate to FR/BE/CH (85 %/79 %/82 % of whose observed negatives are
-# DE-coincident). These are ingested and aggregated into a single price-responsive `DE_REST` zone
-# rather than modelled individually: one extra zone buys back the missing headroom and keeps the
-# projection valid (an exogenous export schedule would not). Their own external borders (NO/SE/SK/HU)
-# are out of scope — a documented v1 boundary simplification.
-DE_REST_ZONES = {"NL": "NL", "AT": "AT", "DK_1": "DK_1", "DK_2": "DK_2", "PL": "PL", "CZ": "CZ"}
+# --- neighbour-cluster constituents (data-only; feed four virtual dispatch zones) ---------------
+# DE-LU's out-of-model neighbours. The 7-zone model gave DE-LU only ~8 GW of export headroom (FR 3 +
+# BE 1 + CH 4), but the observed negative hours imply ~14.5 GW; the gap is DE's NL/AT/DK/PL/CZ borders,
+# absent from the zone set. dispatch_model groups these into FOUR price-responsive clusters (NL / DK /
+# PL_CZ / AT_SI — see neighbours/blocks.py) rather than one DE_REST block, so each keeps its own
+# tightness and its own out-of-DE borders. SI (Slovenia) is added here for the AT_SI cluster: it is not
+# a DE neighbour but it borders IT-North, so the IT_NORTH↔SI link needs its area code and (for the
+# cluster's fundamentals) its load/generation. External borders (NO/SE/SK/HU) stay out of scope.
+DE_REST_ZONES = {"NL": "NL", "AT": "AT", "DK_1": "DK_1", "DK_2": "DK_2", "PL": "PL", "CZ": "CZ",
+                 "SI": "SI"}
 ALL_ZONES = {**ZONES, **DE_REST_ZONES}
 
 # coupling graph among the 7 zones (undirected; both directions fetched)
 BORDERS = [("FR", "DE_LU"), ("FR", "BE"), ("FR", "GB"), ("FR", "CH"), ("FR", "IT_NORTH"),
            ("FR", "ES"), ("DE_LU", "BE"), ("DE_LU", "CH"), ("CH", "IT_NORTH"), ("BE", "GB")]
-# DE-LU ↔ DE_REST constituents: the missing headroom. (DE/AT were one bidding zone until Oct-2018,
+# DE-LU ↔ its neighbour constituents: the missing headroom. (DE/AT were one bidding zone until Oct-2018,
 # so the DE_LU-AT border only carries flow from then on.)
 DE_REST_BORDERS = [("DE_LU", "NL"), ("DE_LU", "AT"), ("DE_LU", "DK_1"), ("DE_LU", "DK_2"),
                    ("DE_LU", "PL"), ("DE_LU", "CZ")]
-ALL_BORDERS = BORDERS + DE_REST_BORDERS
+# out-of-DE borders needed only once the clusters are split apart (NL also touches BE; the AT_SI cluster
+# touches CH and IT-North). flow_derived_ntc sums these constituent flows into the cluster-level NTC.
+SPLIT_BORDERS = [("BE", "NL"), ("CH", "AT"), ("IT_NORTH", "AT"), ("IT_NORTH", "SI")]
+ALL_BORDERS = BORDERS + DE_REST_BORDERS + SPLIT_BORDERS
 
 T_LOAD, T_GEN, T_FLOW, T_NTC = "entsoe_load", "entsoe_generation", "entsoe_flows", "entsoe_ntc"
 T_PRICE, T_CAP = "entsoe_day_ahead_prices", "entsoe_installed_capacity"

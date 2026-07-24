@@ -21,13 +21,19 @@ zones:
   CH:      { name: "Switzerland",   unit_resolved: false, entsoe: "CH" }
   IT_NORTH: { name: "Italy North",  unit_resolved: false, entsoe: "IT_NORD" }
   ES:      { name: "Spain",         unit_resolved: false, entsoe: "ES" }
-  # Virtual aggregate of DE-LU's out-of-model neighbours (NL+AT+DK+PL+CZ). Not a real bidding zone:
-  # it exists to give DE-LU its true ~10.2 GW of export headroom (measured p99.5 of 2019 flows) instead
-  # of the 8 GW the 7-zone set allowed. Price-responsive (own demand/RES/stack), so it also carries the
-  # negative-price contagion into FR/BE/CH. No observed price series -> modelled but never scored.
-  DE_REST: { name: "DE neighbours (NL+AT+DK+PL+CZ)", unit_resolved: false, entsoe: "", virtual: true }
+  # DE-LU's out-of-model neighbours as FOUR price-responsive clusters (was one DE_REST block). Splitting
+  # keeps DE-LU's true ~10.2 GW of export headroom while letting each cluster hold its own tightness and
+  # its own out-of-DE borders (NL↔BE, CH↔AT, IT-North↔AT/SI) — the aggregate could carry neither, which
+  # left the regional negatives under-fired (#138) and the Alpine borders amputated (#141). Not real
+  # bidding zones; no observed price series -> modelled but never scored. See neighbours/blocks.py.
+  NL:      { name: "Netherlands",    unit_resolved: false, entsoe: "", virtual: true }
+  DK:      { name: "Denmark (DK1+DK2)", unit_resolved: false, entsoe: "", virtual: true }
+  PL_CZ:   { name: "Poland+Czechia", unit_resolved: false, entsoe: "", virtual: true }
+  AT_SI:   { name: "Austria+Slovenia", unit_resolved: false, entsoe: "", virtual: true }
 
-# undirected coupling graph; both directions get an NTC-bounded flow variable
+# undirected coupling graph; both directions get an NTC-bounded flow variable.
+# NB: the backtest LP topology is driven by the NTC table in rolling/assemble.py (borders = its keys
+# intersected with the active zones); this list mirrors it for config.borders / the projection path.
 borders:
   - [FR, DE_LU]
   - [FR, BE]
@@ -39,6 +45,14 @@ borders:
   - [DE_LU, CH]
   - [CH, IT_NORTH]
   - [BE, GB]
+  # DE-LU's neighbour clusters + their out-of-DE borders (see zones note above)
+  - [DE_LU, NL]
+  - [BE, NL]
+  - [DE_LU, DK]
+  - [DE_LU, PL_CZ]
+  - [DE_LU, AT_SI]
+  - [CH, AT_SI]
+  - [IT_NORTH, AT_SI]
 
 # --- Historical inputs (pricemodeling DB) ------------------------------------
 data:

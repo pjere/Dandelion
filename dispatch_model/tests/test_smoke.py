@@ -17,9 +17,11 @@ def _have_db(cfg):
 def test_config_and_zones():
     cfg = _cfg()
     assert cfg.seed > 0
-    # 7 physical footprint zones + DE_REST, the virtual export-sink block (NL+AT+DK+PL+CZ) added for the
-    # DE-LU merit order (see STEP_VII_METHODOLOGY §1)
-    assert len(cfg.zones) == 8 and "DE_REST" in cfg.zones and cfg.unit_resolved_zone == "FR"
+    # 7 physical footprint zones + 4 virtual neighbour clusters (NL / DK / PL_CZ / AT_SI) that give DE-LU
+    # its export headroom and close the Alpine borders (see STEP_VII_METHODOLOGY §1, neighbours/blocks.py)
+    clusters = {"NL", "DK", "PL_CZ", "AT_SI"}
+    assert len(cfg.zones) == 11 and clusters <= set(cfg.zones) and "DE_REST" not in cfg.zones
+    assert cfg.unit_resolved_zone == "FR"
     assert cfg.section("zones")["FR"]["unit_resolved"] is True
     # every border connects two declared zones
     zs = set(cfg.all_zones)

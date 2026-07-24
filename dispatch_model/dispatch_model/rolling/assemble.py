@@ -24,9 +24,14 @@ NTC = {
     ("FR", "DE_LU"): (3000, 3000), ("FR", "BE"): (4300, 2800), ("FR", "CH"): (3000, 3000),
     ("FR", "IT_NORTH"): (4350, 2650), ("FR", "ES"): (2800, 3300), ("DE_LU", "BE"): (1000, 1000),
     ("DE_LU", "CH"): (4000, 4000), ("CH", "IT_NORTH"): (4200, 1900),
-    # DE-LU ↔ its out-of-model neighbours, aggregated (defaults = simultaneous p99.5 of 2019 flows;
-    # `flow_derived_ntc` recomputes per backtest year). Asymmetric: DE was a net exporter in 2019.
-    ("DE_LU", "DE_REST"): (10215, 5139),
+    # DE-LU's out-of-model neighbours, split into four clusters (was one DE_REST block). Defaults are
+    # physical interconnector capacities; `flow_derived_ntc` recomputes per backtest year from realized
+    # flow (summing constituent borders), so these only bind in years lacking flow history.
+    ("DE_LU", "NL"): (4250, 4250), ("BE", "NL"): (2400, 2400),          # NL cluster
+    ("DE_LU", "DK"): (3500, 3500),                                       # DK_1 + DK_2 → DE
+    ("DE_LU", "PL_CZ"): (2600, 2600),                                    # PL + CZ → DE
+    ("DE_LU", "AT_SI"): (5400, 5400), ("CH", "AT_SI"): (1200, 1200),    # AT + SI: DE / CH / IT-North
+    ("IT_NORTH", "AT_SI"): (870, 385),                                   # Brenner (AT) + IT↔SI
 }
 _EXCLUDE_DISPATCH = {"hydro_psp", "hydro_ror", "solar", "wind_onshore", "wind_offshore", "waste"}
 
@@ -35,8 +40,10 @@ _EXCLUDE_DISPATCH = {"hydro_psp", "hydro_ror", "solar", "wind_onshore", "wind_of
 # La NTC dérivée prend le p99.5 du flux *réalisé* : elle mesure l'usage, pas la capacité. Pour une zone dont
 # les imports se répartissent sur plusieurs frontières dont aucune ne sature, chaque frontière est sous-lue
 # individuellement — mais leur **somme** reste juste, car c'est le total simultané qui est physiquement
-# contraint. Mesuré sur CH 2024 : total d'import dérivé 5 422 MW contre 5 676 observés en p99.5 (le total
-# est bon), alors que DE→CH est lu à 960 MW contre ~4 000 physiques (la répartition est fausse).
+# contraint. Le cas type est DE→CH, lu sous son import réel (~3 600 MW observés en p99.5) parce que ce flux
+# ne culmine pas quand les autres frontières suisses culminent. Depuis le split de DE_REST, CH a **quatre**
+# frontières d'import ré-allouées (FR, DE-LU, IT-North et la nouvelle CH↔AT_SI) — la ré-allocation les couvre
+# toutes.
 #
 # On corrige donc la **répartition** sans toucher au **total** : chaque frontière est portée à sa capacité
 # physique (table `NTC`), puis l'ensemble est renormalisé pour retrouver le total dérivé. Plancher sans
