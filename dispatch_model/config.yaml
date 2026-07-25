@@ -90,6 +90,15 @@ solver:
   lookahead_days: 2
   threads: 0                     # 0 = auto
 
+# --- Plant operating rigidities + downward bid ladder (FLEX module) ----------
+# Endogenous negative-price formation: nuclear/fossil rigidities (two-tier min, deep-modulation rationing,
+# xénon ramp asymmetry, end-of-cycle stretch-out, start/recommit costs, reserves, grid-stability floor) and
+# the OA/CR downward bid ladder. Pure LP, no binaries → balance duals stay valid prices. OFF by default →
+# the LP is byte-identical to the pre-module dispatch (golden preserved). Physics per reactor class live in
+# flexibility/reactor_class.py; year-indexed regime trajectories in the dispatch_* workbook tabs.
+flexibility:
+  enabled: false
+
 # --- Projection --------------------------------------------------------------
 projection:
   horizon: { start_year: 2027, end_year: 2046 }

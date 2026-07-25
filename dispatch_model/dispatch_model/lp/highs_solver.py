@@ -37,12 +37,22 @@ def _tranches_for(zone, zones_data, res_bid, res_tranches, n):
     return [(1.0, np.full(n, bid), "res")], rp
 
 
-def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tranches):
+def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tranches, flex=None):
     """Assemble the LP as HiGHS column arrays + the index maps needed to read the solution back.
 
     Column blocks, in order, per zone: gen(units×t), res(tranches×t), ens(t), dump(t); then per border:
-    fwd(t), bwd(t). Rows: balance(zone×t) [equality, dual = price], then one ≤ row per energy cap.
-    """
+    fwd(t), bwd(t); then (opt-in) per flex zone: commit u(mu×t), deep-mod d(mu×t), start su(mu×t). Rows:
+    balance(zone×t) [equality, dual = price], then flex rigidity rows (opt-in), then one ≤ row per energy cap.
+
+    `flex` (opt-in, FLEX-F2 plant-operating-rigidities, still a PURE LP so the balance duals stay prices) =
+    {zone: {"idx": int[mu] positions of the flex units in the zone stack, "alpha_band": f[mu],
+    "alpha_tech": f[mu], "c_mod": float €/MWh, "c_start": f[mu] €/MW}}. For each flex unit it adds a
+    committed-capacity `u∈[0, avail·cap]`, a deep-modulation depth `d≥0` (cost `c_mod`), and a recommitment
+    `su≥0` (cost `c_start`), with `p ≤ u`, the two-tier minimum `p ≥ α_band·u − d` and `d ≤ (α_band−α_tech)·u`
+    (C1), and `su ≥ u_t − u_{t-1}` (C5). The start cost makes commitment *sticky*: rather than shut for a short
+    negative episode (and pay to recommit) the reactor holds `u` high, is floored at `α_band·u`, and — when
+    the region is in surplus — drives the price below zero. `flex=None` (default) is byte-identical to the
+    pure LP (golden preserved). C2 budgets / C3 xénon / min-down persistence are added in F2b/F3."""
     T = pd.DatetimeIndex(times)
     n = len(T)
     zones = list(zones_data)
@@ -71,6 +81,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
     # index de diagnostic (cf. lp.diagnostics) : renseignes ici, jamais lus par la resolution
     res_cols, ens_cols, dump_cols, srmc_by_unit, res_schemes = {}, {}, {}, {}, {}
     floor_da = {z: (float(price_floor[z]) if isinstance(price_floor, dict) else float(price_floor)) for z in zones}
+    flex_info = {}                                          # zone -> (gbase, gcap, flex_spec) for the rigidity rows
     for z in zones:
         st = zones_data[z]["stack"]
         units = st["unit_id"].to_numpy()
@@ -84,12 +95,18 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         else:
             avail = av.reindex(unit=units, time=T).fillna(0.0).transpose("unit", "time").to_numpy()
         gcap = avail * cap[:, None]                         # (m, n) upper; lower = gcap*minf
-        gbase = add_block(np.repeat(srmc, n), (gcap * minf[:, None]), gcap)
+        glo = gcap * minf[:, None]
+        fz = flex.get(z) if flex else None
+        if fz is not None:
+            glo[np.asarray(fz["idx"], int)] = 0.0          # flex units: the C1 band governs the floor, not minf
+        gbase = add_block(np.repeat(srmc, n), glo, gcap)
         # balance: each gen col (u,t) -> row zrow[z]+t, +1
         t_idx = np.tile(np.arange(n), m)
         rows.append(zrow[z] + t_idx); cols.append(gbase + np.arange(m * n)); vals.append(np.ones(m * n))
         gen_cols[z] = (gbase, m, units, st["tech"].to_numpy())
         srmc_by_unit[z] = srmc
+        if fz is not None:
+            flex_info[z] = (gbase, gcap, fz)
 
         trs, rp = _tranches_for(z, zones_data, res_bid, res_tranches, n)
         res_schemes[z] = [sc for _sh, _f, sc in trs]
@@ -125,10 +142,47 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         rows.append(zrow[a] + np.arange(n)); cols.append(wbase + np.arange(n)); vals.append(np.ones(n))
         flow_cols[nm] = (fbase, wbase)
 
-    # energy-cap rows (hydro budgets): Σ_{u∈z,tech} Σ_t gen ≤ mwh
+    # extra (non-balance) rows, from n_bal via a shared counter: flex rigidity rows (opt-in) first, then
+    # energy caps. When flex is falsy this block is skipped → the LP is byte-identical to the pure model.
     row_lo = [np.zeros(0)]; row_up = [np.zeros(0)]
+    flex_cols = {}                                          # zone -> (u_base, d_base, su_base, idx) for read-back
+    xrow = n_bal
+    if flex:
+        for z, (gbase, gcap, fz) in flex_info.items():
+            fidx = np.asarray(fz["idx"], int); mu = fidx.size
+            gc = gcap[fidx]                                 # (mu, n) available cap of the flex units
+            ab = np.asarray(fz["alpha_band"], float); at = np.asarray(fz["alpha_tech"], float)
+            dband = np.repeat(ab - at, n); ab_rep = np.repeat(ab, n)
+            c_mod = float(fz["c_mod"]); c_start = np.asarray(fz["c_start"], float)
+            ub = add_block(np.zeros(mu * n), np.zeros(mu * n), gc.ravel())                 # u ∈ [0, avail·cap]
+            db = add_block(np.full(mu * n, c_mod), np.zeros(mu * n), np.full(mu * n, _INF))  # deep-mod d ≥ 0
+            sb = add_block(np.repeat(c_start, n), np.zeros(mu * n), np.full(mu * n, _INF))   # start su ≥ 0
+            flex_cols[z] = (ub, db, sb, fidx)
+            pcols = np.concatenate([gbase + ui * n + np.arange(n) for ui in fidx])   # p of flex units (j-major)
+            ucols = ub + np.arange(mu * n); dcols = db + np.arange(mu * n)
+            rr = xrow + np.arange(mu * n)                                            # p − u ≤ 0
+            rows.append(rr); cols.append(pcols); vals.append(np.ones(mu * n))
+            rows.append(rr); cols.append(ucols); vals.append(-np.ones(mu * n))
+            row_lo.append(np.full(mu * n, -_INF)); row_up.append(np.zeros(mu * n)); xrow += mu * n
+            rr = xrow + np.arange(mu * n)                                            # C1a: α_band·u − d − p ≤ 0
+            rows.append(rr); cols.append(ucols); vals.append(ab_rep)
+            rows.append(rr); cols.append(dcols); vals.append(-np.ones(mu * n))
+            rows.append(rr); cols.append(pcols); vals.append(-np.ones(mu * n))
+            row_lo.append(np.full(mu * n, -_INF)); row_up.append(np.zeros(mu * n)); xrow += mu * n
+            rr = xrow + np.arange(mu * n)                                            # C1b: d − (α_band−α_tech)·u ≤ 0
+            rows.append(rr); cols.append(dcols); vals.append(np.ones(mu * n))
+            rows.append(rr); cols.append(ucols); vals.append(-dband)
+            row_lo.append(np.full(mu * n, -_INF)); row_up.append(np.zeros(mu * n)); xrow += mu * n
+            for j in range(mu):                                                     # C5: su_t − u_t + u_{t-1} ≥ 0
+                rr = xrow + np.arange(n - 1)
+                rows.append(rr); cols.append(sb + j * n + np.arange(1, n)); vals.append(np.ones(n - 1))
+                rows.append(rr); cols.append(ub + j * n + np.arange(1, n)); vals.append(-np.ones(n - 1))
+                rows.append(rr); cols.append(ub + j * n + np.arange(0, n - 1)); vals.append(np.ones(n - 1))
+                xrow += n - 1
+            row_lo.append(np.zeros(mu * (n - 1))); row_up.append(np.full(mu * (n - 1), _INF))
+
+    # energy-cap rows (hydro budgets): Σ_{u∈z,tech} Σ_t gen ≤ mwh
     ecap_rows = {}
-    ecap_row = n_bal
     for z in zones:
         gbase, m, _units, tech = gen_cols[z]
         for t_name, mwh in (zones_data[z].get("energy_caps") or {}).items():
@@ -136,16 +190,16 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             if umask.size == 0:
                 continue
             cc = (gbase + (umask[:, None] * n + np.arange(n)[None, :])).ravel()
-            rows.append(np.full(cc.size, ecap_row)); cols.append(cc); vals.append(np.ones(cc.size))
+            rows.append(np.full(cc.size, xrow)); cols.append(cc); vals.append(np.ones(cc.size))
             row_lo.append([-_INF]); row_up.append([float(mwh)])
-            ecap_rows[f"{z}:{t_name}"] = ecap_row
-            ecap_row += 1
+            ecap_rows[f"{z}:{t_name}"] = xrow
+            xrow += 1
 
     # balance RHS (equality: lower = upper = demand)
     dem = np.concatenate([zinfo[z]["demand"] for z in zones])
     row_lower = np.concatenate([dem] + row_lo)
     row_upper = np.concatenate([dem] + row_up)
-    nrow = ecap_row
+    nrow = xrow
 
     R = np.concatenate(rows); C = np.concatenate(cols); V = np.concatenate(vals)
     return {
@@ -154,7 +208,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         "row_lower": row_lower, "row_upper": row_upper, "coo": (R, C, V),
         "bal_dual_ix": bal_dual_ix, "flow_cols": flow_cols, "ecap_rows": ecap_rows, "T": T,
         "gen_cols": gen_cols, "res_cols": res_cols, "ens_cols": ens_cols, "dump_cols": dump_cols,
-        "srmc_by_unit": srmc_by_unit, "res_schemes": res_schemes,
+        "srmc_by_unit": srmc_by_unit, "res_schemes": res_schemes, "flex_cols": flex_cols,
     }
 
 
@@ -212,12 +266,13 @@ def _solve_and_read(h, spec, price_sign, diagnose: bool = False):
 def solve_multizone_highs(times, zones_data: dict, borders: list, ntc: dict,
                           res_bid=-10.0, voll: float = 15000.0, price_floor=-500.0,
                           res_tranches: dict | None = None, price_sign: float = 1.0,
-                          diagnose: bool = False) -> dict:
+                          diagnose: bool = False, flex: dict | None = None) -> dict:
     """Cold-build + solve one window's dispatch LP directly in HiGHS. Same contract as
     ``multi_zone.solve_multizone`` (returns per-zone prices, flows, water values, objective).
 
-    `price_sign` maps the HiGHS row dual to the market price; -1.0 reproduces linopy's sign (validated)."""
-    spec = _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tranches)
+    `price_sign` maps the HiGHS row dual to the market price; -1.0 reproduces linopy's sign (validated).
+    `flex` opts into the plant-operating-rigidity rows (see ``_build``); None keeps the pure LP."""
+    spec = _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tranches, flex)
     model = highspy.HighsModel()
     lp = model.lp_
     lp.num_col_ = spec["ncol"]; lp.num_row_ = spec["nrow"]
