@@ -32,6 +32,9 @@ NTC = {
     ("DE_LU", "PL_CZ"): (2600, 2600),                                    # PL + CZ → DE
     ("DE_LU", "AT_SI"): (5400, 5400), ("CH", "AT_SI"): (1200, 1200),    # AT + SI: DE / CH / IT-North
     ("IT_NORTH", "AT_SI"): (870, 385),                                   # Brenner (AT) + IT↔SI
+    # IT-North ↔ the southern Italian bidding zones (internal NORD↔CNOR border). Gives IT-North its
+    # export-south demand — the missing tightness that under-priced it ~15 % in 2024 (#142).
+    ("IT_NORTH", "IT_SOUTH"): (5000, 3000),
 }
 _EXCLUDE_DISPATCH = {"hydro_psp", "hydro_ror", "solar", "wind_onshore", "wind_offshore", "waste"}
 

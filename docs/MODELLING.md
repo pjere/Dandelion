@@ -96,10 +96,10 @@ dispatch consumes. Detail: `availability_model/METHODOLOGY.md`.
 
 The price-formation core. A continuous **linear dispatch** (linopy/HiGHS, no unit commitment) over a
 7-zone European footprint — France **unit-resolved** (≈170 units, SRMC = fuel/η + CO₂·intensity/η·EUA +
-VOM), the neighbours DE-LU / BE / CH / IT-North / ES as aggregated technology-block stacks, **four virtual
-neighbour clusters** (NL / DK / PL_CZ / AT_SI — DE-LU's out-of-model neighbours, price-responsive; see §6f),
-and GB as a border supply curve — coupled by NTC-bounded cross-border flows. Solved over rolling weekly
-windows.
+VOM), the neighbours DE-LU / BE / CH / IT-North / ES as aggregated technology-block stacks, **five virtual
+neighbour clusters** (NL / DK / PL_CZ / AT_SI give DE-LU its export headroom + the Alpine borders, §6f;
+IT_SOUTH gives IT-North its export-south demand, §6g — all price-responsive), and GB as a border supply
+curve — coupled by NTC-bounded cross-border flows. Solved over rolling weekly windows.
 
 The **price of each zone is the dual of its energy-balance constraint** (the system marginal cost, SMC).
 Scarcity, negative prices and cross-border spreads are therefore *duals, never post-processed*: unserved
@@ -325,6 +325,38 @@ dans la zone modélisée la plus chère qu'elle borde. AT_SI (1,3 GW d'hydro alp
 révélée de CH** (même hydrologie ; `_WATER_VALUE_PROXY` dans `hydro/water_value.py`). Effet sur le backtest
 2024 : neutre (l'import IT bon marché est dominé par le nucléaire SI, pas l'hydro), mais correct pour la
 projection, où le prix propre d'AT_SI compte.
+
+### 6g. IT-North n'est pas une île : le couplage au sud italien (2026-07)
+
+IT-North était sous-tarifée de ~15 % au niveau SMC en 2024 **seulement** (bien tarifée en 2019 +3,6 / 2022
++6,9). Un levier **stack** a été tenté et **rejeté** : élargir l'efficience gaz (queue OCGT, grossière ou
+fine) corrige 2024 mais **régresse 2019** — le SRMC scale avec le combustible, aucune tranche n'est
+« chère en 2024 mais inactive en 2019 ». La cause n'est donc pas le stack.
+
+**Elle est topologique.** L'Italie a plusieurs zones de marché ; le modèle ne connaît qu'IT-North (=NORD),
+couplée à ses seuls voisins nord (FR/CH/AT/SI). Or IT-North **exporte vers le sud italien** : bilan 2024,
+gen 13,8 + import-nord 4,7 vs charge 17,7 GW ⇒ **export-sud implicite ~0,8 GW moyen, 72 % des heures, et
+jusqu'à ~1,9 GW à spot > 160 €** (flux NORD→CNOR observé net ~1,3 GW). Cette demande d'export-sud est
+**invisible** au modèle, qui sous-estime la tension d'IT-North et la sous-tarife — pile aux heures chères,
+là où elle exporte le plus. 2024-spécifique en magnitude : en 2019 les prix ne montaient jamais assez pour
+ce gros export (à spot < 80 €, IT-North *importe* du sud).
+
+**Fix** (réutilise la machinerie du split §6f) : le sud devient un **cluster price-responsive** `IT_SOUTH`
+= CNOR+CSUD+SUD+CALA+SICI+SARD, couplé à IT-North par la frontière interne **NORD↔CNOR**. Données ENTSO-E
+sud extraites pour 2024 (charge/gen/prix + flux). Backtest 2024 (|erreur baseload| SMC) :
+
+| zone | avant | après |
+|---|---|---|
+| IT_NORTH | −15,6 | **−13,3** (corr **0,61 → 0,68**) |
+| CH | +7,4 | +8,1 |
+| autres | — | inchangées (±0,4) |
+
+**Isolé et sans risque hors-2024** : contrairement au levier stack, c'est de la demande/topologie, donc les
+autres zones ne bougent quasi pas ; et faute de données sud avant 2024, le cluster est **écarté** pour les
+autres années (le backtest le drop) — 2019 reste identique, par construction. Gain modeste sur le niveau
+(+2,3) mais net sur la **corrélation** (le vrai signal structurel, que le markup ne peut pas fournir). Le
+résidu (IT à −13,3) tient à la part **non-économique** du flux observé et au pouvoir de marché estival, un
+sujet plus petit. Extension aux autres années = extraction sud multi-années (v1 : 2024 seul).
 
 ### 6d. Offre nucléaire FR en courbe de tranches (2026-07)
 

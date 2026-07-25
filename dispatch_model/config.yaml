@@ -30,6 +30,9 @@ zones:
   DK:      { name: "Denmark (DK1+DK2)", unit_resolved: false, entsoe: "", virtual: true }
   PL_CZ:   { name: "Poland+Czechia", unit_resolved: false, entsoe: "", virtual: true }
   AT_SI:   { name: "Austria+Slovenia", unit_resolved: false, entsoe: "", virtual: true }
+  # Southern Italian bidding zones (CNOR+CSUD+SUD+CALA+SICI+SARD) coupled to IT-North via NORD↔CNOR. Gives
+  # IT-North its export-south demand — the missing tightness that under-priced it ~15 % in 2024 (#142, §6g).
+  IT_SOUTH: { name: "Italy South (CNOR+CSUD+SUD+CALA+SICI+SARD)", unit_resolved: false, entsoe: "", virtual: true }
 
 # undirected coupling graph; both directions get an NTC-bounded flow variable.
 # NB: the backtest LP topology is driven by the NTC table in rolling/assemble.py (borders = its keys
@@ -53,6 +56,7 @@ borders:
   - [DE_LU, AT_SI]
   - [CH, AT_SI]
   - [IT_NORTH, AT_SI]
+  - [IT_NORTH, IT_SOUTH]
 
 # --- Historical inputs (pricemodeling DB) ------------------------------------
 data:

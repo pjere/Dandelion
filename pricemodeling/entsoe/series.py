@@ -31,7 +31,12 @@ ZONES = {"FR": "FR", "DE_LU": "DE_LU", "BE": "BE", "GB": "GB", "CH": "CH",
 # cluster's fundamentals) its load/generation. External borders (NO/SE/SK/HU) stay out of scope.
 DE_REST_ZONES = {"NL": "NL", "AT": "AT", "DK_1": "DK_1", "DK_2": "DK_2", "PL": "PL", "CZ": "CZ",
                  "SI": "SI"}
-ALL_ZONES = {**ZONES, **DE_REST_ZONES}
+# Southern Italian bidding zones (data-only) → the virtual IT_SOUTH cluster. IT-North (=NORD) is not an
+# island: it exports to the south, so modelling only IT-North's own load under-prices it (#142). The south
+# couples to IT-North solely through the internal NORD↔CNOR border (NORD borders only CNOR).
+IT_SOUTH_ZONES = {"IT_CNOR": "IT_CNOR", "IT_CSUD": "IT_CSUD", "IT_SUD": "IT_SUD",
+                  "IT_CALA": "IT_CALA", "IT_SICI": "IT_SICI", "IT_SARD": "IT_SARD"}
+ALL_ZONES = {**ZONES, **DE_REST_ZONES, **IT_SOUTH_ZONES}
 
 # coupling graph among the 7 zones (undirected; both directions fetched)
 BORDERS = [("FR", "DE_LU"), ("FR", "BE"), ("FR", "GB"), ("FR", "CH"), ("FR", "IT_NORTH"),
@@ -43,7 +48,9 @@ DE_REST_BORDERS = [("DE_LU", "NL"), ("DE_LU", "AT"), ("DE_LU", "DK_1"), ("DE_LU"
 # out-of-DE borders needed only once the clusters are split apart (NL also touches BE; the AT_SI cluster
 # touches CH and IT-North). flow_derived_ntc sums these constituent flows into the cluster-level NTC.
 SPLIT_BORDERS = [("BE", "NL"), ("CH", "AT"), ("IT_NORTH", "AT"), ("IT_NORTH", "SI")]
-ALL_BORDERS = BORDERS + DE_REST_BORDERS + SPLIT_BORDERS
+# IT-North ↔ south: the single internal border that carries IT-North's export-south demand (#142).
+IT_SOUTH_BORDERS = [("IT_NORTH", "IT_CNOR")]
+ALL_BORDERS = BORDERS + DE_REST_BORDERS + SPLIT_BORDERS + IT_SOUTH_BORDERS
 
 T_LOAD, T_GEN, T_FLOW, T_NTC = "entsoe_load", "entsoe_generation", "entsoe_flows", "entsoe_ntc"
 T_PRICE, T_CAP = "entsoe_day_ahead_prices", "entsoe_installed_capacity"

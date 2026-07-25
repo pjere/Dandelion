@@ -17,10 +17,10 @@ def _have_db(cfg):
 def test_config_and_zones():
     cfg = _cfg()
     assert cfg.seed > 0
-    # 7 physical footprint zones + 4 virtual neighbour clusters (NL / DK / PL_CZ / AT_SI) that give DE-LU
-    # its export headroom and close the Alpine borders (see STEP_VII_METHODOLOGY §1, neighbours/blocks.py)
-    clusters = {"NL", "DK", "PL_CZ", "AT_SI"}
-    assert len(cfg.zones) == 11 and clusters <= set(cfg.zones) and "DE_REST" not in cfg.zones
+    # 7 physical footprint zones + 5 virtual neighbour clusters: NL / DK / PL_CZ / AT_SI (DE-LU's export
+    # headroom + Alpine borders) and IT_SOUTH (IT-North's export-south demand). See neighbours/blocks.py.
+    clusters = {"NL", "DK", "PL_CZ", "AT_SI", "IT_SOUTH"}
+    assert len(cfg.zones) == 12 and clusters <= set(cfg.zones) and "DE_REST" not in cfg.zones
     assert cfg.unit_resolved_zone == "FR"
     assert cfg.section("zones")["FR"]["unit_resolved"] is True
     # every border connects two declared zones

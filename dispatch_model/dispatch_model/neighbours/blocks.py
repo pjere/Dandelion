@@ -50,6 +50,13 @@ ZONE_AGGREGATES = {
     "DK": ["DK_1", "DK_2"],
     "PL_CZ": ["PL", "CZ"],
     "AT_SI": ["AT", "SI"],
+    # IT_SOUTH = the southern Italian bidding zones, coupled to IT-North (=NORD) via the internal NORD↔CNOR
+    # border. IT-North is not an island: it exports to the south (measured 2024: net ~1.3 GW, up to ~1.9 GW
+    # at spot > 160 €, since the south's summer AC demand + weaker RES-at-peak pull it up). The 7-zone model
+    # saw only IT-North's own load, so it under-estimated its tightness and under-priced it by ~15 % in 2024
+    # — worst exactly in the high-price, high-south-export hours (#142). Modelling the south as a price-
+    # responsive cluster gives IT-North its true export-south demand. External borders (GR/ME/MT) out of scope.
+    "IT_SOUTH": ["IT_CNOR", "IT_CSUD", "IT_SUD", "IT_CALA", "IT_SICI", "IT_SARD"],
 }
 
 
