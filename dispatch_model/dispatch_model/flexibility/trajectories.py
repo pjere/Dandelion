@@ -91,3 +91,31 @@ def load_oa_ladder(workbook, year: int, price_floor: float = -500.0, price_cap: 
     df = _long(workbook, "oa_ladder")
     series = _by_var(df) if df is not None else {}
     return {k: _interp(series.get(k, {}), year, d) for k, d in dflt.items()}
+
+
+# FR RES scheme → its §6 ladder bid level. `merchant` (post-support) has no subsidy → 0; unlisted schemes
+# keep their own workbook floor (only FR carries the OA/CR schemes, so this is effectively FR-only).
+_LADDER_BID = {"complement_remuneration": "cr_bid", "obligation_achat": "oa_bid", "merchant": 0.0}
+
+
+def apply_oa_ladder(schemes: list[dict], ladder: dict) -> list[dict]:
+    """Override a zone's RES scheme-tranche floors with the §6 downward bid ladder (`load_oa_ladder`):
+
+      * `complement_remuneration` → `cr_bid` — the CR premium clause *suspends payment at negative prices*, so
+        below zero the plant has no subsidy incentive and bids ≈0 (RES_BIDDING_DESIGN.md §Sources);
+      * `obligation_achat` → `oa_bid` — the legacy feed-in tariff is *paid regardless of price*, so it produces
+        however deep the price goes and bids at the market floor ("legacy OA at floor");
+      * `merchant` → 0.
+
+    Every resulting bid is truncated to `[market_floor, market_cap]` (the EU day-ahead price bounds). Shares
+    and triggers are untouched — the OA *volume* still decays by vintage expiry upstream (`scheme_shares`),
+    the ladder only sets the *price* each surviving tranche bids at. Schemes with no ladder entry keep their
+    own (truncated) floor, so a non-FR zone passed here is only clamped, not repriced.
+    """
+    lo, hi = float(ladder["market_floor"]), float(ladder["market_cap"])
+    out = []
+    for t in schemes:
+        bid = _LADDER_BID.get(t["scheme"])
+        floor = float(t["floor"]) if bid is None else (float(bid) if isinstance(bid, float) else float(ladder[bid]))
+        out.append({**t, "floor": min(max(floor, lo), hi)})
+    return out

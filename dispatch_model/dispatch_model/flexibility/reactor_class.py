@@ -19,24 +19,31 @@ Fields per class (all fractions are of the unit's *available* capacity, per hour
   xenon_beta    — up-ramp penalty per unit of recent deep-mod depth         (C3)
   d_max_8h      — 8-hour deep-mod energy budget, fraction of cap·h          (C2a)
   d_max_day     — daily deep-mod energy budget, fraction of cap·h           (C2b)
+  rho_recommit  — min-down recommit ramp: max hourly rise of committed cap  (C5 min-down)
+                  as a fraction of available cap (u_t ≤ u_{t−1} + avail·ρ). A shut reactor
+                  cannot re-commit instantly (hot-standby → full-load takes hours), so ρ<1 is
+                  a linear min-down-time proxy: it holds `u` down after a shutdown for ~1/ρ
+                  hours, which — with the C5 start cost — makes a short negative episode cheaper
+                  to ride out at the band floor than to shut and pay the recommit ramp back up.
 """
 from __future__ import annotations
 
 
 # palier → physics. Standard French fleet: CP0/CP1/CP2 (900 MW ×32), P4/P'4 (1300 MW ×20), N4 (1450 MW ×4),
 # EPR (1650 MW, Flamanville-3), EPR2 (future, designed for enhanced flexibility). Deep-band = α_band−α_tech.
-def _c(alpha_band, alpha_tech, r_up, r_down, xenon_beta, d_max_8h, d_max_day) -> dict:
+def _c(alpha_band, alpha_tech, r_up, r_down, xenon_beta, d_max_8h, d_max_day, rho_recommit) -> dict:
     return {"alpha_band": alpha_band, "alpha_tech": alpha_tech, "r_up": r_up, "r_down": r_down,
-            "xenon_beta": xenon_beta, "d_max_8h": d_max_8h, "d_max_day": d_max_day}
+            "xenon_beta": xenon_beta, "d_max_8h": d_max_8h, "d_max_day": d_max_day,
+            "rho_recommit": rho_recommit}
 
 
 _CLASSES: dict[str, dict] = {
-    #            α_band α_tech r_up  r_down xénon_β D8h  Dday
-    "900":  _c(0.60, 0.25, 0.30, 0.50, 0.15, 2.8, 5.6),
-    "1300": _c(0.60, 0.25, 0.28, 0.48, 0.16, 2.8, 5.6),
-    "N4":   _c(0.58, 0.22, 0.26, 0.46, 0.17, 2.9, 5.8),
-    "EPR":  _c(0.55, 0.20, 0.30, 0.55, 0.14, 3.2, 6.4),
-    "EPR2": _c(0.50, 0.20, 0.35, 0.60, 0.12, 3.6, 7.2),
+    #            α_band α_tech r_up  r_down xénon_β D8h  Dday  ρ_recommit
+    "900":  _c(0.60, 0.25, 0.30, 0.50, 0.15, 2.8, 5.6, 0.20),
+    "1300": _c(0.60, 0.25, 0.28, 0.48, 0.16, 2.8, 5.6, 0.18),
+    "N4":   _c(0.58, 0.22, 0.26, 0.46, 0.17, 2.9, 5.8, 0.16),
+    "EPR":  _c(0.55, 0.20, 0.30, 0.55, 0.14, 3.2, 6.4, 0.22),
+    "EPR2": _c(0.50, 0.20, 0.35, 0.60, 0.12, 3.6, 7.2, 0.25),
 }
 _FALLBACK = "1300"     # unknown palier → the modal 1300 MW class (conservative middle)
 

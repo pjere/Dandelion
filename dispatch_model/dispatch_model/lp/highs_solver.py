@@ -44,15 +44,35 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
     fwd(t), bwd(t); then (opt-in) per flex zone: commit u(mu×t), deep-mod d(mu×t), start su(mu×t). Rows:
     balance(zone×t) [equality, dual = price], then flex rigidity rows (opt-in), then one ≤ row per energy cap.
 
-    `flex` (opt-in, FLEX-F2 plant-operating-rigidities, still a PURE LP so the balance duals stay prices) =
+    `flex` (opt-in, FLEX plant-operating-rigidities, still a PURE LP so the balance duals stay prices) =
     {zone: {"idx": int[mu] positions of the flex units in the zone stack, "alpha_band": f[mu],
-    "alpha_tech": f[mu], "c_mod": float €/MWh, "c_start": f[mu] €/MW}}. For each flex unit it adds a
+    "alpha_tech": f[mu], "c_mod": float €/MWh, "c_start": f[mu] €/MW, and (F2b, each optional) "d_max_8h",
+    "d_max_day", "r_up", "xenon_beta", "rho_recommit" — all f[mu]}}. For each flex unit it adds a
     committed-capacity `u∈[0, avail·cap]`, a deep-modulation depth `d≥0` (cost `c_mod`), and a recommitment
-    `su≥0` (cost `c_start`), with `p ≤ u`, the two-tier minimum `p ≥ α_band·u − d` and `d ≤ (α_band−α_tech)·u`
-    (C1), and `su ≥ u_t − u_{t-1}` (C5). The start cost makes commitment *sticky*: rather than shut for a short
-    negative episode (and pay to recommit) the reactor holds `u` high, is floored at `α_band·u`, and — when
-    the region is in surplus — drives the price below zero. `flex=None` (default) is byte-identical to the
-    pure LP (golden preserved). C2 budgets / C3 xénon / min-down persistence are added in F2b/F3."""
+    `su≥0` (cost `c_start`), with (F2a) `p ≤ u`, the two-tier minimum `p ≥ α_band·u − d` and
+    `d ≤ (α_band−α_tech)·u` (C1), and `su ≥ u_t − u_{t-1}` (C5-start). The start cost makes commitment *sticky*:
+    rather than shut for a short negative episode (and pay to recommit) the reactor holds `u` high, is floored
+    at `α_band·u`, and — when the region is in surplus — drives the price below zero.
+
+    F2b layers the intertemporal rationing that gives the negatives the right *depth, count and timing* — each
+    added only when its spec key is present (an F2a-shaped spec stays byte-identical):
+      • C2a `Σ_{k=0..7} d_{t−k} ≤ d_max_8h·cap` and C2b `Σ_{t∈day} d ≤ d_max_day·cap` — deep-mod energy
+        budgets (`cap` = nominal, not availability-derated), so the fleet can't modulate arbitrarily deep for
+        arbitrarily long;
+      • C3 `p_t − p_{t−1} ≤ r_up·u_t − β·Σ_{k=1..8} d_{t−k}` — xénon up-ramp asymmetry: recent deep modulation
+        poisons the core and caps how fast the unit can climb back;
+      • C5 min-down `u_t − u_{t−1} ≤ avail·rho_recommit` — a shut unit re-commits only at a bounded ramp, a
+        linear min-down-time proxy that (with `c_start`) makes riding out a short trough the cheaper option.
+
+    F3 adds the maneuverability derates + fleet-level constraints (again opt-in per key):
+      • C4 `deepband_scale` (reduced→½, none→0) scales the C1b deep band; `must_run_frac` pins a unit's gen at
+        `must_run_frac·avail·cap` (the stretch-out must-run — no modulation);
+      • C6 reserves — `Σ_nuc(u−p)+Σ_res(cap−p) ≥ r_up_req` (headroom) and `Σ_nuc(p−α_tech·u)+Σ_res p ≥
+        r_down_req` (footroom above the technical minimum), with `reserve_idx` the extra (hydro) providers;
+      • C7 `Σ_{nuc} p ≥ p_minstab` — grid-stability nuclear must-run floor.
+    `is_nuclear` (default all-True) marks which flex units are nuclear, so a combined nuclear+fossil spec (§4)
+    applies C2/C3/C6/C7 to the nuclear subset only. `flex=None` (default) is byte-identical to the pure LP
+    (golden preserved)."""
     T = pd.DatetimeIndex(times)
     n = len(T)
     zones = list(zones_data)
@@ -96,17 +116,27 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             avail = av.reindex(unit=units, time=T).fillna(0.0).transpose("unit", "time").to_numpy()
         gcap = avail * cap[:, None]                         # (m, n) upper; lower = gcap*minf
         glo = gcap * minf[:, None]
+        gup = gcap                                          # gen upper (u still bounds on gcap, see below)
         fz = flex.get(z) if flex else None
         if fz is not None:
-            glo[np.asarray(fz["idx"], int)] = 0.0          # flex units: the C1 band governs the floor, not minf
-        gbase = add_block(np.repeat(srmc, n), glo, gcap)
+            fidx0 = np.asarray(fz["idx"], int)
+            glo[fidx0] = 0.0                                # flex units: the C1 band governs the floor, not minf
+            mr = fz.get("must_run_frac")                   # C4 'none' maneuverability: pin p at the stretch-out power
+            if mr is not None:
+                mr = np.broadcast_to(np.asarray(mr, float), (fidx0.size,))
+                pin = fidx0[mr > 0]
+                if pin.size:
+                    gup = gcap.copy()
+                    pf = mr[mr > 0][:, None] * gcap[pin]    # must-run power per (unit, t) = stretch·avail·cap
+                    glo[pin] = pf; gup[pin] = pf            # p frozen (no modulation); u still free to commit
+        gbase = add_block(np.repeat(srmc, n), glo, gup)
         # balance: each gen col (u,t) -> row zrow[z]+t, +1
         t_idx = np.tile(np.arange(n), m)
         rows.append(zrow[z] + t_idx); cols.append(gbase + np.arange(m * n)); vals.append(np.ones(m * n))
         gen_cols[z] = (gbase, m, units, st["tech"].to_numpy())
         srmc_by_unit[z] = srmc
         if fz is not None:
-            flex_info[z] = (gbase, gcap, fz)
+            flex_info[z] = (gbase, gcap, cap, fz)
 
         trs, rp = _tranches_for(z, zones_data, res_bid, res_tranches, n)
         res_schemes[z] = [sc for _sh, _f, sc in trs]
@@ -148,11 +178,14 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
     flex_cols = {}                                          # zone -> (u_base, d_base, su_base, idx) for read-back
     xrow = n_bal
     if flex:
-        for z, (gbase, gcap, fz) in flex_info.items():
+        day_idx = np.unique(pd.DatetimeIndex(T).normalize(), return_inverse=True)[1]   # 0..nd-1 per hour (C2b)
+        for z, (gbase, gcap, cap, fz) in flex_info.items():
             fidx = np.asarray(fz["idx"], int); mu = fidx.size
             gc = gcap[fidx]                                 # (mu, n) available cap of the flex units
+            capf = np.asarray(cap, float)[fidx]             # (mu,) nominal cap — the C2 energy-budget base
             ab = np.asarray(fz["alpha_band"], float); at = np.asarray(fz["alpha_tech"], float)
-            dband = np.repeat(ab - at, n); ab_rep = np.repeat(ab, n)
+            dbs = np.broadcast_to(np.asarray(fz.get("deepband_scale", 1.0), float), (mu,))   # C4 reduced→½, none→0
+            dband = np.repeat((ab - at) * dbs, n); ab_rep = np.repeat(ab, n)
             c_mod = float(fz["c_mod"]); c_start = np.asarray(fz["c_start"], float)
             ub = add_block(np.zeros(mu * n), np.zeros(mu * n), gc.ravel())                 # u ∈ [0, avail·cap]
             db = add_block(np.full(mu * n, c_mod), np.zeros(mu * n), np.full(mu * n, _INF))  # deep-mod d ≥ 0
@@ -180,6 +213,85 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                 rows.append(rr); cols.append(ub + j * n + np.arange(0, n - 1)); vals.append(np.ones(n - 1))
                 xrow += n - 1
             row_lo.append(np.zeros(mu * (n - 1))); row_up.append(np.full(mu * (n - 1), _INF))
+
+            # ---- F2b rigidity families. Each is opt-in on its spec key, so an F2a-shaped spec (no key)
+            #      builds byte-identical to the block above; the toy F2a tests are unaffected. ----
+            if "d_max_8h" in fz:                       # C2a: Σ_{k=0..7} d_{t−k} ≤ D_max8h·cap (rolling 8 h)
+                B8 = np.asarray(fz["d_max_8h"], float) * capf                        # (mu,) MWh / 8h window
+                base = xrow
+                for j in range(mu):
+                    for k in range(8):                                              # d_{t−k}, k=0..7, t−k≥0
+                        tt = np.arange(k, n)
+                        rows.append(base + j * n + tt); cols.append(db + j * n + (tt - k))
+                        vals.append(np.ones(tt.size))
+                    row_lo.append(np.full(n, -_INF)); row_up.append(np.full(n, B8[j]))
+                xrow += mu * n
+            if "d_max_day" in fz:                      # C2b: Σ_{t∈day} d ≤ D_max_day·cap (calendar day)
+                Bday = np.asarray(fz["d_max_day"], float) * capf
+                nd = int(day_idx.max()) + 1
+                base = xrow
+                rr = base + (np.arange(mu)[:, None] * nd + day_idx[None, :]).ravel()
+                rows.append(rr); cols.append(db + np.arange(mu * n)); vals.append(np.ones(mu * n))
+                for j in range(mu):
+                    row_lo.append(np.full(nd, -_INF)); row_up.append(np.full(nd, Bday[j]))
+                xrow += mu * nd
+            if "r_up" in fz:                           # C3: p_t − p_{t−1} − R_up·u_t + β·Σ_{k=1..8} d_{t−k} ≤ 0
+                r_up = np.asarray(fz["r_up"], float)
+                beta = np.broadcast_to(np.asarray(fz.get("xenon_beta", 0.0), float), (mu,)).astype(float)
+                base = xrow
+                for j in range(mu):
+                    tt = np.arange(1, n); r = base + j * (n - 1) + (tt - 1)
+                    rows.append(r); cols.append(gbase + fidx[j] * n + tt); vals.append(np.ones(tt.size))       # +p_t
+                    rows.append(r); cols.append(gbase + fidx[j] * n + (tt - 1)); vals.append(-np.ones(tt.size))  # −p_{t−1}
+                    rows.append(r); cols.append(ub + j * n + tt); vals.append(np.full(tt.size, -r_up[j]))       # −R_up·u_t
+                    if beta[j] != 0.0:                                             # xénon: recent deep-mod caps the ramp
+                        for k in range(1, 9):
+                            tt2 = np.arange(max(1, k), n)                          # row t (≥1) uses d_{t−k} when t−k≥0
+                            rows.append(base + j * (n - 1) + (tt2 - 1))
+                            cols.append(db + j * n + (tt2 - k)); vals.append(np.full(tt2.size, beta[j]))
+                    row_lo.append(np.full(n - 1, -_INF)); row_up.append(np.zeros(n - 1))
+                xrow += mu * (n - 1)
+            if "rho_recommit" in fz:                   # C5 min-down proxy: u_t − u_{t−1} ≤ avail_t·ρ_recommit
+                rho = np.broadcast_to(np.asarray(fz["rho_recommit"], float), (mu,)).astype(float)
+                base = xrow
+                for j in range(mu):
+                    tt = np.arange(1, n); r = base + j * (n - 1) + (tt - 1)
+                    rows.append(r); cols.append(ub + j * n + tt); vals.append(np.ones(tt.size))
+                    rows.append(r); cols.append(ub + j * n + (tt - 1)); vals.append(-np.ones(tt.size))
+                    row_lo.append(np.full(n - 1, -_INF)); row_up.append(gc[j, 1:] * rho[j])
+                xrow += mu * (n - 1)
+
+            # ---- F3 fleet-level rows. `is_nuclear` (default all-True) marks the nuclear flex units, so a
+            #      combined nuclear+fossil spec (§4) applies C6/C7 to the nuclear subset only. `reserve_idx`
+            #      are extra zone-stack positions (hydro) that also carry reserve. All opt-in on their keys. ----
+            nucm = np.broadcast_to(np.asarray(fz.get("is_nuclear", True), bool), (mu,))
+            nucj = np.flatnonzero(nucm)
+            ridx = np.asarray(fz.get("reserve_idx", []), int)
+            if nucj.size and "p_minstab" in fz and float(fz["p_minstab"]) > 0:   # C7: Σ_{nuc} p ≥ P_minstab[zone]
+                rr = xrow + np.arange(n)
+                for j in nucj:
+                    rows.append(rr); cols.append(gbase + fidx[j] * n + np.arange(n)); vals.append(np.ones(n))
+                row_lo.append(np.full(n, float(fz["p_minstab"]))); row_up.append(np.full(n, _INF)); xrow += n
+            if nucj.size and "r_up_req" in fz and float(fz["r_up_req"]) > 0:      # C6 up: Σ_nuc(u−p)+Σ_res(cap−p) ≥ R↑
+                rr = xrow + np.arange(n); off = np.zeros(n)
+                for j in nucj:
+                    rows.append(rr); cols.append(ub + j * n + np.arange(n)); vals.append(np.ones(n))
+                    rows.append(rr); cols.append(gbase + fidx[j] * n + np.arange(n)); vals.append(-np.ones(n))
+                for i in ridx:                                                    # hydro: −p col, +cap into the RHS
+                    rows.append(rr); cols.append(gbase + i * n + np.arange(n)); vals.append(-np.ones(n))
+                    off = off + gcap[i]
+                row_lo.append(float(fz["r_up_req"]) - off); row_up.append(np.full(n, _INF)); xrow += n
+            if nucj.size and "r_down_req" in fz and float(fz["r_down_req"]) > 0:  # C6 down: Σ_nuc(p−α_tech·u)+Σ_res p ≥ R↓
+                # footroom = headroom above the *technical minimum* α_tech·u (what the unit could still be
+                # commanded down to), NOT above the deep-mod-adjusted floor — measuring against α_band·u−d
+                # would let the LP raise d to fabricate footroom, incentivising deeper modulation (backwards).
+                rr = xrow + np.arange(n)
+                for j in nucj:
+                    rows.append(rr); cols.append(gbase + fidx[j] * n + np.arange(n)); vals.append(np.ones(n))
+                    rows.append(rr); cols.append(ub + j * n + np.arange(n)); vals.append(np.full(n, -at[j]))
+                for i in ridx:                                                    # hydro footroom above a 0 floor
+                    rows.append(rr); cols.append(gbase + i * n + np.arange(n)); vals.append(np.ones(n))
+                row_lo.append(np.full(n, float(fz["r_down_req"]))); row_up.append(np.full(n, _INF)); xrow += n
 
     # energy-cap rows (hydro budgets): Σ_{u∈z,tech} Σ_t gen ≤ mwh
     ecap_rows = {}
@@ -256,6 +368,17 @@ def _solve_and_read(h, spec, price_sign, diagnose: bool = False):
     water = {k: float(-rd[r]) for k, r in spec["ecap_rows"].items()}
     out = {"prices": prices, "flows": flows, "water_values": water,
            "objective": float(h.getObjectiveValue())}
+    if spec["flex_cols"]:                              # read-only: expose commit/deep-mod/start/output primal (F2b)
+        n = spec["n"]
+        def _p(z, fidx):                               # production of the flex units (from the gen block, j-major)
+            gbase = spec["gen_cols"][z][0]
+            return np.stack([cv[gbase + i * n: gbase + (i + 1) * n] for i in fidx])
+        out["flex"] = {z: {"idx": fidx,
+                           "u": cv[ub:ub + fidx.size * n].reshape(fidx.size, n),
+                           "d": cv[db:db + fidx.size * n].reshape(fidx.size, n),
+                           "su": cv[sb:sb + fidx.size * n].reshape(fidx.size, n),
+                           "p": _p(z, fidx)}
+                       for z, (ub, db, sb, fidx) in spec["flex_cols"].items()}
     if diagnose:                       # lecture seule de la solution primale (cf. lp.diagnostics)
         from .diagnostics import binding_flows, marginal_report
         out["diag"] = marginal_report(spec, cv, prices)

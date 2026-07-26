@@ -37,7 +37,8 @@ def _as_time_array(v, n: int) -> np.ndarray:
 def solve_multizone(times, zones_data: dict, borders: list, ntc: dict,
                     res_bid: float | dict = -10.0, voll: float = 15000.0,
                     price_floor: float | dict = -500.0, solver: str = "highs",
-                    res_tranches: dict | None = None, diagnose: bool = False) -> dict:
+                    res_tranches: dict | None = None, diagnose: bool = False,
+                    flex: dict | None = None) -> dict:
     """Solve the coupled dispatch over one window.
 
     zones_data[zone] = {"stack": df(unit_id,tech,capacity_mw,srmc_eur_mwh,min_gen_frac),
@@ -51,12 +52,19 @@ def solve_multizone(times, zones_data: dict, borders: list, ntc: dict,
     floored at 0 — a regulatory fact, not a fitted parameter (and the floor is gone for both in the
     2027-46 projection). Per-zone bids are also the hook for the RES subsidy tranches.
 
+    `flex` (opt-in, FLEX module) attaches the per-unit plant-operating-rigidity rows — see
+    ``highs_solver._build``. It is a **highs-only** feature (the rigidities are a direct sparse-matrix
+    build); the legacy linopy backend does not carry them. `flex=None` (default) keeps the pure LP.
+
     Returns per-zone prices, dispatch, flows, and water values.
     """
     if _BACKEND == "highs":
         from .highs_solver import solve_multizone_highs
         return solve_multizone_highs(times, zones_data, borders, ntc, res_bid=res_bid, voll=voll,
-                                     price_floor=price_floor, res_tranches=res_tranches, diagnose=diagnose)
+                                     price_floor=price_floor, res_tranches=res_tranches, diagnose=diagnose,
+                                     flex=flex)
+    if flex:
+        raise NotImplementedError("flex (FLEX rigidities) requires the highs backend, not linopy")
     T = pd.DatetimeIndex(times)
     zones = list(zones_data)
     m = linopy.Model()

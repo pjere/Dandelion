@@ -44,10 +44,36 @@ def _observed_prices(config, year, zones):
     return out
 
 
+def _fr_maneuverability(config, year, week_starts):
+    """Per-week FR nuclear maneuverability from the REMIT refuelling calendar (C4/F1), as
+    {week_start: {name: (state, stretch_power)}} keyed by plant name (= fleet ``name`` = REMIT ``unit_name``).
+    Returns None when REMIT is unreadable/empty → every reactor stays ``full`` (a documented degrade)."""
+    try:
+        from pricemodeling.config import load_settings
+        from pricemodeling.db import get_engine
+
+        from ..flexibility import maneuverability as mv
+        con = get_engine(load_settings().db_url)
+        cal = mv.backtest_calendar(con, f"{year}-01-01", f"{year + 1}-01-01")
+        if cal.empty:
+            return None
+        weekly = mv.derive_weekly(cal, mv.units_from_calendar(cal), week_starts)
+    except Exception:                                    # noqa: BLE001 — no REMIT: degrade to full, don't fail
+        return None
+    out: dict = {}
+    for r in weekly.itertuples(index=False):
+        out.setdefault(r.week_start, {})[r.unit_id] = (r.maneuverability, float(r.stretch_power))
+    return out or None
+
+
 def run_backtest(config: Config, year: int, n_weeks: int | None = None,
                  use_remit_nuclear_avail: bool = False, de_unit_level: bool = False,
                  nuclear_curve: bool = True, hydro_sdp_level: bool = True,
-                 diagnose: bool = False) -> dict:
+                 diagnose: bool = False, flexibility: bool | None = None) -> dict:
+    """`flexibility` opts into the FLEX plant-operating-rigidity module (per-reactor FR nuclear stack with
+    C1/C2/C3/C5 rigidities → endogenous negatives; see ``flexibility.fr_nuclear``). Default None reads
+    ``flexibility.enabled`` from config.yaml (off unless set). When on, the FR nuclear tranche surrogate
+    (`nuclear_curve`) is bypassed — the two are mutually exclusive representations of the same fleet."""
     zones = [z for z in config.all_zones if z != "GB"]
     neigh = [z for z in zones if z != "FR"]
     wb = config.resolve(config.section("assumptions")["workbook"])
@@ -88,9 +114,30 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         wv_levels = solve_levels(config, year, curves, tuple(["FR"] + list(neigh)))
     # meme traitement pour le nucleaire FR : 63 GW a un prix unique rendaient le prix francais degenere
     # (marginal 78,6 % des heures a exactement 7,0 EUR/MWh). Cf. stacks.nuclear_curve.
-    if nuclear_curve:
-        from ..stacks import nuclear_curve as nuc
-        nuc_installed = float(fr_stack.loc[fr_stack["tech"] == "nuclear", "capacity_mw"].sum())
+    from ..flexibility import enabled as _flex_enabled
+    flex_on = _flex_enabled(config) if flexibility is None else bool(flexibility)
+    from ..stacks import nuclear_curve as nuc
+    nuc_installed = float(fr_stack.loc[fr_stack["tech"] == "nuclear", "capacity_mw"].sum())
+    flex_spec = None
+    if flex_on:
+        # FLEX on: keep the per-reactor rows and build the C1–C7/§4 rigidity spec — the negatives now emerge
+        # from the rigidity, so the tranche surrogate (which bakes a −40 socle bid in) is bypassed. F3 adds
+        # reserves (C6), the grid-stability floor (C7) and fossil commitment (§4); maneuverability (C4) is
+        # applied per window below.
+        from ..flexibility import fr_nuclear, trajectories
+        costs = trajectories.load_flex_costs(wb, year)
+        reserves = trajectories.load_reserves(wb, year)
+        fr_stack, flex_spec = fr_nuclear.build_flex_spec(
+            fr_stack, nuc.load_curve(config, year, nuc_installed),
+            c_mod=costs["c_mod"], c_start_by_class=costs,
+            r_up_req=reserves["r_up_req"], r_down_req=reserves["r_down_req"],
+            p_minstab=trajectories.minstab_mw(wb, "FR", year),
+            include_fossil=True, fossil_c_start=costs)
+        if "FR" in res_schemes:                            # §6 (F4): the FLEX module owns the FR downward
+            res_schemes = {**res_schemes,                  # bid ladder — OA at the market floor, CR ≈0
+                           "FR": trajectories.apply_oa_ladder(res_schemes["FR"],
+                                                              trajectories.load_oa_ladder(wb, year))}
+    elif nuclear_curve:
         fr_stack = nuc.expand_stack(fr_stack, nuc.load_curve(config, year, nuc_installed))
     nb_nl = {z: neighbour_netload(config, z, year).set_index("timestamp_utc") for z in neigh}
     for z in list(neigh):                       # a zone with load data missing for this year → drop it (else
@@ -116,6 +163,9 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     weeks = pd.date_range(f"{year}-01-01", f"{year + 1}-01-01", freq="7D", tz="UTC")
     if n_weeks:
         weeks = weeks[:n_weeks + 1]
+    # C4 maneuverability: per-week {name: (state, stretch_power)} from the REMIT refuelling calendar (None
+    # when REMIT is unavailable → every reactor `full`). Applied to the base flex spec window by window.
+    maneuver_weekly = _fr_maneuverability(config, year, weeks[:-1]) if flex_spec is not None else None
     price_chunks, diag_chunks = [], []
     for w0, w1 in zip(weeks[:-1], weeks[1:]):
         T = fr.loc[(fr.index >= w0) & (fr.index < w1)].index
@@ -132,9 +182,14 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         borders = [b for b in NTC if b[0] in zd and b[1] in zd]
         # market rules effective in THIS window (IT/ES were floored at 0 before TIDE / Dec-2023)
         res_bid, price_floor = rules_at(wb, w0, list(zd))
+        flex = None
+        if flex_spec is not None:
+            from ..flexibility import fr_nuclear
+            spec = fr_nuclear.window_spec(flex_spec, (maneuver_weekly or {}).get(w0))
+            flex = {"FR": spec}
         try:
             out = solve_with_triggers(T, zd, borders, {b: ntc[b] for b in borders}, res_schemes,
-                                      res_bid=res_bid, price_floor=price_floor, diagnose=diagnose)
+                                      res_bid=res_bid, price_floor=price_floor, diagnose=diagnose, flex=flex)
         except RuntimeError:
             continue
         price_chunks.append(out["prices"])

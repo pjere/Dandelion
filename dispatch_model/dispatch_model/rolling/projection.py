@@ -141,6 +141,25 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         fr["demand_mw"] = fr["demand_mw"] * fr_dem
         fr["musttake_res_mw"] = fr["musttake_res_mw"] * fr_res
     fr_stack = _append_flex(_scale_stack(ref["fr_stack"], k, g, cap_factors=fr_cap), "FR", tyndp, target_year)
+    # FLEX module (opt-in): keep the per-reactor nuclear rows and attach the C1/C2/C3/C5 rigidity spec. On a
+    # future year there is no observed price to reveal a curve, so the per-reactor bids fall back to the fuel
+    # cost and the negatives emerge purely from the rigidity — the intended endogenous behaviour.
+    from ..flexibility import enabled as _flex_enabled
+    flex_spec = None
+    if _flex_enabled(config):
+        from ..flexibility import fr_nuclear, trajectories
+        from ..stacks import nuclear_curve as nuc
+        nuc_installed = float(fr_stack.loc[fr_stack["tech"] == "nuclear", "capacity_mw"].sum())
+        costs = trajectories.load_flex_costs(wb, target_year)
+        reserves = trajectories.load_reserves(wb, target_year)
+        fr_stack, flex_spec = fr_nuclear.build_flex_spec(
+            fr_stack, nuc.load_curve(config, target_year, nuc_installed),
+            c_mod=costs["c_mod"], c_start_by_class=costs,
+            r_up_req=reserves["r_up_req"], r_down_req=reserves["r_down_req"],
+            p_minstab=trajectories.minstab_mw(wb, "FR", target_year),
+            include_fossil=True, fossil_c_start=costs)
+        # C4 maneuverability in projection comes from the planned-outage scheduler (F1) — a separate hook not
+        # yet wired here; projected reactors run `full` until it lands, same documented degrade as the backtest.
     nb_fac = {z: zfac(z) for z in neigh}
     nb_stack = {z: _append_flex(_scale_stack(s, k, g, cap_factors=nb_fac[z][2]), z, tyndp, target_year)
                 for z, s in ref["nb_stack"].items()}
@@ -167,6 +186,9 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
     res_registry = ref.get("res_registry") or {}
     schemes = {z: scheme_shares(z, target_year, floors.get(z, {}), reg=res_registry.get(z))
                or ref["static"].get(z, []) for z in zones}
+    if flex_spec is not None and "FR" in schemes:          # §6 (F4): FLEX owns the FR bid ladder. The OA
+        from ..flexibility.trajectories import apply_oa_ladder, load_oa_ladder   # *volume* still decays by
+        schemes["FR"] = apply_oa_ladder(schemes["FR"], load_oa_ladder(wb, target_year))  # vintage via scheme_shares
 
     price_chunks = []
     for w0, w1 in zip(ref["weeks"][:-1], ref["weeks"][1:]):
@@ -182,9 +204,10 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
                               zone_prices(prices, z, basis, w0_t, ref.get("gas_rules")), T)
         borders = [b for b in NTC if b[0] in zd and b[1] in zd]
         res_bid, price_floor = rules_at(wb, w0_t, list(zd))
+        flex = {"FR": flex_spec} if flex_spec is not None else None
         try:
             out = solve_with_triggers(T, zd, borders, {b: ref["ntc"][b] for b in borders}, schemes,
-                                      res_bid=res_bid, price_floor=price_floor)
+                                      res_bid=res_bid, price_floor=price_floor, flex=flex)
         except RuntimeError:
             continue
         price_chunks.append(out["prices"])
