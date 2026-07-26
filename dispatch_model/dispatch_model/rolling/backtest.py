@@ -167,9 +167,12 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     # when REMIT is unavailable → every reactor `full`). Applied to the base flex spec window by window.
     maneuver_weekly = _fr_maneuverability(config, year, weeks[:-1]) if flex_spec is not None else None
     price_chunks, diag_chunks = [], []
+    prev_flex_state = None                                       # F5: previous window's tail state (FR), or None
+    prev_w1 = None                                               # end of the previous window (seam-adjacency check)
     for w0, w1 in zip(weeks[:-1], weeks[1:]):
         T = fr.loc[(fr.index >= w0) & (fr.index < w1)].index
         if len(T) < 24:
+            prev_flex_state = None
             continue
         prices = resolver.prices_at(w0)
         wk = int(pd.Timestamp(w0).isocalendar().week)          # semaine ISO pour le decalage SDP
@@ -182,19 +185,35 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         borders = [b for b in NTC if b[0] in zd and b[1] in zd]
         # market rules effective in THIS window (IT/ES were floored at 0 before TIDE / Dec-2023)
         res_bid, price_floor = rules_at(wb, w0, list(zd))
-        flex = None
+        cold = seam = None
         if flex_spec is not None:
             from ..flexibility import fr_nuclear
-            spec = fr_nuclear.window_spec(flex_spec, (maneuver_weekly or {}).get(w0))
-            flex = {"FR": spec}
+            cold = fr_nuclear.window_spec(flex_spec, (maneuver_weekly or {}).get(w0))
+            seam = ({**cold, **prev_flex_state}                 # F5: link only across an adjacent seam
+                    if prev_flex_state is not None and prev_w1 == w0 else cold)
+
+        def _solve(sp):
+            return solve_with_triggers(T, zd, borders, {b: ntc[b] for b in borders}, res_schemes,
+                                       res_bid=res_bid, price_floor=price_floor, diagnose=diagnose,
+                                       flex=({"FR": sp} if sp is not None else None))
         try:
-            out = solve_with_triggers(T, zd, borders, {b: ntc[b] for b in borders}, res_schemes,
-                                      res_bid=res_bid, price_floor=price_floor, diagnose=diagnose, flex=flex)
+            out = _solve(seam)
         except RuntimeError:
-            continue
+            # a seam link can over-constrain a window (a last-hour commitment shed upstream + hard reserves) →
+            # fall back to a cold solve for this window (F4 behaviour), rather than dropping it entirely.
+            if seam is not cold:
+                try:
+                    out = _solve(cold)
+                except RuntimeError:
+                    prev_flex_state = None; continue
+            else:
+                prev_flex_state = None; continue
         price_chunks.append(out["prices"])
         if diagnose and out.get("diag") is not None:
             diag_chunks.append(out["diag"])
+        prev_flex_state = (fr_nuclear.tail_state(out["flex"]["FR"])     # carry the tail into the next window
+                           if flex_spec is not None and out.get("flex", {}).get("FR") is not None else None)
+        prev_w1 = w1
 
     model = pd.concat(price_chunks).sort_index()
     metrics = _score(model, obs, zones)

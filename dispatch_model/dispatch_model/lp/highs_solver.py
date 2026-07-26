@@ -71,8 +71,14 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         r_down_req` (footroom above the technical minimum), with `reserve_idx` the extra (hydro) providers;
       • C7 `Σ_{nuc} p ≥ p_minstab` — grid-stability nuclear must-run floor.
     `is_nuclear` (default all-True) marks which flex units are nuclear, so a combined nuclear+fossil spec (§4)
-    applies C2/C3/C6/C7 to the nuclear subset only. `flex=None` (default) is byte-identical to the pure LP
-    (golden preserved)."""
+    applies C2/C3/C6/C7 to the nuclear subset only.
+
+    F5 window-seam state (opt-in via `u_init`/`p_init`/`d_hist` in a zone's spec): the previous window's tail
+    carried in as fixed parameters so the intertemporal rigidities don't reset at the weekly seam. It adds the
+    missing hour-0 links — C5 `su_0 ≥ u_0 − u_init`, min-down `u_0 ≤ avail_0·ρ + u_init`, C3 ramp
+    `p_0 − r_up·u_0 ≤ p_init − β·Σ d_{−k}` — and charges the pre-window deep-mod `d_hist` against the first
+    hours' 8h budget (C2a) and xénon lookback (C3). Absent (the first window, or off) ⇒ cold start, unchanged.
+    `flex=None` (default) is byte-identical to the pure LP (golden preserved)."""
     T = pd.DatetimeIndex(times)
     n = len(T)
     zones = list(zones_data)
@@ -187,6 +193,13 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             dbs = np.broadcast_to(np.asarray(fz.get("deepband_scale", 1.0), float), (mu,))   # C4 reduced→½, none→0
             dband = np.repeat((ab - at) * dbs, n); ab_rep = np.repeat(ab, n)
             c_mod = float(fz["c_mod"]); c_start = np.asarray(fz["c_start"], float)
+            # F5 window-seam state (opt-in): the previous window's tail carried in as fixed parameters, so the
+            # intertemporal rigidities stay continuous across the seam. u_init/p_init are u/p at hour −1;
+            # d_hist[j] = [d_{-1}, …, d_{-8}] the deep-mod of the 8 pre-window hours (for the 8h budget + xénon).
+            has_state = "u_init" in fz
+            if has_state:
+                u_init = np.asarray(fz["u_init"], float); p_init = np.asarray(fz["p_init"], float)
+                d_hist = np.broadcast_to(np.asarray(fz["d_hist"], float), (mu, 8))
             ub = add_block(np.zeros(mu * n), np.zeros(mu * n), gc.ravel())                 # u ∈ [0, avail·cap]
             db = add_block(np.full(mu * n, c_mod), np.zeros(mu * n), np.full(mu * n, _INF))  # deep-mod d ≥ 0
             sb = add_block(np.repeat(c_start, n), np.zeros(mu * n), np.full(mu * n, _INF))   # start su ≥ 0
@@ -224,7 +237,15 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                         tt = np.arange(k, n)
                         rows.append(base + j * n + tt); cols.append(db + j * n + (tt - k))
                         vals.append(np.ones(tt.size))
-                    row_lo.append(np.full(n, -_INF)); row_up.append(np.full(n, B8[j]))
+                    up = np.full(n, B8[j])
+                    if has_state:                          # pre-window d_{-1..-(7-t)} also occupy the 8h window
+                        for t in range(min(7, n)):         # ending at t (t=0..6) → charge them against the budget
+                            up[t] -= float(d_hist[j, :7 - t].sum())
+                        # clamp ≥0: if a maneuverability drop across the seam left the pre-window deep-mod above
+                        # the (now tighter) budget, the reactor simply can't deep-mod until it rolls out of the
+                        # 8h window — a spent budget, not an infeasible LP.
+                        np.maximum(up, 0.0, out=up)
+                    row_lo.append(np.full(n, -_INF)); row_up.append(up)
                 xrow += mu * n
             if "d_max_day" in fz:                      # C2b: Σ_{t∈day} d ≤ D_max_day·cap (calendar day)
                 Bday = np.asarray(fz["d_max_day"], float) * capf
@@ -249,7 +270,11 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                             tt2 = np.arange(max(1, k), n)                          # row t (≥1) uses d_{t−k} when t−k≥0
                             rows.append(base + j * (n - 1) + (tt2 - 1))
                             cols.append(db + j * n + (tt2 - k)); vals.append(np.full(tt2.size, beta[j]))
-                    row_lo.append(np.full(n - 1, -_INF)); row_up.append(np.zeros(n - 1))
+                    up = np.zeros(n - 1)
+                    if has_state and beta[j] != 0.0:       # rows t=1..7 also see pre-window d_{t−k} (k>t) → RHS
+                        for t in range(1, min(8, n)):
+                            up[t - 1] = -beta[j] * float(d_hist[j, :8 - t].sum())
+                    row_lo.append(np.full(n - 1, -_INF)); row_up.append(up)
                 xrow += mu * (n - 1)
             if "rho_recommit" in fz:                   # C5 min-down proxy: u_t − u_{t−1} ≤ avail_t·ρ_recommit
                 rho = np.broadcast_to(np.asarray(fz["rho_recommit"], float), (mu,)).astype(float)
@@ -260,6 +285,29 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                     rows.append(r); cols.append(ub + j * n + (tt - 1)); vals.append(-np.ones(tt.size))
                     row_lo.append(np.full(n - 1, -_INF)); row_up.append(gc[j, 1:] * rho[j])
                 xrow += mu * (n - 1)
+
+            # ---- F5 seam rows at t=0: the intertemporal constraints that reference hour −1, closed against
+            #      the previous window's fixed tail state (u_init/p_init/d_hist). The t=1..n−1 rows above are
+            #      unchanged; here we add the missing first-hour link so commitment/ramp don't reset at seams. ----
+            if has_state:
+                jj = np.arange(mu)
+                rr = xrow + jj                                                       # C5 start: su_0 − u_0 ≥ −u_init
+                rows.append(rr); cols.append(sb + jj * n); vals.append(np.ones(mu))
+                rows.append(rr); cols.append(ub + jj * n); vals.append(-np.ones(mu))
+                row_lo.append(-u_init); row_up.append(np.full(mu, _INF)); xrow += mu
+                if "rho_recommit" in fz:                                             # min-down: u_0 ≤ avail_0·ρ + u_init
+                    rho = np.broadcast_to(np.asarray(fz["rho_recommit"], float), (mu,)).astype(float)
+                    rr = xrow + jj
+                    rows.append(rr); cols.append(ub + jj * n); vals.append(np.ones(mu))
+                    row_lo.append(np.full(mu, -_INF)); row_up.append(gc[:, 0] * rho + u_init); xrow += mu
+                if "r_up" in fz:                          # C3 ramp: p_0 − r_up·u_0 ≤ p_init − β·Σ_{k=1..8} d_{−k}
+                    r_up = np.asarray(fz["r_up"], float)
+                    beta = np.broadcast_to(np.asarray(fz.get("xenon_beta", 0.0), float), (mu,)).astype(float)
+                    rr = xrow + jj
+                    rows.append(rr); cols.append(gbase + fidx * n); vals.append(np.ones(mu))       # p_0
+                    rows.append(rr); cols.append(ub + jj * n); vals.append(-r_up)                  # −r_up·u_0
+                    row_lo.append(np.full(mu, -_INF))
+                    row_up.append(p_init - beta * d_hist[:, :8].sum(axis=1)); xrow += mu
 
             # ---- F3 fleet-level rows. `is_nuclear` (default all-True) marks the nuclear flex units, so a
             #      combined nuclear+fossil spec (§4) applies C6/C7 to the nuclear subset only. `reserve_idx`

@@ -156,4 +156,29 @@ parameters (`c_mod`, `c_start`, `β`, D-caps, ε) are fitted in F7 to the §9 ac
   weeks: because the tail is export-locked (S1c) the price never descends past 0 to where OA/CR would be
   marginal, so their (now correct) bid levels are inconsequential to the 2024 backtest. The corrected ladder
   bites only once the export lock is lifted (S1c) and in the projection (deeper future surplus).
-- F5…F8: see the phase tasks and the work plan.
+- **F5 (done):** window-seam state. The rolling backtest/projection solve weekly windows independently, so
+  every intertemporal rigidity (C3 ramp, C5 start, min-down, C2a 8h budget, C3 xénon) silently *reset* each
+  Monday — a reactor could shut Sunday night and re-commit Monday morning for free, defeating the stickiness
+  at 52 seams a year. F5 carries the previous window's tail across as **fixed parameters** (still pure LP —
+  the state enters only as constants in the RHS, no new coupling): `fr_nuclear.tail_state` reads `u_init`/
+  `p_init` (commit/output at hour −1) and `d_hist` (the last 8 hours' deep-mod, reversed) from the solved
+  window's flex primal; `_build` closes the missing hour-0 links (C5 `su_0 ≥ u_0−u_init`, min-down
+  `u_0 ≤ avail_0·ρ+u_init`, C3 `p_0−r_up·u_0 ≤ p_init−β·Σd_{−k}`) and charges `d_hist` against the first
+  hours' 8h budget and xénon lookback. The backtest/projection loops thread it window→window, linking **only
+  across an adjacent seam** (`prev_w1 == w0`) so a skipped/short window resets to a cold start. First window
+  and flex-off are unchanged (byte-identical). Tests: `tests/test_flexibility_lp.py` (+5 seam families incl.
+  the clamp), `tests/test_flexibility_fr_nuclear.py` (+1 `tail_state`).
+
+  *Feasibility.* Two seam×hard-constraint interactions can over-constrain a window, both handled so no window
+  is ever dropped: (1) a maneuverability drop across a seam can leave `d_hist` above the tightened 8h budget →
+  the C2a seam RHS is **clamped ≥0** (budget spent, `d_0=0`, not infeasible); (2) a finite-horizon window can
+  shed commitment at its *last* hour for free, so a low `u_init` + the seam min-down cap + the hard C6 reserve
+  can be jointly infeasible → the backtest/projection **retry that window cold** (F4 behaviour) instead of
+  dropping it. So F5 links every feasible seam and degrades gracefully to F4 at the ~stressed ones; a fuller
+  treatment (soft reserves / a terminal commitment condition) is a candidate for F7.
+
+  *Backtest validation (2024, weeks 0–14).* All 15 windows solve (the cold fallback caught the few
+  over-constrained seams). The price effect is negligible — mean 46.2→46.3, sub-0.5 €/MWh per-week shifts
+  confined to the boundary hours — because seam hours are a small fraction and FR stays export-locked at 0.
+  F5's value is correctness (the rigidities no longer reset every Monday), not a price move in this backtest.
+- F6…F8: see the phase tasks and the work plan.

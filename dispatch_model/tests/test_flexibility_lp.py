@@ -159,6 +159,51 @@ def test_c6_upward_headroom_reserve_commits_spare_capacity():
     assert hr.min() >= req - 1.0                              # C6 keeps ≥ req of headroom every hour
 
 
+# ---- FLEX-F5: window-seam state linking (u_init / p_init / d_hist as fixed pre-window parameters) --------
+_SEAM_BASE = {"idx": [0], "alpha_band": [0.60], "alpha_tech": [0.25], "c_mod": 8.0, "c_start": [2000.0]}
+_HIGH = (38000, 38000, 38000, 38000)
+
+
+def test_f5_c3_ramp_seam_bounds_the_first_hour_climb():
+    spec = {**_SEAM_BASE, "r_up": [0.05], "xenon_beta": [0.0]}
+    no_seam = _run({"N": spec}, _HIGH)
+    seam = _run({"N": {**spec, "u_init": [40000.0], "p_init": [10000.0], "d_hist": [[0.0] * 8]}}, _HIGH)
+    assert no_seam["flex"]["N"]["p"][0][0] > 30000        # no seam → the first hour freely serves the load
+    p0 = seam["flex"]["N"]["p"][0][0]; u0 = seam["flex"]["N"]["u"][0][0]
+    assert p0 < 15000                                     # the seam ramp caps the climb from p_init
+    assert p0 <= 10000.0 + 0.05 * u0 + 1.0                # p_0 − r_up·u_0 ≤ p_init
+
+
+def test_f5_c5_seam_charges_a_start_when_the_reactor_was_off():
+    off = _run({"N": {**_SEAM_BASE, "u_init": [0.0], "p_init": [0.0], "d_hist": [[0.0] * 8]}}, _HIGH)
+    on = _run({"N": {**_SEAM_BASE, "u_init": [40000.0], "p_init": [38000.0], "d_hist": [[0.0] * 8]}}, _HIGH)
+    assert off["flex"]["N"]["su"][0][0] > 20000           # committing from cold pays a large start at t=0
+    assert on["flex"]["N"]["su"][0][0] < 1.0              # already committed across the seam → no start
+
+
+def test_f5_min_down_seam_bounds_recommit_from_a_low_state():
+    spec = {**_SEAM_BASE, "c_start": [10.0], "rho_recommit": [0.10]}
+    out = _run({"N": {**spec, "u_init": [5000.0], "p_init": [3000.0], "d_hist": [[0.0] * 8]}}, _HIGH)
+    assert out["flex"]["N"]["u"][0][0] <= 0.10 * 40000.0 + 5000.0 + 1.0    # u_0 ≤ avail_0·ρ + u_init
+
+
+def test_f5_seam_budget_clamp_stays_feasible_when_history_exceeds_budget():
+    # a maneuverability drop across the seam can leave d_hist above the tightened 8h budget; the clamp must
+    # keep the window feasible (reactor can't deep-mod until the history rolls out), not raise.
+    dem = (16000, 16000, 38000, 38000)                    # deep trough at t=0 → the reactor *wants* to deep-mod
+    spec = {**_SEAM_BASE, "c_start": [50000.0], "d_max_8h": [0.05],
+            "u_init": [40000.0], "p_init": [38000.0], "d_hist": [[8000.0] * 8]}   # 64 GWh ≫ 2 GWh budget
+    out = _run({"N": spec}, dem)                           # solves (no infeasibility) …
+    assert out["flex"]["N"]["d"][0][0] <= 1.0             # … with hour-0 deep-mod pinned to 0 (budget spent)
+
+
+def test_f5_xenon_history_tightens_the_seam_ramp():
+    spec = {**_SEAM_BASE, "r_up": [0.30], "xenon_beta": [0.50]}
+    clean = _run({"N": {**spec, "u_init": [40000.0], "p_init": [20000.0], "d_hist": [[0.0] * 8]}}, _HIGH)
+    poisoned = _run({"N": {**spec, "u_init": [40000.0], "p_init": [20000.0], "d_hist": [[3000.0] * 8]}}, _HIGH)
+    assert poisoned["flex"]["N"]["p"][0][0] < clean["flex"]["N"]["p"][0][0] - 1.0   # recent deep-mod slows the climb
+
+
 def test_c6_downward_footroom_reserve_is_held_above_the_technical_minimum():
     # footroom = p − α_tech·u (room to be commanded down). R_down_req forces the fleet to keep that much in
     # hand; the unconstrained base runs it down below that at the trough.

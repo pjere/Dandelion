@@ -169,6 +169,20 @@ def window_spec(base: dict, states: dict | None) -> dict:
     return out
 
 
+def tail_state(flex_out_z: dict) -> dict:
+    """Window-seam state (F5) from a solved window's flex primal (`out["flex"][zone]`), to carry into the
+    next window as fixed parameters: `u_init`/`p_init` = committed capacity / output at the last hour (hour
+    −1 of the next window), `d_hist[:,0..7]` = deep-mod of the last 8 hours reversed (d_{-1} … d_{-8}) for
+    the rolling-8h budget and the xénon lookback. Aligns positionally with the next window's flex units
+    (same stack, same order)."""
+    u = np.asarray(flex_out_z["u"], float); p = np.asarray(flex_out_z["p"], float)
+    d = np.asarray(flex_out_z["d"], float)
+    mu, k = u.shape[0], min(8, d.shape[1])
+    d_hist = np.zeros((mu, 8))
+    d_hist[:, :k] = d[:, -1:-k - 1:-1]                     # reversed last k hours: d_hist[:,0]=d_{-1}
+    return {"u_init": u[:, -1].copy(), "p_init": p[:, -1].copy(), "d_hist": d_hist}
+
+
 def _append_fossil(st: pd.DataFrame, spec: dict, fossil_c_start: dict) -> None:
     """Extend the (nuclear) ``spec`` in place with the FR fossil rows (§4). Each fossil unit gets
     ``alpha_band = alpha_tech = α_min`` (so its deep band is 0 → ``d`` pinned to 0: no modulation, just a

@@ -191,9 +191,11 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         schemes["FR"] = apply_oa_ladder(schemes["FR"], load_oa_ladder(wb, target_year))  # vintage via scheme_shares
 
     price_chunks = []
+    prev_flex_state = None; prev_w1 = None                     # F5: FR tail state across adjacent window seams
     for w0, w1 in zip(ref["weeks"][:-1], ref["weeks"][1:]):
         T = fr.loc[(fr.index >= w0) & (fr.index < w1)].index
         if len(T) < 24:
+            prev_flex_state = None
             continue
         w0_t = w0 + pd.DateOffset(years=k)                     # commodity + market-rule year = the target
         prices = ref["resolver"].prices_at(w0_t)
@@ -204,13 +206,29 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
                               zone_prices(prices, z, basis, w0_t, ref.get("gas_rules")), T)
         borders = [b for b in NTC if b[0] in zd and b[1] in zd]
         res_bid, price_floor = rules_at(wb, w0_t, list(zd))
-        flex = {"FR": flex_spec} if flex_spec is not None else None
+        cold = seam = None
+        if flex_spec is not None:
+            cold = dict(flex_spec)
+            seam = {**cold, **prev_flex_state} if (prev_flex_state is not None and prev_w1 == w0) else cold
+
+        def _solve(sp):
+            return solve_with_triggers(T, zd, borders, {b: ref["ntc"][b] for b in borders}, schemes,
+                                       res_bid=res_bid, price_floor=price_floor,
+                                       flex=({"FR": sp} if sp is not None else None))
         try:
-            out = solve_with_triggers(T, zd, borders, {b: ref["ntc"][b] for b in borders}, schemes,
-                                      res_bid=res_bid, price_floor=price_floor, flex=flex)
+            out = _solve(seam)
         except RuntimeError:
-            continue
+            if seam is not cold:                                # F5 seam over-constrained → cold fallback (F4)
+                try:
+                    out = _solve(cold)
+                except RuntimeError:
+                    prev_flex_state = None; continue
+            else:
+                prev_flex_state = None; continue
         price_chunks.append(out["prices"])
+        if flex_spec is not None and out.get("flex", {}).get("FR") is not None:
+            from ..flexibility.fr_nuclear import tail_state
+            prev_flex_state = tail_state(out["flex"]["FR"]); prev_w1 = w1
         if n_weeks and len(price_chunks) >= n_weeks:
             break
     if not price_chunks:

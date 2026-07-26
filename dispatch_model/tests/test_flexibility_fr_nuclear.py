@@ -82,6 +82,15 @@ def test_window_spec_rederates_only_the_named_week_states():
     assert fn.window_spec(base, None) is base                                    # no states → same object
 
 
+def test_tail_state_extracts_reversed_deepmod_history():
+    fz_out = {"u": np.array([[1.0, 2.0, 3.0, 4.0]]), "p": np.array([[10.0, 20.0, 30.0, 40.0]]),
+              "d": np.array([[0.0, 5.0, 0.0, 7.0]])}
+    st = fn.tail_state(fz_out)
+    assert st["u_init"][0] == 4.0 and st["p_init"][0] == 40.0          # last-hour commit / output
+    assert st["d_hist"].shape == (1, 8)                                # padded to the 8-hour lookback
+    assert list(st["d_hist"][0][:3]) == [7.0, 0.0, 5.0]               # reversed: d_{-1}, d_{-2}, d_{-3}
+
+
 def test_fossil_section_adds_min_load_and_reserve_idx():
     stack = pd.concat([_NAMED, _FOSSIL], ignore_index=True)
     st, spec = fn.build_flex_spec(stack, _CURVE, c_mod=8.0, c_start_by_class=_COSTS,
