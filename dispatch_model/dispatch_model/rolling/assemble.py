@@ -211,7 +211,10 @@ def assemble_window(config: Config, start, end, zones=None, price_mult=None,
     for z in zones:
         if z == "FR":
             continue
-        zd[z] = _neighbour_inputs(config, z, start.date(), end.date(), start.year, prices, T)
+        try:
+            zd[z] = _neighbour_inputs(config, z, start.date(), end.date(), start.year, prices, T)
+        except (KeyError, ValueError):          # zone lacks data for this year (e.g. a cluster with no 2019
+            continue                            # generation) → drop it, mirroring run_backtest's neighbour loop
     borders = [b for b in NTC if b[0] in zd and b[1] in zd]
     ntc = {b: NTC[b] for b in borders}
     return T, zd, borders, ntc
