@@ -92,6 +92,36 @@ def marginal_report(spec: dict, col_value: np.ndarray, prices: pd.DataFrame) -> 
     return pd.DataFrame(rows)
 
 
+def dual_oscillation(prices: pd.DataFrame, demand: pd.DataFrame, avail: pd.DataFrame | None = None,
+                     price_jump: float = 20.0, demand_frac: float = 0.02) -> pd.DataFrame:
+    """Flag hour-to-hour balance-dual jumps that are NOT justified by a physical-state change — the signature
+    of spurious dual degeneracy rather than a real price move (F6, spec §8).
+
+    An hour `t` is flagged when `|price_t − price_{t−1}| > price_jump` yet the zone's demand moved by less than
+    `demand_frac` (and, if `avail` is given, its mean availability is essentially unchanged). With the
+    `_tie_break` ε-perturbation in place the degenerate ties are broken, so a clean run flags (near-)nothing;
+    a spike of flags points at a still-degenerate family. `prices`/`demand`/`avail` are time×zone frames on the
+    window index. Returns one row per flagged (zone, hour)."""
+    out = []
+    for z in prices.columns:
+        p = prices[z].to_numpy(float)
+        d = demand[z].to_numpy(float) if z in demand.columns else np.full(len(p), np.nan)
+        a = avail[z].to_numpy(float) if (avail is not None and z in avail.columns) else None
+        for t in range(1, len(p)):
+            dp = abs(p[t] - p[t - 1])
+            if dp <= price_jump:
+                continue
+            base = max(abs(d[t - 1]), 1.0)
+            dfrac = abs(d[t] - d[t - 1]) / base if np.isfinite(d[t]) else np.inf
+            afrac = abs(a[t] - a[t - 1]) if a is not None else 0.0
+            if dfrac < demand_frac and afrac < demand_frac:        # physical state ~unchanged → spurious jump
+                out.append({"timestamp_utc": prices.index[t], "zone": z,
+                            "price_prev": float(p[t - 1]), "price": float(p[t]), "d_price": float(p[t] - p[t - 1]),
+                            "demand_frac_change": float(dfrac)})
+    return pd.DataFrame(out, columns=["timestamp_utc", "zone", "price_prev", "price", "d_price",
+                                      "demand_frac_change"])
+
+
 def binding_flows(spec: dict, col_value: np.ndarray, ntc: dict) -> pd.DataFrame:
     """Par (frontière, heure) : flux et saturation. Une interconnexion saturée découple les zones."""
     T, n = spec["T"], spec["n"]
@@ -106,6 +136,67 @@ def binding_flows(spec: dict, col_value: np.ndarray, ntc: dict) -> pd.DataFrame:
             "binding": (f > fup - TOL) | (w > wup - TOL)}))
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(
         columns=["timestamp_utc", "border", "net_mw", "binding"])
+
+
+#: stable names for the FLEX constraint families (F6) — the debug dump reads binding state off the primal
+#: rather than raw LP row indices, so these are the human-facing names of what can set a price.
+FLEX_FAMILIES = ("C1a-band-floor", "C1b-deep-band", "C2-deepmod-budget", "C3-xenon-ramp",
+                 "C5-start", "min-down", "C6-reserve", "C7-grid-stability")
+
+
+def debug_hour(spec: dict, col_value: np.ndarray, prices: pd.DataFrame, zone: str, hour: int) -> dict:
+    """Dual decomposition of one (zone, hour) balance price (F6, spec §8): the marginal block, the binding
+    constraints (saturated borders = the export lock), and the per-reactor commitment / deep-mod state that
+    sets the print — the tool that explains an individual negative price for the F7/F8 reports. Reads the
+    already-solved primal (`col_value`) + balance dual (`prices[zone]`); no re-solve.
+
+    ``implied_bid`` for a flex unit is `srmc − c_mod` while it deep-modulates (the reservation price to keep
+    producing the marginal MWh rather than pay the modulation cost it avoids) — for a nuclear negative print
+    this equals the balance price, which is the decomposition the report hand-checks."""
+    n, t = spec["n"], int(hour)
+    pser = prices[zone]
+    price = float(pser.iloc[t] if hasattr(pser, "iloc") else pser[t])
+    gbase, m, units, techs = spec["gen_cols"][zone]
+    g = col_value[gbase:gbase + m * n].reshape(m, n)
+    glo = np.asarray(spec["col_lo"])[gbase:gbase + m * n].reshape(m, n)
+    gup = np.asarray(spec["col_up"])[gbase:gbase + m * n].reshape(m, n)
+    srmc = np.asarray(spec["srmc_by_unit"][zone], float)
+    part = _partially_loaded(g[:, t], glo[:, t], gup[:, t])
+    marg = None
+    if part.any():
+        i = np.nonzero(part)[0]
+        j = int(i[np.argmin(np.abs(srmc[i] - price))])
+        marg = {"unit": str(units[j]), "tech": str(techs[j]), "srmc": float(srmc[j]), "output_mw": float(g[j, t])}
+    out = {"zone": zone, "hour": t, "timestamp_utc": spec["T"][t], "price": price, "marginal": marg,
+           "set_by_constraint": bool(marg is None or abs(marg["srmc"] - price) > PRICE_TOL),
+           "binding": [], "flex_units": []}
+    for name, (fb, wb) in spec.get("flow_cols", {}).items():                    # saturated border = export lock
+        f, w = float(col_value[fb + t]), float(col_value[wb + t])
+        fup, wup = float(spec["col_up"][fb + t]), float(spec["col_up"][wb + t])
+        if fup > TOL and f > fup - TOL:
+            out["binding"].append(f"export saturated {name} ({f:.0f}/{fup:.0f} MW)")
+        elif wup > TOL and w > wup - TOL:
+            out["binding"].append(f"import saturated {name} ({w:.0f}/{wup:.0f} MW)")
+    fz = (spec.get("flex_spec") or {}).get(zone)
+    fc = spec.get("flex_cols", {}).get(zone)
+    if fz is not None and fc is not None:
+        ub, db, sb, fidx = fc
+        ab = np.asarray(fz["alpha_band"], float); c_mod = float(fz["c_mod"])
+        for k, ui in enumerate(fidx):
+            u, d, su, p = (float(col_value[ub + k * n + t]), float(col_value[db + k * n + t]),
+                           float(col_value[sb + k * n + t]), float(g[ui, t]))
+            if u < TOL:
+                continue                                                        # unit shut this hour
+            flags = []
+            if d > TOL:
+                flags.append("C2-deepmod-budget" if p <= ab[k] * u - d + TOL else "deep-mod")
+                flags.append("C1a-band-floor")
+            if su > TOL:
+                flags.append("C5-start")
+            out["flex_units"].append({"unit": str(units[ui]), "u_mw": u, "p_mw": p, "deepmod_mw": d,
+                                      "start_mw": su, "srmc": float(srmc[ui]),
+                                      "implied_bid": float(srmc[ui] - (c_mod if d > TOL else 0.0)), "flags": flags})
+    return out
 
 
 def summarise(diag: pd.DataFrame) -> pd.DataFrame:

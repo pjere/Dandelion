@@ -49,7 +49,9 @@ def test_physics_are_well_formed():
 
 def test_trajectory_defaults_when_workbook_absent():
     fc = tj.load_flex_costs("/no/such/workbook.xlsx", 2024)
-    assert fc["c_mod"] == 8.0 and fc["c_start_900"] == 300.0
+    # c_mod seed = 45 (F7: anchored to the revealed socle bid −40, implied modulation cost srmc−(−40)≈45-47)
+    assert fc["c_mod"] == 45.0 and fc["c_start_900"] == 300.0
+    assert fc["u_commit_frac"] == 0.90 and fc["alpha_band_op"] == 0.74      # κ / fleet-operating floor (F7)
     assert tj.minstab_mw("/no/such/workbook.xlsx", "FR", 2024) == 0.0
     res = tj.load_reserves("/no/such/workbook.xlsx", 2030)
     assert res["r_up_req"] == 1500.0 and res["r_down_req"] == 1000.0

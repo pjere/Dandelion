@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dispatch_model.flexibility.trajectories import _DEFAULT_OA_LADDER, apply_oa_ladder
 
-_LADDER = {"cr_bid": -1.0, "oa_bid": -500.0, "market_floor": -500.0, "market_cap": 4000.0}
+_LADDER = {"cr_bid": -1.0, "oa_bid": -500.0, "mer_bid": -0.01, "market_floor": -500.0, "market_cap": 4000.0}
 _FR = [{"scheme": "complement_remuneration", "share": 0.55, "floor": -5.0, "trigger": 1},
        {"scheme": "obligation_achat", "share": 0.25, "floor": -40.0, "trigger": 0},
        {"scheme": "merchant", "share": 0.20, "floor": 0.0, "trigger": 0}]
@@ -15,13 +15,15 @@ def test_ladder_repricing_by_scheme():
     out = {t["scheme"]: t for t in apply_oa_ladder(_FR, _LADDER)}
     assert out["complement_remuneration"]["floor"] == -1.0     # CR ≈0 (premium suspended below zero)
     assert out["obligation_achat"]["floor"] == -500.0          # OA paid regardless → bids at the market floor
-    assert out["merchant"]["floor"] == 0.0
+    assert out["merchant"]["floor"] == -0.01                   # merchant curtails just BELOW zero (§9 shallow)
 
 
-def test_shares_and_triggers_are_preserved():
+def test_shares_preserved_and_repriced_triggers_zeroed():
     out = apply_oa_ladder(_FR, _LADDER)
     assert [t["share"] for t in out] == [0.55, 0.25, 0.20]     # vintage decay (volume) untouched
-    assert [t["trigger"] for t in out] == [1, 0, 0]
+    # the ladder bid IS the (instantaneous) French premium suspension — no German-style §51 trigger on top,
+    # which would let the sticky fixed point zero the floor at the first negative hour and erase the run.
+    assert [t["trigger"] for t in out] == [0, 0, 0]
 
 
 def test_bids_are_truncated_to_the_market_bounds():

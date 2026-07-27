@@ -146,6 +146,7 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
     # cost and the negatives emerge purely from the rigidity — the intended endogenous behaviour.
     from ..flexibility import enabled as _flex_enabled
     flex_spec = None
+    fired_floor = 0.0                                      # flag-off: historic §51 fired-tranche floor
     if _flex_enabled(config):
         from ..flexibility import fr_nuclear, trajectories
         from ..stacks import nuclear_curve as nuc
@@ -158,6 +159,7 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
             r_up_req=reserves["r_up_req"], r_down_req=reserves["r_down_req"],
             p_minstab=trajectories.minstab_mw(wb, "FR", target_year),
             include_fossil=True, fossil_c_start=costs)
+        fired_floor = float(trajectories.load_oa_ladder(wb, target_year)["mer_bid"])  # fired ⇒ merchant (F7)
         # C4 maneuverability in projection comes from the planned-outage scheduler (F1) — a separate hook not
         # yet wired here; projected reactors run `full` until it lands, same documented degrade as the backtest.
     nb_fac = {z: zfac(z) for z in neigh}
@@ -187,7 +189,7 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
     schemes = {z: scheme_shares(z, target_year, floors.get(z, {}), reg=res_registry.get(z))
                or ref["static"].get(z, []) for z in zones}
     if flex_spec is not None and "FR" in schemes:          # §6 (F4): FLEX owns the FR bid ladder. The OA
-        from ..flexibility.trajectories import apply_oa_ladder, load_oa_ladder   # *volume* still decays by
+        from ..flexibility.trajectories import apply_oa_ladder, load_oa_ladder  # *volume* still decays by
         schemes["FR"] = apply_oa_ladder(schemes["FR"], load_oa_ladder(wb, target_year))  # vintage via scheme_shares
 
     price_chunks = []
@@ -211,20 +213,19 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
             cold = dict(flex_spec)
             seam = {**cold, **prev_flex_state} if (prev_flex_state is not None and prev_w1 == w0) else cold
 
-        def _solve(sp):
-            return solve_with_triggers(T, zd, borders, {b: ref["ntc"][b] for b in borders}, schemes,
-                                       res_bid=res_bid, price_floor=price_floor,
-                                       flex=({"FR": sp} if sp is not None else None))
-        try:
-            out = _solve(seam)
-        except RuntimeError:
-            if seam is not cold:                                # F5 seam over-constrained → cold fallback (F4)
-                try:
-                    out = _solve(cold)
-                except RuntimeError:
-                    prev_flex_state = None; continue
-            else:
-                prev_flex_state = None; continue
+        # seam-linked first, cold fallback if it over-constrains the window (see run_backtest for the rationale)
+        out = None
+        for sp in ([seam, cold] if seam is not cold else [seam]):
+            try:
+                out = solve_with_triggers(T, zd, borders, {b: ref["ntc"][b] for b in borders}, schemes,
+                                          res_bid=res_bid, price_floor=price_floor,
+                                          flex=({"FR": sp} if sp is not None else None),
+                                          fired_floor=fired_floor)
+                break
+            except RuntimeError:
+                out = None
+        if out is None:
+            prev_flex_state = None; continue
         price_chunks.append(out["prices"])
         if flex_spec is not None and out.get("flex", {}).get("FR") is not None:
             from ..flexibility.fr_nuclear import tail_state
@@ -277,9 +278,17 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
     wb = config.resolve(config.section("assumptions")["workbook"])
     cm = CommodityModel.from_workbook(wb)
     fr = load_fr_netload(config, f"{ref_year}-01-01", f"{ref_year + 1}-01-01").set_index("timestamp_utc")
-    nb_stack = {z: build_neighbour_stack(config, z, ref_year) for z in neigh}
+    nb_stack = {}
+    for z in list(neigh):                          # a cluster with no ref-year data → drop it (parity with
+        try:                                       # run_backtest); its stack build raises on the empty frame
+            nb_stack[z] = build_neighbour_stack(config, z, ref_year)
+        except (KeyError, ValueError):
+            neigh.remove(z); zones.remove(z)
     nb_stack = {z: s[~s["tech"].isin(_EXCLUDE_DISPATCH)].reset_index(drop=True) for z, s in nb_stack.items()}
     nb_nl = {z: neighbour_netload(config, z, ref_year).set_index("timestamp_utc") for z in neigh}
+    for z in list(neigh):                          # empty net-load → degenerate LP time coord → drop it too
+        if nb_nl[z].empty:
+            neigh.remove(z); zones.remove(z); nb_stack.pop(z, None); nb_nl.pop(z, None)
     nb_res = {}
     for z in neigh:
         gg = load_generation_hist(config, ref_year, zones=constituents(z))

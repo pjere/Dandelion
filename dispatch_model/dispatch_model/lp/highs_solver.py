@@ -13,17 +13,29 @@ exactly; validated **byte-identical** against it (the golden 2019 backtest is un
 """
 from __future__ import annotations
 
+import hashlib
+
 import highspy
 import numpy as np
 import pandas as pd
 
 _EPS_FLOW = 1e-3          # €/MWh gross-flow penalty (matches multi_zone) → removes degenerate loop flows
+_EPS_TIE = 0.01          # €/MWh max SRMC tie-break perturbation (F6 dual quality); ≤ this bounds any price move
 _INF = highspy.kHighsInf
 
 
 def _as_time_array(v, n: int) -> np.ndarray:
     a = np.asarray(v, float)
     return np.full(n, float(v)) if a.ndim == 0 else a
+
+
+def _tie_break(units) -> np.ndarray:
+    """Deterministic sub-cent SRMC perturbation per unit id, to break the dual degeneracy of identical-SRMC
+    sister units that makes the balance duals (= prices) noisy (F6, spec §8). A pure function of the unit id
+    (blake2b → [0, `_EPS_TIE`)), so it is reproducible across runs/windows and can never move a price by more
+    than `_EPS_TIE`. Applied only when the flex module is on, so flag-off stays byte-identical."""
+    return np.array([int.from_bytes(hashlib.blake2b(str(u).encode(), digest_size=6).digest(), "big")
+                     / 2 ** 48 * _EPS_TIE for u in units], float)
 
 
 def _tranches_for(zone, zones_data, res_bid, res_tranches, n):
@@ -115,6 +127,8 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         cap = st["capacity_mw"].to_numpy(float)
         minf = st["min_gen_frac"].to_numpy(float)
         srmc = st["srmc_eur_mwh"].to_numpy(float)
+        if flex:                                           # F6: break identical-SRMC ties for clean duals
+            srmc = srmc + _tie_break(units)
         av = zones_data[z].get("avail")
         if av is None:
             avail = np.ones((m, n))
@@ -187,6 +201,8 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         day_idx = np.unique(pd.DatetimeIndex(T).normalize(), return_inverse=True)[1]   # 0..nd-1 per hour (C2b)
         for z, (gbase, gcap, cap, fz) in flex_info.items():
             fidx = np.asarray(fz["idx"], int); mu = fidx.size
+            if mu == 0:                                     # empty flex spec → only the SRMC tie-break, no rows
+                continue
             gc = gcap[fidx]                                 # (mu, n) available cap of the flex units
             capf = np.asarray(cap, float)[fidx]             # (mu,) nominal cap — the C2 energy-budget base
             ab = np.asarray(fz["alpha_band"], float); at = np.asarray(fz["alpha_tech"], float)
@@ -200,7 +216,13 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             if has_state:
                 u_init = np.asarray(fz["u_init"], float); p_init = np.asarray(fz["p_init"], float)
                 d_hist = np.broadcast_to(np.asarray(fz["d_hist"], float), (mu, 8))
-            ub = add_block(np.zeros(mu * n), np.zeros(mu * n), gc.ravel())                 # u ∈ [0, avail·cap]
+            # commitment floor (F7): u ≥ u_min_frac·avail·cap — the fleet is *scheduled* committed (EDF plans
+            # the campaign; day-ahead only modulates). Without it the LP sheds u freely across the week — an
+            # optimizer's fiction that suppresses the forced oversupply behind real negative prints. κ<1
+            # leaves the observed few weekend shutdowns possible; the C4 'none' pin overrides upward anyway.
+            umf = np.broadcast_to(np.asarray(fz.get("u_min_frac", 0.0), float), (mu,))
+            ulo = (umf[:, None] * gc).ravel() if umf.any() else np.zeros(mu * n)
+            ub = add_block(np.zeros(mu * n), ulo, gc.ravel())                 # u ∈ [u_min·avail·cap, avail·cap]
             db = add_block(np.full(mu * n, c_mod), np.zeros(mu * n), np.full(mu * n, _INF))  # deep-mod d ≥ 0
             sb = add_block(np.repeat(c_start, n), np.zeros(mu * n), np.full(mu * n, _INF))   # start su ≥ 0
             flex_cols[z] = (ub, db, sb, fidx)
@@ -263,9 +285,9 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                 for j in range(mu):
                     tt = np.arange(1, n); r = base + j * (n - 1) + (tt - 1)
                     rows.append(r); cols.append(gbase + fidx[j] * n + tt); vals.append(np.ones(tt.size))       # +p_t
-                    rows.append(r); cols.append(gbase + fidx[j] * n + (tt - 1)); vals.append(-np.ones(tt.size))  # −p_{t−1}
-                    rows.append(r); cols.append(ub + j * n + tt); vals.append(np.full(tt.size, -r_up[j]))       # −R_up·u_t
-                    if beta[j] != 0.0:                                             # xénon: recent deep-mod caps the ramp
+                    rows.append(r); cols.append(gbase + fidx[j] * n + (tt - 1)); vals.append(-np.ones(tt.size))
+                    rows.append(r); cols.append(ub + j * n + tt); vals.append(np.full(tt.size, -r_up[j]))       # -Rup*u
+                    if beta[j] != 0.0:                                             # xénon: recent deep-mod caps ramp
                         for k in range(1, 9):
                             tt2 = np.arange(max(1, k), n)                          # row t (≥1) uses d_{t−k} when t−k≥0
                             rows.append(base + j * (n - 1) + (tt2 - 1))
@@ -283,7 +305,11 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                     tt = np.arange(1, n); r = base + j * (n - 1) + (tt - 1)
                     rows.append(r); cols.append(ub + j * n + tt); vals.append(np.ones(tt.size))
                     rows.append(r); cols.append(ub + j * n + (tt - 1)); vals.append(-np.ones(tt.size))
-                    row_lo.append(np.full(n - 1, -_INF)); row_up.append(gc[j, 1:] * rho[j])
+                    # an outage RETURN raises the commitment floor by κ·Δavail in one hour — a *scheduled*
+                    # recommissioning, not an economic recommit, so it must pass the ramp cap (else infeasible
+                    # against the u_min floor at every REMIT return step).
+                    up = gc[j, 1:] * rho[j] + umf[j] * np.clip(gc[j, 1:] - gc[j, :-1], 0.0, None)
+                    row_lo.append(np.full(n - 1, -_INF)); row_up.append(up)
                 xrow += mu * (n - 1)
 
             # ---- F5 seam rows at t=0: the intertemporal constraints that reference hour −1, closed against
@@ -295,11 +321,14 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                 rows.append(rr); cols.append(sb + jj * n); vals.append(np.ones(mu))
                 rows.append(rr); cols.append(ub + jj * n); vals.append(-np.ones(mu))
                 row_lo.append(-u_init); row_up.append(np.full(mu, _INF)); xrow += mu
-                if "rho_recommit" in fz:                                             # min-down: u_0 ≤ avail_0·ρ + u_init
+                if "rho_recommit" in fz:                                     # min-down: u_0 ≤ avail_0·ρ + u_init
                     rho = np.broadcast_to(np.asarray(fz["rho_recommit"], float), (mu,)).astype(float)
                     rr = xrow + jj
                     rows.append(rr); cols.append(ub + jj * n); vals.append(np.ones(mu))
-                    row_lo.append(np.full(mu, -_INF)); row_up.append(gc[:, 0] * rho + u_init); xrow += mu
+                    row_lo.append(np.full(mu, -_INF))
+                    # never bind below the commitment floor (a cross-seam outage return raises u_min above
+                    # what u_init + the economic recommit ramp can reach — a scheduled return, let it pass)
+                    row_up.append(np.maximum(gc[:, 0] * rho + u_init, umf * gc[:, 0] + 1e-6)); xrow += mu
                 if "r_up" in fz:                          # C3 ramp: p_0 − r_up·u_0 ≤ p_init − β·Σ_{k=1..8} d_{−k}
                     r_up = np.asarray(fz["r_up"], float)
                     beta = np.broadcast_to(np.asarray(fz.get("xenon_beta", 0.0), float), (mu,)).astype(float)
@@ -319,7 +348,12 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                 rr = xrow + np.arange(n)
                 for j in nucj:
                     rows.append(rr); cols.append(gbase + fidx[j] * n + np.arange(n)); vals.append(np.ones(n))
-                row_lo.append(np.full(n, float(fz["p_minstab"]))); row_up.append(np.full(n, _INF)); xrow += n
+                # clamp the floor to the hour's *available* nuclear (× a safety margin): the minimum-injection
+                # floor can never exceed what is physically online, else the window is infeasible when outages
+                # take the fleet below the nominal floor.
+                avail_nuc = gcap[fidx[nucj]].sum(axis=0)                         # Σ avail·cap over nuclear, per hour
+                row_lo.append(np.minimum(float(fz["p_minstab"]), 0.98 * avail_nuc))
+                row_up.append(np.full(n, _INF)); xrow += n
             if nucj.size and "r_up_req" in fz and float(fz["r_up_req"]) > 0:      # C6 up: Σ_nuc(u−p)+Σ_res(cap−p) ≥ R↑
                 rr = xrow + np.arange(n); off = np.zeros(n)
                 for j in nucj:
@@ -329,7 +363,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                     rows.append(rr); cols.append(gbase + i * n + np.arange(n)); vals.append(-np.ones(n))
                     off = off + gcap[i]
                 row_lo.append(float(fz["r_up_req"]) - off); row_up.append(np.full(n, _INF)); xrow += n
-            if nucj.size and "r_down_req" in fz and float(fz["r_down_req"]) > 0:  # C6 down: Σ_nuc(p−α_tech·u)+Σ_res p ≥ R↓
+            if nucj.size and "r_down_req" in fz and float(fz["r_down_req"]) > 0:  # C6 down: footroom ≥ R↓
                 # footroom = headroom above the *technical minimum* α_tech·u (what the unit could still be
                 # commanded down to), NOT above the deep-mod-adjusted floor — measuring against α_band·u−d
                 # would let the LP raise d to fabricate footroom, incentivising deeper modulation (backwards).
@@ -369,6 +403,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         "bal_dual_ix": bal_dual_ix, "flow_cols": flow_cols, "ecap_rows": ecap_rows, "T": T,
         "gen_cols": gen_cols, "res_cols": res_cols, "ens_cols": ens_cols, "dump_cols": dump_cols,
         "srmc_by_unit": srmc_by_unit, "res_schemes": res_schemes, "flex_cols": flex_cols,
+        "flex_spec": flex,          # the input flex spec (params per zone) — for the F6 debug dump
     }
 
 
@@ -387,7 +422,16 @@ _HIGHS = None
 def _get_highs():
     """One resident HiGHS instance, reused across window solves — constructing a fresh ``highspy.Highs()``
     per solve costs ~85 ms (visible once linopy is gone). ``passModel`` loads a fresh LP each call, so
-    solves stay independent (cold, byte-identical); only the object-construction cost is amortised."""
+    solves stay independent (cold, byte-identical); only the object-construction cost is amortised.
+
+    Dual choice (F6, spec §8): we keep the default **dual simplex** and rely on the `_tie_break`
+    ε-perturbation for well-defined duals, rather than switching to interior-point (`solver="ipm"`,
+    `run_crossover="off"`). Rationale: an IPM point without crossover is *interior*, so its duals are an
+    analytic-centre average that does not correspond to any basic solution — for a degenerate price LP that
+    smears the marginal-unit price across ties instead of naming one, which is exactly the wrong behaviour
+    for reading a marginal price off the balance dual. Simplex returns a vertex dual (a genuine marginal
+    unit); the sub-cent tie-break makes that vertex unique and stable hour-to-hour (verified by the
+    dual-oscillation diagnostic). So: simplex + ε, crossover moot."""
     global _HIGHS
     if _HIGHS is None:
         _HIGHS = highspy.Highs()
@@ -428,9 +472,10 @@ def _solve_and_read(h, spec, price_sign, diagnose: bool = False):
                            "p": _p(z, fidx)}
                        for z, (ub, db, sb, fidx) in spec["flex_cols"].items()}
     if diagnose:                       # lecture seule de la solution primale (cf. lp.diagnostics)
-        from .diagnostics import binding_flows, marginal_report
+        from .diagnostics import binding_flows, debug_hour, marginal_report
         out["diag"] = marginal_report(spec, cv, prices)
         out["diag_flows"] = binding_flows(spec, cv, {})
+        out["debug"] = lambda zone, hour: debug_hour(spec, cv, prices, zone, hour)   # F6 price decomposition
     return out
 
 

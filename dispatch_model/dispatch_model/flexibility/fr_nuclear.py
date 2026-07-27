@@ -100,7 +100,7 @@ def build_flex_spec(stack: pd.DataFrame, curve, c_mod: float, c_start_by_class: 
     Returns ``(stack, None)`` unchanged when the stack carries no nuclear rows.
     """
     st = stack.reset_index(drop=True)
-    nuc = np.flatnonzero((st["tech"].to_numpy() == "nuclear"))
+    nuc = np.flatnonzero(st["tech"].to_numpy() == "nuclear")
     if nuc.size == 0:
         return stack, None
     floor_bid = float(nuclear_srmc()) if floor_bid is None else float(floor_bid)
@@ -125,12 +125,28 @@ def build_flex_spec(stack: pd.DataFrame, curve, c_mod: float, c_start_by_class: 
         d8 = d8_full * deepband_scale; dd = dd_full * deepband_scale   # C4: derate caps with the deep band
     c_start = np.asarray([float(c_start_by_class.get(f"c_start_{cl}", c_start_by_class.get("c_start_1300", 320.0)))
                           for cl in classes], float)
+    # κ commitment floor (F7): the campaign schedule keeps the available fleet committed — the LP only
+    # modulates within the band. κ<1 leaves the observed few weekend shutdowns free. Nuclear-only (fossil
+    # commits economically; `_append_fossil` leaves its u_min_frac at 0).
+    kappa = float(c_start_by_class.get("u_commit_frac", 0.85))
+    # fleet-operating band floor (F7): free modulation stops at the revealed socle share (~0.74 of the
+    # available fleet — `alpha_band_op`), not at the per-unit technical band (0.55–0.60): the fleet never
+    # rides its mode-G floor simultaneously. Below the operating floor is deep-mod `d`, priced c_mod — both
+    # anchored on the same revealed-curve measurement (socle share / socle bid).
+    ab_op = float(c_start_by_class.get("alpha_band_op", 0.74))
+    ab_, at_ = np.maximum(_col("alpha_band"), ab_op), _col("alpha_tech")
+    # β ceiling (F7): the C3 ramp allowance `r_up·u − β·Σ₈d` must stay ≥ 0 at worst case, else sustained
+    # deep-mod *forces* p down against the C1 band floor of a committed fleet → an infeasible "xénon death
+    # spiral" the physics does not contain (xénon slows the climb, at worst to zero — it never forces output
+    # down). Since Σ₈d ≤ 8·(α_band−α_tech)·u, the unit-free ceiling is β ≤ r_up/(8·deep_band); the seeds
+    # exceed it, so the LP-effective β is the clamped value (auto-tracks the operating band width).
+    beta_eff = np.minimum(_col("xenon_beta"), _col("r_up") / np.maximum(8.0 * (ab_ - at_), 1e-9))
     spec = {"idx": nuc, "is_nuclear": np.ones(nuc.size, bool),
-            "alpha_band": _col("alpha_band"), "alpha_tech": _col("alpha_tech"),
+            "alpha_band": ab_, "alpha_tech": at_,
             "c_mod": float(c_mod), "c_start": c_start,
             "d_max_8h": d8, "d_max_day": dd,
-            "r_up": _col("r_up"), "xenon_beta": _col("xenon_beta"),
-            "rho_recommit": _col("rho_recommit"),
+            "r_up": _col("r_up"), "xenon_beta": beta_eff,
+            "rho_recommit": _col("rho_recommit"), "u_min_frac": np.full(nuc.size, kappa),
             "deepband_scale": deepband_scale, "must_run_frac": must_run_frac,
             # private (solver ignores): the nuclear names + full deep-mod caps, so `window_spec` can re-derate
             # for a given week's maneuverability without a full rebuild.
@@ -213,5 +229,6 @@ def _append_fossil(st: pd.DataFrame, spec: dict, fossil_c_start: dict) -> None:
     spec["r_up"] = np.concatenate([spec["r_up"], r_up])
     spec["xenon_beta"] = np.concatenate([spec["xenon_beta"], z])
     spec["rho_recommit"] = np.concatenate([spec["rho_recommit"], np.full(fos.size, _FOSSIL_RHO_RECOMMIT)])
+    spec["u_min_frac"] = np.concatenate([spec["u_min_frac"], z])      # fossil commits economically (no floor)
     spec["deepband_scale"] = np.concatenate([spec["deepband_scale"], np.ones(fos.size)])
     spec["must_run_frac"] = np.concatenate([spec["must_run_frac"], z])

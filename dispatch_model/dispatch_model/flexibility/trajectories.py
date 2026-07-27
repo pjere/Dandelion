@@ -22,14 +22,29 @@ import numpy as np
 # several hours of negative prices is a live arbitrage (F7 tunes it). c_mod (€/MWh on deep-mod depth d) is
 # seeded to land fleet modulated energy at the observed ~30–33 TWh/yr; also F7.
 _DEFAULT_FLEX_COSTS = {
-    "c_mod": 8.0,
+    # c_mod — deep-modulation cost, F7-calibrated to the revealed socle bid: the FR fleet demonstrably holds
+    # output through prices to −40 (stacks.nuclear_curve.MUSTRUN_BID), so its implied modulation cost is
+    # srmc − (−40) ≈ 45–47. The original seed 8 made deep-mod absurdly cheap — model nuclear curtailed
+    # itself at −1 and the negative tail never formed.
+    "c_mod": 45.0,
     "c_start_900": 300.0, "c_start_1300": 320.0, "c_start_N4": 340.0,
     "c_start_EPR": 300.0, "c_start_EPR2": 260.0,
     "c_start_gas": 30.0, "c_start_coal": 80.0, "c_start_lignite": 90.0, "c_start_oil": 20.0,
+    # κ — nuclear commitment floor as a fraction of the available fleet (u ≥ κ·avail·cap, F7). The campaign
+    # schedule keeps the available fleet COMMITTED (day-ahead only modulates); shedding is the exception
+    # (a few weekend shutdowns out of ~50 units, per the mid-April 2024 reference episodes). F7-calibrated:
+    # κ·alpha_band_op = 0.90·0.74 = 0.67 = the observed fleet floor on the 2024 negative hours (30/45 GW).
+    "u_commit_frac": 0.90,
+    # fleet-operating band floor (F7): the class α_band (0.55–0.60) is the per-unit mode-G TECHNICAL band,
+    # but the fleet never rides there simultaneously — the revealed supply curve measures ~74 % of available
+    # capacity producing below −40 €/MWh (stacks.nuclear_curve socle). Free modulation stops at this
+    # operating floor; going below it is deep-mod `d`, priced c_mod. Measured, workbook-overridable.
+    "alpha_band_op": 0.74,
 }
 _DEFAULT_MINSTAB_MW = 0.0            # no explicit grid-stability floor pre-2026 (CRE mechanism is 2026+)
 _DEFAULT_RESERVES = {"r_up_req": 1500.0, "r_down_req": 1000.0}   # FR fleet-level seed (MW)
-_DEFAULT_OA_LADDER = {"cr_bid": -1.0, "oa_bid": -500.0, "market_floor": -500.0, "market_cap": 4000.0}
+_DEFAULT_OA_LADDER = {"cr_bid": -1.0, "oa_bid": -500.0, "mer_bid": -0.01,
+                      "market_floor": -500.0, "market_cap": 4000.0}
 
 
 def _long(workbook, sheet: str):
@@ -93,9 +108,11 @@ def load_oa_ladder(workbook, year: int, price_floor: float = -500.0, price_cap: 
     return {k: _interp(series.get(k, {}), year, d) for k, d in dflt.items()}
 
 
-# FR RES scheme → its §6 ladder bid level. `merchant` (post-support) has no subsidy → 0; unlisted schemes
-# keep their own workbook floor (only FR carries the OA/CR schemes, so this is effectively FR-only).
-_LADDER_BID = {"complement_remuneration": "cr_bid", "obligation_achat": "oa_bid", "merchant": 0.0}
+# FR RES scheme → its §6 ladder bid level. `merchant` (post-support) has no subsidy: it curtails just BELOW
+# zero (`mer_bid` −0.01 — imbalance/shutdown micro-costs), which is where the §9 shallow half of observed
+# negative prints (−0.01, 0] lives; a bid of exactly 0.0 would absorb the knife-edge surplus without ever
+# printing negative. Unlisted schemes keep their own workbook floor (only FR carries OA/CR → FR-only).
+_LADDER_BID = {"complement_remuneration": "cr_bid", "obligation_achat": "oa_bid", "merchant": "mer_bid"}
 
 
 def apply_oa_ladder(schemes: list[dict], ladder: dict) -> list[dict]:
@@ -108,14 +125,23 @@ def apply_oa_ladder(schemes: list[dict], ladder: dict) -> list[dict]:
       * `merchant` → 0.
 
     Every resulting bid is truncated to `[market_floor, market_cap]` (the EU day-ahead price bounds). Shares
-    and triggers are untouched — the OA *volume* still decays by vintage expiry upstream (`scheme_shares`),
-    the ladder only sets the *price* each surviving tranche bids at. Schemes with no ladder entry keep their
-    own (truncated) floor, so a non-FR zone passed here is only clamped, not repriced.
+    are untouched — the OA *volume* still decays by vintage expiry upstream (`scheme_shares`), the ladder
+    only sets the *price* each surviving tranche bids at. Schemes with no ladder entry keep their own
+    (truncated) floor and trigger, so a non-FR zone passed here is only clamped, not repriced.
+
+    **Repriced schemes get `trigger=0`.** The German §51 N-consecutive-hours trigger does not exist in the
+    French mechanism: the CR premium suspension is *instantaneous per negative hour*, which is exactly what
+    the `cr_bid ≈ −1` level already encodes. Keeping a trigger on top double-counts the suspension — and the
+    sticky fixed point (`solve_with_triggers`) then zeroes the floor at the FIRST negative hour and re-solves
+    to a 0.0 price, retroactively erasing every FR negative run (measured: FR pinned at exactly −0.0 in all
+    configurations, the F7 count-killer). The ladder bid IS the suspended-premium bid; no trigger dynamics.
     """
     lo, hi = float(ladder["market_floor"]), float(ladder["market_cap"])
     out = []
     for t in schemes:
         bid = _LADDER_BID.get(t["scheme"])
-        floor = float(t["floor"]) if bid is None else (float(bid) if isinstance(bid, float) else float(ladder[bid]))
-        out.append({**t, "floor": min(max(floor, lo), hi)})
+        if bid is None:
+            out.append({**t, "floor": min(max(float(t["floor"]), lo), hi)})
+        else:
+            out.append({**t, "floor": min(max(float(ladder[bid]), lo), hi), "trigger": 0})
     return out

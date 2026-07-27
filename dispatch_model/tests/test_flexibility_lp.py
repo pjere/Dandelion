@@ -159,6 +159,36 @@ def test_c6_upward_headroom_reserve_commits_spare_capacity():
     assert hr.min() >= req - 1.0                              # C6 keeps ≥ req of headroom every hour
 
 
+# ---- FLEX-F7: the κ commitment floor (u ≥ κ·avail·cap — commitment is scheduled, not optimized) ----------
+def test_commitment_floor_forces_negatives_even_without_recovery():
+    # monotonically falling demand: with only the C5 start cost the LP sheds u for free (the F2a test above
+    # asserts NO negative). The κ floor removes that escape — the fleet stays committed, the band floor
+    # overshoots the trough, and the price goes negative with no demand recovery needed.
+    dem = (38000, 38000, 22000, 16000)
+    pr_free = _prices(_FLEX, demand=dem)
+    assert (pr_free.to_numpy() >= -1e-6).all()               # free shedding → no negative (the F2a behaviour)
+    pr_k = _prices({"N": {**_FLEX["N"], "u_min_frac": [0.9]}}, demand=dem)
+    assert pr_k.iloc[3] < 0                                  # κ=0.9 floor → forced band floor → negative print
+
+
+def test_commitment_floor_survives_an_outage_return_step():
+    # avail jumps 0.5→1.0 mid-window (a REMIT return): u_min jumps by κ·Δavail — the min-down ramp must let
+    # the scheduled return through (solver widens the RHS), not go infeasible.
+    import xarray as xr
+    T = pd.date_range("2024-05-19", periods=4, freq="h", tz="UTC")
+    stack = pd.DataFrame({"unit_id": ["NUC", "GAS"], "tech": ["nuclear", "gas"],
+                          "capacity_mw": [40000.0, 20000.0], "srmc_eur_mwh": [7.0, 80.0],
+                          "min_gen_frac": [0.0, 0.0]})
+    av = xr.DataArray([[0.5, 0.5, 1.0, 1.0], [1.0] * 4],
+                      coords=[("unit", ["NUC", "GAS"]), ("time", T)])
+    zd = {"N": {"stack": stack, "demand": [45000.0] * 4, "res_pot": [0.0] * 4,
+                "avail": av, "energy_caps": None}}
+    flex = {"N": {**_FLEX["N"], "u_min_frac": [0.9], "rho_recommit": [0.1]}}
+    out = solve_multizone_highs(T, zd, [], {}, flex=flex)      # must solve, not raise
+    u = out["flex"]["N"]["u"][0]
+    assert u[2] >= 0.9 * 40000.0 - 1.0                        # the floor tracks the return step
+
+
 # ---- FLEX-F5: window-seam state linking (u_init / p_init / d_hist as fixed pre-window parameters) --------
 _SEAM_BASE = {"idx": [0], "alpha_band": [0.60], "alpha_tech": [0.25], "c_mod": 8.0, "c_start": [2000.0]}
 _HIGH = (38000, 38000, 38000, 38000)

@@ -69,11 +69,15 @@ def _fr_maneuverability(config, year, week_starts):
 def run_backtest(config: Config, year: int, n_weeks: int | None = None,
                  use_remit_nuclear_avail: bool = False, de_unit_level: bool = False,
                  nuclear_curve: bool = True, hydro_sdp_level: bool = True,
-                 diagnose: bool = False, flexibility: bool | None = None) -> dict:
+                 diagnose: bool = False, flexibility: bool | None = None,
+                 write_lake: bool = True) -> dict:
     """`flexibility` opts into the FLEX plant-operating-rigidity module (per-reactor FR nuclear stack with
     C1/C2/C3/C5 rigidities → endogenous negatives; see ``flexibility.fr_nuclear``). Default None reads
     ``flexibility.enabled`` from config.yaml (off unless set). When on, the FR nuclear tranche surrogate
-    (`nuclear_curve`) is bypassed — the two are mutually exclusive representations of the same fleet."""
+    (`nuclear_curve`) is bypassed — the two are mutually exclusive representations of the same fleet.
+
+    `write_lake=False` skips persisting prices/metrics — REQUIRED for calibration sweeps (F7), which must
+    never overwrite the golden `backtest_prices` artifact with partial or experimental runs."""
     zones = [z for z in config.all_zones if z != "GB"]
     neigh = [z for z in zones if z != "FR"]
     wb = config.resolve(config.section("assumptions")["workbook"])
@@ -116,9 +120,14 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     # (marginal 78,6 % des heures a exactement 7,0 EUR/MWh). Cf. stacks.nuclear_curve.
     from ..flexibility import enabled as _flex_enabled
     flex_on = _flex_enabled(config) if flexibility is None else bool(flexibility)
+    if flex_on:                                        # FLEX models the modulation endogenously, so nuclear
+        use_remit_nuclear_avail = True                 # must carry its TRUE envelope (installed − REMIT outages),
+        #                                                not the rolling-max-of-output proxy that pre-removes the
+        #                                                surplus FLEX exists to price (S1c). Couple them.
     from ..stacks import nuclear_curve as nuc
     nuc_installed = float(fr_stack.loc[fr_stack["tech"] == "nuclear", "capacity_mw"].sum())
     flex_spec = None
+    fired_floor = 0.0                                      # flag-off: historic §51 fired-tranche floor
     if flex_on:
         # FLEX on: keep the per-reactor rows and build the C1–C7/§4 rigidity spec — the negatives now emerge
         # from the rigidity, so the tranche surrogate (which bakes a −40 socle bid in) is bypassed. F3 adds
@@ -133,10 +142,13 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
             r_up_req=reserves["r_up_req"], r_down_req=reserves["r_down_req"],
             p_minstab=trajectories.minstab_mw(wb, "FR", year),
             include_fossil=True, fossil_c_start=costs)
+        ladder = trajectories.load_oa_ladder(wb, year)
         if "FR" in res_schemes:                            # §6 (F4): the FLEX module owns the FR downward
             res_schemes = {**res_schemes,                  # bid ladder — OA at the market floor, CR ≈0
-                           "FR": trajectories.apply_oa_ladder(res_schemes["FR"],
-                                                              trajectories.load_oa_ladder(wb, year))}
+                           "FR": trajectories.apply_oa_ladder(res_schemes["FR"], ladder)}
+        fired_floor = float(ladder["mer_bid"])             # fired §51 tranches curtail just BELOW zero (F7):
+        #                                                    a 0.0 fired floor is an unlimited 0-priced sink
+        #                                                    that erases the coupled region's negative depth
     elif nuclear_curve:
         fr_stack = nuc.expand_stack(fr_stack, nuc.load_curve(config, year, nuc_installed))
     nb_nl = {z: neighbour_netload(config, z, year).set_index("timestamp_utc") for z in neigh}
@@ -166,7 +178,8 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     # C4 maneuverability: per-week {name: (state, stretch_power)} from the REMIT refuelling calendar (None
     # when REMIT is unavailable → every reactor `full`). Applied to the base flex spec window by window.
     maneuver_weekly = _fr_maneuverability(config, year, weeks[:-1]) if flex_spec is not None else None
-    price_chunks, diag_chunks = [], []
+    price_chunks, diag_chunks, flow_chunks = [], [], []
+    flex_stats = {"modulated_mwh": 0.0, "deepmod_mwh": 0.0, "hours": 0}   # F7 §9: fleet modulation aggregates
     prev_flex_state = None                                       # F5: previous window's tail state (FR), or None
     prev_w1 = None                                               # end of the previous window (seam-adjacency check)
     for w0, w1 in zip(weeks[:-1], weeks[1:]):
@@ -192,38 +205,50 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
             seam = ({**cold, **prev_flex_state}                 # F5: link only across an adjacent seam
                     if prev_flex_state is not None and prev_w1 == w0 else cold)
 
-        def _solve(sp):
-            return solve_with_triggers(T, zd, borders, {b: ntc[b] for b in borders}, res_schemes,
-                                       res_bid=res_bid, price_floor=price_floor, diagnose=diagnose,
-                                       flex=({"FR": sp} if sp is not None else None))
-        try:
-            out = _solve(seam)
-        except RuntimeError:
-            # a seam link can over-constrain a window (a last-hour commitment shed upstream + hard reserves) →
-            # fall back to a cold solve for this window (F4 behaviour), rather than dropping it entirely.
-            if seam is not cold:
-                try:
-                    out = _solve(cold)
-                except RuntimeError:
-                    prev_flex_state = None; continue
-            else:
-                prev_flex_state = None; continue
+        # try the seam-linked spec first; a seam link can over-constrain a window (a last-hour commitment shed
+        # upstream + hard reserves) → fall back to a cold solve (F4 behaviour) rather than drop the window.
+        out = None
+        for sp in ([seam, cold] if seam is not cold else [seam]):
+            try:
+                out = solve_with_triggers(T, zd, borders, {b: ntc[b] for b in borders}, res_schemes,
+                                          res_bid=res_bid, price_floor=price_floor, diagnose=diagnose,
+                                          flex=({"FR": sp} if sp is not None else None),
+                                          fired_floor=fired_floor)
+                break
+            except RuntimeError:
+                out = None
+        if out is None:
+            prev_flex_state = None
+            continue
         price_chunks.append(out["prices"])
         if diagnose and out.get("diag") is not None:
             diag_chunks.append(out["diag"])
-        prev_flex_state = (fr_nuclear.tail_state(out["flex"]["FR"])     # carry the tail into the next window
-                           if flex_spec is not None and out.get("flex", {}).get("FR") is not None else None)
+            if out.get("diag_flows") is not None:
+                flow_chunks.append(out["diag_flows"])
+        fx = out.get("flex", {}).get("FR") if flex_spec is not None else None
+        if fx is not None:
+            nucm = np.asarray(flex_spec.get("is_nuclear", np.ones(len(fx["idx"]), bool)), bool)
+            # modulated energy = Σ(u − p) over committed nuclear: capacity held on but not producing — the
+            # model analogue of EDF's fleet "énergie modulée" (~30–33 TWh/yr, the §9 level target).
+            flex_stats["modulated_mwh"] += float((fx["u"][nucm] - fx["p"][nucm]).clip(min=0.0).sum())
+            flex_stats["deepmod_mwh"] += float(fx["d"][nucm].sum())
+            flex_stats["hours"] += int(fx["u"].shape[1])
+        prev_flex_state = fr_nuclear.tail_state(fx) if fx is not None else None   # F5: carry the tail forward
         prev_w1 = w1
 
     model = pd.concat(price_chunks).sort_index()
     metrics = _score(model, obs, zones)
-    outdir = config.reports_dir
-    outdir.mkdir(parents=True, exist_ok=True)
-    lake.write_table(model, "dispatch", "backtest_prices", year=year)
-    metrics.to_csv(outdir / f"backtest_{year}_metrics.csv", index=False)   # CSV = human export (§6)
+    if write_lake:
+        outdir = config.reports_dir
+        outdir.mkdir(parents=True, exist_ok=True)
+        lake.write_table(model, "dispatch", "backtest_prices", year=year)
+        metrics.to_csv(outdir / f"backtest_{year}_metrics.csv", index=False)   # CSV = human export (§6)
     res = {"model_prices": model, "observed": obs, "metrics": metrics}
+    if flex_stats["hours"]:                     # F7: fleet modulation aggregates (see §9 calibration targets)
+        res["flex_stats"] = {k: float(v) for k, v in flex_stats.items()}
     if diagnose:                                # lecture de la solution primale (cf. lp.diagnostics), opt-in
         res["diag"] = pd.concat(diag_chunks, ignore_index=True) if diag_chunks else pd.DataFrame()
+        res["diag_flows"] = pd.concat(flow_chunks, ignore_index=True) if flow_chunks else pd.DataFrame()
     return res
 
 

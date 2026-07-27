@@ -181,4 +181,108 @@ parameters (`c_mod`, `c_start`, `β`, D-caps, ε) are fitted in F7 to the §9 ac
   over-constrained seams). The price effect is negligible — mean 46.2→46.3, sub-0.5 €/MWh per-week shifts
   confined to the boundary hours — because seam hours are a small fraction and FR stays export-locked at 0.
   F5's value is correctness (the rigidities no longer reset every Monday), not a price move in this backtest.
-- F6…F8: see the phase tasks and the work plan.
+- **F6 (done):** dual quality & diagnostics (spec §8). Identical-SRMC sister units make the dispatch LP
+  primal-degenerate and the balance duals (= prices) noisy. **(1) `_tie_break`** adds a deterministic
+  sub-cent SRMC perturbation per unit id (blake2b hash → `[0, _EPS_TIE=0.01)`), so ties break the same way
+  every run/window and no price can move by more than ε; applied **only when flex is on**, so flag-off stays
+  byte-identical. **(2) Dual choice** (documented in `_get_highs`): keep dual **simplex** + the ε-perturbation
+  rather than interior-point-without-crossover — an interior point's duals are an analytic-centre average that
+  smears the marginal price across ties instead of naming one; simplex + ε gives a unique, stable vertex dual.
+  **(3) `diagnostics.dual_oscillation`** flags hour-to-hour dual jumps that no demand/availability change
+  justifies (spurious degeneracy). **(4) `diagnostics.debug_hour`** decomposes any (zone, hour) price from the
+  solved primal — the marginal block, saturated borders (the export lock made visible), and each reactor's
+  commit/deep-mod state with its `implied_bid = srmc − c_mod`; exposed as `out["debug"](zone, hour)` under
+  `diagnose=True`. This is the tool that explains an individual negative print for the F7/F8 reports. Also:
+  an empty flex spec (`idx=[]`) is now a no-op (tie-break only). Tests: `tests/test_flexibility_diag.py`
+  (tie-break bound + flag-off, oscillation detector, degenerate-fleet no-oscillation, negative-print
+  decomposition). **Flag-off byte-identical — proven three ways:** the 2024 flag-off price fingerprint is
+  bit-for-bit equal across pre-FLEX `45bfbb0`, committed F5 HEAD, and this F6 working tree (all
+  `244f004…`). So neither the FLEX module nor F6 touches flag-off. `tools/golden.py check` currently flags
+  only `backtest_prices/year=2024` (~5 % on the mean): that is **input data drift** — the 2024 fuel/ENTSO-E
+  inputs (the "year under surveillance") were re-ingested after the `45bfbb0` baseline was captured, so the
+  same byte-identical code yields a slightly different 2024 output. Not a code regression; resolved by
+  re-capturing the baseline (an F8 golden task, left to the user per commit discipline). 2019 and all
+  non-dispatch artifacts still match the baseline.
+- **F7 (in progress):** calibration on 2024 (spec §9) — opened with the **S1c investigation**, which
+  overturned the standing "export lock" explanation of the missing FR negative tail. Five instrumented
+  backtests + an input-data check established: (1) FR export ×0.4 → still 0 negatives (export is *not* the
+  lock — the mean drops 46→32 but the sign never flips); (2) true REMIT availability alone → 0; (3) REMIT +
+  `c_start`×10 → 0 (the LP still sheds commitment); (4) REMIT + a 40 GW C7 floor → the **first 3 negative
+  hours** (mechanism found); (5) the surplus is real in the data — on the 157 observed-negative hours,
+  net load (demand − must-take RES) ≈ **27 GW** vs a full-fleet band floor 0.60·61.4 ≈ **37 GW**.
+  Flat-`p_minstab` probes (45/50 GW) then showed that lever is too blunt: count saturates at 9–12 (vs 65
+  in-window), modulated energy *falls* (a floored fleet cannot modulate), and the FR mean collapses
+  42→40 vs 56 observed (shoulder hours flooded). The correct formulation, landed as code:
+
+  * **flex→REMIT availability coupling** — `run_backtest` forces `use_remit_nuclear_avail=True` when FLEX is
+    on: the module models modulation *endogenously*, so nuclear must carry its true envelope (installed −
+    REMIT outages); the rolling-max-of-output proxy pre-removes exactly the surplus FLEX exists to price.
+  * **κ commitment floor** — `u ≥ κ·avail·cap` per reactor (`u_min_frac`, seed `u_commit_frac`=0.85 in
+    `dispatch_flex_costs`): commitment is *scheduled* (EDF plans the campaign; day-ahead only modulates), so
+    the LP may not shed the fleet — the optimizer's free-shedding escape was the fiction behind every zero.
+    κ<1 keeps the observed few weekend shutdowns available. No level distortion: `p` stays free up to `u` in
+    peaks, unlike the flat C7 floor. The min-down ramp (and its F5 seam row) is widened by `κ·Δavail⁺` so a
+    scheduled outage *return* is never blocked by the economic recommit cap.
+  * **C7 availability-clamped** (`min(p_minstab, 0.98·Σ avail·cap)`) — the regulatory floor can never exceed
+    the physically-online fleet (no infeasible windows); `p_minstab` stays 0 for 2024 (the CRE minimum-
+    injection mechanism is 2026+), so C7 is a projection-era lever, not the 2024 negative-former.
+  * **Sweep hygiene** — `run_backtest(write_lake=False)` for calibration sweeps (never overwrite the golden
+    artifact); `flex_stats` (fleet modulated energy Σ(u−p), deep-mod energy Σd) returned for the §9 level
+    target.
+
+  Toy tests prove the κ floor forces negatives *without* a demand recovery (where the C5 start cost alone
+  cannot) and survives an outage-return step.
+
+  *Calibration finding — the β ceiling.* First κ probes (0.85/0.95) delivered the §9 modulated-energy level
+  (37/41 TWh-eq vs 30–33 target) and repaired the mean (48 vs the flat floor's 40), but dropped exactly the
+  surplus windows as infeasible: with a *committed* fleet, sustained deep-mod turns the C3 ramp allowance
+  `r_up·u − β·Σ₈d` negative, *forcing* `p` down against the C1 band floor — a "xénon death spiral" the
+  physics does not contain (xénon slows the climb, at worst to zero; it never forces output down). Since
+  `Σ₈d ≤ 8·(α_band−α_tech)·u`, β has a unit-free physical ceiling `r_up/(8·deep_band)` ≈ 0.09–0.11 — the
+  class seeds (0.14–0.17) exceed it. The builder now clamps the LP-effective β to the ceiling (the free
+  shedding of the pre-κ model is why this never bound before).
+
+  *Calibration finding — the fleet-operating band floor.* With κ + the β clamp, modulated energy landed in
+  the §9 band (31.5 TWh-eq vs 30–33) but the count stayed 0: model nuclear could still modulate **free of
+  charge** from `u` down to the class band (0.60·u ≈ 23 GW), absorbing the surplus before any negative bid
+  was touched — while the revealed curve measures **74 % of available capacity producing below −40** (socle
+  share), i.e. reality's fleet floor on those hours was ~30 GW, not 23. Free modulation now stops at
+  `alpha_band_op` (seed 0.74, workbook-overridable) — the *fleet-operating* floor, vs the per-unit mode-G
+  technical band that the fleet never rides simultaneously; below it is deep-mod `d` at `c_mod`, itself
+  re-anchored to the revealed **socle bid** −40 (`c_mod ≈ 45` ⇒ implied deep-mod bid `srmc − c_mod ≈ −38`;
+  the seed 8 made deep-mod absurdly cheap — model nuclear politely curtailed at −1 where reality's fleet
+  holds output through −40). The merchant ladder rung bids `mer_bid` = −0.01 (curtailment just *below* zero —
+  the §9 shallow band (−0.01, 0] is exactly this microstructure), not 0.0.
+
+  *Calibration finding — the §51 trigger was erasing every FR negative (the actual, historic answer to
+  "pourquoi 0 heure négative modélisée").* The FR CR tranche carried `trigger=1`; the sticky
+  `solve_with_triggers` fixed point therefore zeroed its floor at the FIRST negative hour of any window and
+  re-solved to an exactly-0.0 price — **retroactively deleting every FR negative run**, in every variant,
+  since the §51 machinery was built (this, not the export mechanism blamed by the S1c-era analysis, is why
+  the pre-FLEX backtest printed 0 vs 352). Regulatorily the German N-consecutive-hours trigger does not
+  exist in the French CR: the premium suspension is instantaneous per negative hour and is *already encoded*
+  in `cr_bid ≈ −1`. `apply_oa_ladder` now sets `trigger=0` on the schemes it reprices (FLEX-gated; DE's
+  genuine §51 dynamics untouched). **First on-target result** (κ=0.85, c_mod=45, α_op=0.74, 15-week 2024
+  window): count **65 = 65 observed**, timing 69 % midday / 55 % weekend (obs-consistent), modulated energy
+  31.5 TWh-eq, P95 104 vs 103.
+
+  *Calibration finding — the fired-tranche 0.0 sink.* Even with real FR surplus and no FR trigger, min stayed
+  ≈0: a **fired** §51 tranche's floor was reset to exactly 0.0, making it an *unlimited 0-priced curtailment
+  sink for the whole coupled region* — exporting into it always beat curtailing at home below zero, so no
+  zone could print a real negative while any fired tranche had capacity left. `solve_with_triggers` now takes
+  `fired_floor` (default 0.0 → flag-off byte-identical; the FLEX path passes the ladder's `mer_bid` −0.01):
+  premium gone ⇒ merchant behaviour, curtailment just below zero. Final probe (κ=0.90): count 83 vs 65
+  (within ±30 %), real prints at the merchant rung.
+
+  *Honest depth boundary.* The model's prints stop at the shallow rung: the observed **mid-band (−5…−50,
+  17 of 65 h) comes from coupling with neighbours' subsidy floors when the whole region is in surplus** —
+  and the model's BE/CH/ES are *not* in surplus on those hours (bisected: model BE +5 vs obs **−11**;
+  their fleets carry no FLEX-style must-run rigidity and their RES potential is curtailment-censored
+  observed generation). FR-side the model behaves correctly (floors at its merchant rung; deep-mod at
+  `srmc−c_mod ≈ −38` stands ready behind it). Deepening FR's own ladder to fake the mid-band would
+  misattribute German/Belgian floors to French CR — the depth gap is documented as neighbour-zone scope
+  (F8 backlog: extend §4-style rigidities + ladders to BE/CH/ES), not compensated. **Frozen calibration:**
+  `u_commit_frac`=0.90, `c_mod`=45, `alpha_band_op`=0.74, `mer_bid`=−0.01 (all measured/micro-founded:
+  campaign schedule, revealed socle bid, revealed socle share, curtailment microstructure). Full-year
+  validation + calibration report in progress.
+- F8: see the phase tasks and the work plan.

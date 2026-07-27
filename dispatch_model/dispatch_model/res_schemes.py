@@ -63,7 +63,7 @@ def _zone_tranches(zone, schemes, res_bid_z, n) -> list[dict]:
 
 def solve_with_triggers(times, zones_data, borders, ntc, schemes,
                         res_bid, price_floor, max_iter: int = 3, diagnose: bool = False,
-                        flex: dict | None = None) -> dict:
+                        flex: dict | None = None, fired_floor: float = 0.0) -> dict:
     """`solve_multizone` wrapped in the §51 fixed point: re-solve, zeroing premiums whose consecutive
     negative-run exceeds their trigger, until the trigger pattern stops changing.
 
@@ -71,7 +71,14 @@ def solve_with_triggers(times, zones_data, borders, ntc, schemes,
     `lp.diagnostics` sur chaque résolution ; le dernier point fixe porte le diag renvoyé.
 
     `flex` (opt-in, FLEX module) is forwarded unchanged to every re-solve so the plant-operating
-    rigidities hold across the trigger iterations (see ``lp.multi_zone.solve_multizone``)."""
+    rigidities hold across the trigger iterations (see ``lp.multi_zone.solve_multizone``).
+
+    `fired_floor` is the bid a FIRED tranche falls to. The default 0.0 (historic behaviour, flag-off
+    byte-identical) makes every fired tranche an **unlimited curtailment sink at exactly 0.0** — in the
+    coupled system no zone's price can then fall below ≈0 while any fired tranche anywhere has capacity
+    left (exporting into the 0-sink beats curtailing at home below zero), which erases the region's
+    negative depth. The FLEX path passes the ladder's `mer_bid` (−0.01): premium gone ⇒ *merchant*
+    behaviour — curtailment just below zero, the same microstructure as the merchant rung."""
     n = len(times)
     zones = list(zones_data)
     rb = {z: (res_bid.get(z) if isinstance(res_bid, dict) else res_bid) for z in zones}
@@ -95,10 +102,10 @@ def solve_with_triggers(times, zones_data, borders, ntc, schemes,
                     new_fired = fired[z][i] | (runlen >= t["trigger"])   # premium off past N consecutive
                     if new_fired.any() and not np.array_equal(new_fired, fired[z][i]):
                         fired[z][i] = new_fired
-                        t["floor"] = np.where(new_fired, 0.0, base[z][i])
+                        t["floor"] = np.where(new_fired, fired_floor, base[z][i])
                         changed = True
         if not changed:
             break
         out = solve_multizone(times, zones_data, borders, ntc, price_floor=price_floor,
-                              res_tranches=tranches, flex=flex)
+                              res_tranches=tranches, diagnose=diagnose, flex=flex)   # carry diag to the last solve
     return out
