@@ -512,20 +512,29 @@ def solve_multizone_highs(times, zones_data: dict, borders: list, ntc: dict,
         return _solve_and_read(h, spec, price_sign, diagnose)
     # FLEX path (F8 robustness): high-RES projection windows can stall dual simplex for tens of minutes
     # (pathological degeneracy — measured on a 2034 window where healthy windows take seconds). Bound the
-    # solve and rescue with interior point + crossover (the standard degeneracy remedy; crossover restores
-    # a basic solution so the balance duals remain vertex prices). Runs on a FRESH Highs instance, never
-    # the resident one: HiGHS's run clock is owned by the instance, so a time_limit on the long-lived
-    # resident instance fires instantly once its cumulative clock exceeds the limit (measured: 0-second
-    # "kTimeLimit" failures poisoning every subsequent window) — and isolation also guarantees no option
-    # leakage into the flag-off/golden path. The ~85 ms instance cost is negligible against flex solves.
+    # solve and rescue with interior point + crossover. Runs on a FRESH Highs instance, never the resident
+    # one: HiGHS's run clock is owned by the instance, so a time_limit on the long-lived resident instance
+    # fires instantly once its cumulative clock exceeds the limit (measured: 0-second "kTimeLimit" failures
+    # poisoning every subsequent window) — and isolation also guarantees no option leakage into the
+    # flag-off/golden path.
+    #
+    # SEAM attempts get a SHORT simplex-only bound: the pathological window class is the C3×seam-row
+    # interaction (finer bisection: value-neutralised seam variants still stall — it's the row *structure*),
+    # the IPM rescue has never once rescued a seam attempt (0/12 measured across the horizon runs), and the
+    # caller's cold retry solves those same windows in seconds. Burning 180+600 s on a doomed seam attempt
+    # only costs wall time; 90 s = 2× the slowest healthy seam solve observed (48 s under CPU contention),
+    # so a healthy window cannot silently lose its seam link to the bound.
+    is_seam = any("u_init" in z for z in flex.values())
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
     h.setOptionValue("presolve", "on")
-    h.setOptionValue("time_limit", 180.0)
+    h.setOptionValue("time_limit", 90.0 if is_seam else 180.0)
     h.passModel(model)
     try:
         return _solve_and_read(h, spec, price_sign, diagnose)
     except RuntimeError:
+        if is_seam:
+            raise                                   # let the caller's cold retry handle it (fast, proven)
         h = highspy.Highs()                         # fresh again: discard the stalled simplex state entirely
         h.setOptionValue("output_flag", False)
         h.setOptionValue("presolve", "on")

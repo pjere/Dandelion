@@ -353,6 +353,20 @@ Per zone *z*, hour *t* of a weekly window (times `T`, |T| = n). Decision variabl
   targeted seam-C3 relaxation. **(6) Golden**: flag-off byte-identical throughout (kept); the flag-on
   baseline is opt-in via `tools/golden.py capture-flexon`/`check-flexon` on its own dataset
   (`backtest_prices_flexon`).
+
+  *C3×seam pathology — RESOLVED as a cost trim, not a constraint change (2026-07-28).* The finer bisection
+  showed the stall needs only the seam **row structure** with C3 present: every value-neutralised seam
+  variant (d_hist zeroed, u_init maxed, p_init raised) still stalls; only removing the seam keys clears
+  it — so no value-level relaxation can fix it, and a trial removal of the xénon d_hist carry from the C3
+  rows was **reverted** (measured byte-inert on all feasible windows AND ineffective on the pathology: it
+  failed its gate). The re-read of the instrumented runs also corrected an earlier error: the affected
+  windows were **never dropped** — the cold retry solves each of them in seconds (the per-window labels
+  counted attempts, not windows; the years are complete). The real cost was wall time: 180 s simplex +
+  600 s IPM burned per doomed seam attempt, and the IPM rescue has never once rescued a seam attempt
+  (0/12). Fix shipped: seam attempts get a 90 s simplex-only bound (2× the slowest healthy seam solve
+  observed, 48 s under contention — a healthy window cannot silently lose its seam link) and fail straight
+  to the cold retry; cold attempts keep the full 180 s + IPM ladder. Pathological-window cost drops
+  ~780 s → ~110 s; results unchanged by construction.
 - **Neighbour-zone extension (post-F8, 2026-07-28):** `flexibility/neighbour_nuclear.py` — pseudo-unit
   rigidities for BE/CH/ES nuclear from **measured per-zone anchors** (near-must-run fleets: κ·α_op
   0.96–0.99, socle bids −55…−70 — far stiffer than FR's load-following 0.67/−40), per-zone F5 seam state,
