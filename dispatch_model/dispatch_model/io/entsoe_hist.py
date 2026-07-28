@@ -82,18 +82,25 @@ def load_generation_hist(config: Config, year: int | None = None, zones=None) ->
 
 
 def load_installed_capacity(config: Config, zone: str, year: int) -> dict[str, float]:
-    """→ {tech: installed_MW} for a zone/year from entsoe_installed_capacity (nameplate)."""
+    """→ {tech: installed_MW} for a zone/year from entsoe_installed_capacity (nameplate).
+
+    Falls back to the NEAREST available year when the requested year is missing: the split-cluster zones
+    (NL/AT/CZ/PL/DK/SI) were ingested for 2019 only, and a stale nameplate still beats the caller's
+    p99.9-of-generation proxy — measured on NL 2024: proxy 9.1 GW gas vs 15.6 GW real fleet, i.e. half the
+    CCGT fleet invisible and the zone artificially scarce (+22 €/MWh level bias, zero negative prints)."""
     con = _conn(config)
     try:
-        df = pd.read_sql("SELECT sub_key, value FROM entsoe_installed_capacity "
-                         f"WHERE series_key = '{zone}' AND ts_utc >= '{year}-01-01' "
-                         f"AND ts_utc < '{year + 1}-01-01'", con)
+        df = pd.read_sql("SELECT ts_utc, sub_key, value FROM entsoe_installed_capacity "
+                         f"WHERE series_key = '{zone}'", con)
     except Exception:  # noqa: BLE001  (table may not exist yet)
         return {}
     finally:
         con.close()
     if df.empty:
         return {}
+    yrs = pd.to_datetime(df["ts_utc"]).dt.year
+    nearest = int(min(yrs.unique(), key=lambda y: abs(int(y) - int(year))))
+    df = df[yrs == nearest]
     df["tech"] = df["sub_key"].map(PSR2TECH).fillna(df["sub_key"])
     return df.groupby("tech")["value"].sum().to_dict()
 
