@@ -219,6 +219,25 @@ def build_de_unit_stack(config: Config, zone: str, year: int, min_mw: float = 10
     return pd.DataFrame(rows)
 
 
+def observed_mustrun_floors(config: Config, zone: str, year: int) -> dict[int, dict[str, float]]:
+    """→ {month: {tech: p10 of observed hourly generation}} — the MEASURED thermal must-run floor.
+
+    The `chp_el × heat_factor` heuristic grossly overstates the heat-obligated floor for flexible CHP:
+    measured DE April 2024, gas floor 12.1 GW vs 2.1–2.4 GW actually running on negative-price hours
+    (heat storage / auxiliary boilers decouple heat from power). ~10 GW of phantom forced supply was the
+    dominant share of DE's long bias (−20.6 €/MWh, 201 vs 70 negative prints). The p10-of-observed floor
+    is self-calibrating per zone-month and honest by construction (the fleet demonstrably went there)."""
+    g = load_generation_hist(config, year, zones=constituents(zone))
+    out: dict[int, dict[str, float]] = {}
+    for tech in ("gas", "coal", "lignite", "biomass", "waste", "oil"):
+        s = g[g["tech"] == tech].groupby("timestamp_utc")["gen_mw"].sum()
+        if s.empty:
+            continue
+        for m, v in s.groupby(s.index.month).quantile(0.10).items():
+            out.setdefault(int(m), {})[tech] = float(v)
+    return out
+
+
 def neighbour_netload(config: Config, zone: str, year: int) -> pd.DataFrame:
     """→ hourly [timestamp_utc, load_mw, musttake_res_mw, netload_mw] from ENTSO-E actuals.
 

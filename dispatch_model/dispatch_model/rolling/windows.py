@@ -87,14 +87,28 @@ def fr_window(fr, stack, prices, T, nuc_unavail_daily=None, wv_delta=None) -> di
             "avail": avail, "energy_caps": {"hydro_reservoir": float(h["gen_hydro_reservoir_mw"].sum())}}
 
 
-def apply_measured_mustrun(st, zone, T) -> pd.DataFrame:
+def apply_measured_mustrun(st, zone, T, floors: dict | None = None) -> pd.DataFrame:
     """Where the reference registry has measured CHP for `zone`, replace the workbook must-run fractions
     with chp_el(tech) × heat_factor(month): the heat-obligated floor, seasonal not flat. Sub-blocks of a
-    tech sum to its capacity, so a common per-block fraction ⇒ forced = frac × cap = chp × heat_factor."""
+    tech sum to its capacity, so a common per-block fraction ⇒ forced = frac × cap = chp × heat_factor.
+
+    `floors` (opt-in, FLEX): {month: {tech: MW}} MEASURED floors (p10 of observed generation —
+    `blocks.observed_mustrun_floors`) that REPLACE the chp×heat_factor heuristic, which overstates the
+    heat-obligated minimum ~5× for flexible gas CHP (heat storage decouples heat from power)."""
+    month = pd.DatetimeIndex(T)[len(T) // 2].month               # window's central month
+    if floors is not None:
+        fl = floors.get(int(month), {})
+        st = st.copy()
+        for tech, mw in fl.items():
+            rows = st["tech"] == tech
+            cap = st.loc[rows, "capacity_mw"].sum()
+            if cap > 0:
+                st.loc[rows, "min_gen_frac"] = min(1.0, float(mw) / cap)
+        return st
     chp = measured_chp_mw(zone)
     if not chp:
         return st
-    hf = heat_factor(pd.DatetimeIndex(T)[len(T) // 2].month)     # window's central month
+    hf = heat_factor(month)
     st = st.copy()
     for tech, chp_mw in chp.items():
         rows = st["tech"] == tech
@@ -104,16 +118,18 @@ def apply_measured_mustrun(st, zone, T) -> pd.DataFrame:
     return st
 
 
-def nb_window(zone, stack, nl, res, prices, T, wv_delta=None) -> dict:
+def nb_window(zone, stack, nl, res, prices, T, wv_delta=None, mustrun_floors=None) -> dict:
     """Neighbour zone dict for one window: block SRMC, measured seasonal must-run (DE_LU), DSR tranches,
     reservoir budget from the window's actual generation.
 
-    `wv_delta` (opt-in, #136) recentre les prix d'offre hydrauliques sur le λ structurel de la SDP."""
+    `wv_delta` (opt-in, #136) recentre les prix d'offre hydrauliques sur le λ structurel de la SDP.
+    `mustrun_floors` (opt-in, FLEX) : planchers must-run MESURÉS {month: {tech: MW}} remplaçant
+    l'heuristique chp×heat_factor (cf. apply_measured_mustrun)."""
     st = apply_water_value(stack.assign(srmc_eur_mwh=srmc(stack, prices).to_numpy()))
     if wv_delta is not None:
         from ..hydro.synthesis import shift_hydro_bids
         st = shift_hydro_bids(st, float(wv_delta))
-    st = apply_measured_mustrun(st, zone, T)                     # DE_LU: MaStR-measured seasonal must-run
+    st = apply_measured_mustrun(st, zone, T, floors=mustrun_floors)   # DE_LU: measured seasonal must-run
     w = nl.reindex(T).interpolate().ffill().bfill()
     st = pd.concat([st, dsr_tranches(zone, float(w["load_mw"].max()))], ignore_index=True)
     budget = float(res.reindex(T).fillna(0).sum()) if len(res) else 0.0

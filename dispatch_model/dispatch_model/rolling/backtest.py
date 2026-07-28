@@ -131,6 +131,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     nuc_installed = float(fr_stack.loc[fr_stack["tech"] == "nuclear", "capacity_mw"].sum())
     flex_spec = None
     nb_flex: dict = {}                                     # neighbour-zone flex specs (static per year)
+    nb_mustrun: dict = {}                                  # measured must-run floors (flex-gated, DE)
     fired_floor = 0.0                                      # flag-off: historic §51 fired-tranche floor
     if flex_on:
         # FLEX on: keep the per-reactor rows and build the C1–C7/§4 rigidity spec — the negatives now emerge
@@ -216,6 +217,11 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
                 add = up.reindex(nl.index).fillna(0.0)
                 nl["musttake_res_mw"] = nl["musttake_res_mw"] + add
                 nl["netload_mw"] = nl["load_mw"] - nl["musttake_res_mw"]
+        # measured must-run floors (flex-gated): p10 of observed generation per tech-month replaces the
+        # chp×heat_factor heuristic, which forced ~10 GW of phantom German gas on surplus hours — the
+        # dominant share of DE's long bias (see blocks.observed_mustrun_floors).
+        from ..neighbours.blocks import measured_chp_mw, observed_mustrun_floors
+        nb_mustrun = {z: observed_mustrun_floors(config, z, year) for z in neigh if measured_chp_mw(z)}
     ntc = flow_derived_ntc(config, year)                        # effective NTC from realized flows
     nuc_unavail = None
     if use_remit_nuclear_avail:                                 # #78: true FR nuclear availability from REMIT
@@ -248,7 +254,8 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         for z in neigh:
             zd[z] = nb_window(z, nb_stack[z], nb_nl[z], nb_res[z],
                               zone_prices(prices, z, basis, w0, gas_rules), T,
-                              wv_delta=wv_levels.get(z, {}).get(wk))
+                              wv_delta=wv_levels.get(z, {}).get(wk),
+                              mustrun_floors=nb_mustrun.get(z))
         borders = [b for b in NTC if b[0] in zd and b[1] in zd]
         # market rules effective in THIS window (IT/ES were floored at 0 before TIDE / Dec-2023)
         res_bid, price_floor = rules_at(wb, w0, list(zd))
