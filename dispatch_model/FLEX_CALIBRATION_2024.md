@@ -196,6 +196,24 @@ capped by **curtailment-censored RES potential** and conservative capacity sizin
 complete; the next binding constraints are the zonal level biases and RES-potential reconstruction.
 FR modulated energy unchanged at 33.3 TWh-eq (in band).
 
+## RES-potential reconstruction (v1: solar, neighbours — measured, kept, and honestly bounded)
+
+Must-take RES = observed generation = **post-curtailment**, understating the surplus exactly on the hours
+that price negative. Measured (`scratchpad/res_censoring.py`, same-hour ±7-day envelope, 2024): the dip
+concentrates on observed-negative hours for **solar in every zone** (dip@neg/dip@pos 2.0–4.9; DE 2.8 TWh
+censored on negative hours, FR 1.6, ES 1.1) but **not for wind** (0.6–1.0 — calm weather correlates with
+positive prices; the envelope cannot separate curtailment from weather, so wind is excluded even though
+real). `flexibility/res_potential.solar_uplift`: price-unconditioned per hour
+(`max(0, dip − noise[zone,hod])`; prices enter only the per-(zone, hour-of-day) noise constant — the
+documented leakage boundary), applied flex-gated to neighbour zones (FR excluded: already over-counting).
+
+Effect (probe E vs D): counts +3 BE / +4 CH / +31 DE (+18 FR via coupling), BE/CH means pulled to within
+±3 €/MWh of observed (BE −2.3, CH +3.0) — **but no mid-band depth anywhere**: the ~1 GW noise-trimmed
+uplift cannot punch zone surpluses past the shallow rungs into the deep floors. Verdict: kept as a correct
+modest improvement; the depth unlock is now conclusively the **zonal level-bias workstream** (stack
+sizing / per-zone NTC — under-printers ES/NL/CH are modelled short, over-printers FR/DE long), not input
+censoring.
+
 ## What F7 changes when the flag is on (and only then)
 
 All F7 behaviour is gated: `flexibility.enabled: false` remains **byte-identical** (fingerprint-proven

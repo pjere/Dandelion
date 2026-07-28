@@ -37,6 +37,22 @@ def test_spec_uses_zone_anchors_and_the_beta_ceiling():
     assert nn.build_neighbour_flex_spec(_BE[_BE["tech"] == "gas"], "BE", _COSTS) is None
 
 
+def test_solar_uplift_recovers_a_curtailment_dip():
+    # 20 identical sunny days, one day with a midday 40% curtailment dip: the envelope uplift must recover
+    # ~the dip on that day and stay ≈0 elsewhere (the price-based noise floor only trims the estimator).
+    from dispatch_model.flexibility.res_potential import solar_uplift
+    idx = pd.date_range("2024-05-01", periods=20 * 24, freq="h", tz="UTC")
+    shape = np.array([0, 0, 0, 0, 0, 1, 3, 6, 8, 9, 10, 10, 10, 9, 8, 6, 3, 1, 0, 0, 0, 0, 0, 0]) * 1000.0
+    gen = np.tile(shape, 20)
+    day = 10
+    gen[day * 24 + 10: day * 24 + 14] *= 0.6                    # the curtailed midday
+    g = pd.DataFrame({"timestamp_utc": idx, "tech": "solar", "gen_mw": gen})
+    prices = pd.Series(50.0, index=idx)                         # all uncensored → noise floor from all hours
+    up = solar_uplift(g, prices)
+    assert up.loc[idx[day * 24 + 12]] > 3500                    # ~4 GW recovered at the dip
+    assert up.drop(idx[day * 24 + 10: day * 24 + 14]).max() < 500   # ≈0 away from the dip
+
+
 def test_block_level_fleet_prints_a_negative_in_surplus():
     # a BE-like zone alone in deep surplus: the committed pseudo-fleet's operating floor exceeds demand,
     # the RES tranche curtails at its floor → the balance dual goes negative (the F7 mechanism, block-level).

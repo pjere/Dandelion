@@ -194,12 +194,28 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         if nb_nl[z].empty:                      # its empty net-load yields a degenerate LP time coord)
             neigh.remove(z); zones.remove(z); nb_stack.pop(z, None); nb_nl.pop(z, None)
     nb_res = {}
+    nb_gen = {}
     for z in neigh:
         g = load_generation_hist(config, year, zones=constituents(z))   # virtual zones sum constituents
+        nb_gen[z] = g
         res_g = g[g["tech"] == "hydro_reservoir"]
         nb_res[z] = (res_g.groupby("timestamp_utc")["gen_mw"].sum()
                      if not res_g.empty else pd.Series(dtype=float))
     obs = _observed_prices(config, year, zones)
+    if flex_on:
+        # RES-potential reconstruction (flex-gated, NEIGHBOURS only, solar only): must-take RES = observed
+        # generation = post-curtailment, which understates the surplus exactly on the hours that price
+        # negative. Envelope-based solar uplift, price-unconditioned per hour (see flexibility.res_potential
+        # for the estimator and its leakage boundary). FR is deliberately excluded in v1 (its negative count
+        # already runs above observed; an uplift there would compound the overshoot).
+        from ..flexibility.res_potential import solar_uplift
+        for z in neigh:
+            up = solar_uplift(nb_gen[z], obs.get(z))
+            if not up.empty and float(up.sum()) > 0:
+                nl = nb_nl[z]
+                add = up.reindex(nl.index).fillna(0.0)
+                nl["musttake_res_mw"] = nl["musttake_res_mw"] + add
+                nl["netload_mw"] = nl["load_mw"] - nl["musttake_res_mw"]
     ntc = flow_derived_ntc(config, year)                        # effective NTC from realized flows
     nuc_unavail = None
     if use_remit_nuclear_avail:                                 # #78: true FR nuclear availability from REMIT
