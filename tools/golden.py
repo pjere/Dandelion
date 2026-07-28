@@ -47,6 +47,13 @@ JSON_ARTIFACTS = [
 ]
 CUBE = "weathergen/output/simulation.nc"
 
+# FLEX-on golden (opt-in, F8): the flexibility-module 2024 backtest, kept in a SEPARATE dataset + baseline
+# so the flag-off golden above stays the invariant. Produce the artifact with
+# `dispatch_model/scratchpad`-style: run_backtest(..., flexibility=True, write_lake=False) then
+# lake.write_table(prices, "dispatch", "backtest_prices_flexon", year=2024).
+BASELINE_FLEXON = ROOT / "golden" / "baseline_flexon.json"
+FLEXON_ARTIFACTS = ["data/lake/dispatch/backtest_prices_flexon/year=2024/part.parquet"]
+
 
 def _num_digest(s: pd.Series) -> dict:
     a = pd.to_numeric(s, errors="coerce").to_numpy(float)
@@ -119,6 +126,15 @@ def _diffs(base, cur, path=""):
     return out
 
 
+def capture_flexon() -> dict:
+    fp = {"parquet": {}}
+    for rel in FLEXON_ARTIFACTS:
+        p = ROOT / rel
+        if p.exists():
+            fp["parquet"][rel] = fingerprint_parquet(p)
+    return fp
+
+
 def main(argv):
     cmd = argv[0] if argv else "check"
     if cmd == "capture":
@@ -137,6 +153,22 @@ def main(argv):
                 print("  ", d)
             return 1
         print("[golden] OK — outputs numerically identical to baseline")
+    elif cmd == "capture-flexon":                      # FLEX-on baseline (opt-in, separate artifact — F8)
+        fp = capture_flexon()
+        if not fp["parquet"]:
+            print("[golden] flexon artifact absent; produce backtest_prices_flexon first"); return 2
+        BASELINE_FLEXON.write_text(json.dumps(fp, indent=1, sort_keys=True))
+        print(f"[golden] flexon baseline written -> {BASELINE_FLEXON}")
+    elif cmd == "check-flexon":
+        if not BASELINE_FLEXON.exists():
+            print("[golden] no flexon baseline; run `capture-flexon` first"); return 2
+        diffs = _diffs(json.loads(BASELINE_FLEXON.read_text()), capture_flexon())
+        if diffs:
+            print(f"[golden] flexon: {len(diffs)} NUMERICAL CHANGES:")
+            for d in diffs[:50]:
+                print("  ", d)
+            return 1
+        print("[golden] OK — flexon outputs numerically identical to baseline")
     return 0
 
 

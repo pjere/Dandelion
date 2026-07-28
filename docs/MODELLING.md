@@ -410,6 +410,30 @@ Trois points de méthode, dont deux vont contre le score :
 Les 56 lignes unitaires nucléaires disparaissent au passage : elles portaient toutes le même coût et la
 même disponibilité, donc n'apportaient aucune information au LP — seulement des colonnes.
 
+### 6h. Module flexibility : rigidités d'exploitation & prix négatifs endogènes (2026-07, FLEX F0–F8)
+
+La courbe de tranches de 6d est une *photographie* du comportement du parc ; le module `flexibility` en est
+le *mécanisme*. Opt-in (`flexibility.enabled`, défaut off, flag-off prouvé byte-identique), pur LP sans
+binaires : chaque rigidité est une variable continue + un couplage linéaire, donc les duals du bilan
+restent des prix. Par réacteur FR : engagement `u` (plancher κ·avail — le parc est *planifié*, le LP ne
+peut pas le lâcher), bande d'exploitation à deux étages (modulation libre jusqu'au plancher de flotte
+`alpha_band_op` = 0,74 = la part du socle *mesurée* en 6d ; en-dessous, modulation profonde `d` au coût
+`c_mod` = 45 ancré sur le bid du socle −40), budgets d'énergie 8 h/jour, rampe xénon (β borné à son
+plafond physique), coût de démarrage + min-down, manœuvrabilité de fin de campagne (REMIT), réserves,
+plancher de stabilité réseau ; état de queue passé en constantes aux raccords hebdomadaires ; échelle
+d'offre à la baisse OA/CR/merchant avec décroissance par millésime. Spec vivante : `dispatch_model/
+FLEXIBILITY.md` ; rapport de calibration : `dispatch_model/FLEX_CALIBRATION_2024.md`.
+
+**Correction de la conclusion de 6d.** « Le verrou est le mécanisme d'export de S1c » s'est révélé faux :
+export ×0,4 → toujours 0 négatif. Le verrou historique était le **trigger §51 du CR français** (trigger=1
+dans l'onglet statique) : le point fixe collant remettait le floor à 0,0 dès la première heure négative et
+effaçait rétroactivement toute la queue — dans toutes les variantes, depuis toujours. La suspension CR
+française est instantanée et vit dans le bid lui-même (−1) ; le trigger N-heures est allemand. Corrigé
+(gated flex), plus trois autres défauts de mécanisme (proxy de disponibilité, lâcher d'engagement libre,
+puits à 0,0 des tranches déclenchées) : **335 heures négatives FR modélisées contre 352 observées en
+2024** (−5 %), timing et épisode de référence reproduits ; la *profondeur* au-delà du barreau merchant
+exige les voisins en surplus (backlog F8).
+
 ## 7. Step vii — the SMC→spot markup (the "wedge")
 
 The LP returns *marginal cost*; real **day-ahead spot** sits above it on average and is more volatile

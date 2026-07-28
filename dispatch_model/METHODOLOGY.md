@@ -23,6 +23,18 @@ Scarcity is priced inside the LP — DSR tranches (300/1000/4000 €/MWh as high
 energy at VoLL, RES curtailment at `res_bid<0`, over-generation `dump` at the price floor — so negative
 and scarcity prices, and cross-border spreads, are **duals, never post-processed**.
 
+## FLEX module — plant operating rigidities & the endogenous negative tail (opt-in, 2026-07)
+
+Behind `flexibility.enabled` (default off, flag-off byte-identical), the LP above gains per-FR-reactor
+rigidity rows — commitment `u ≥ κ·avail` (the campaign is *scheduled*; the LP cannot shed the fleet), a
+two-tier operating band (free modulation to `alpha_band_op`=0.74 — the revealed socle share; deep-mod `d`
+below it at `c_mod`=45, the revealed socle bid), 8h/daily deep-mod budgets, a xénon-limited up-ramp,
+start/min-down costs, end-of-cycle maneuverability from REMIT, reserves, a grid-stability floor,
+window-seam state, and the OA/CR/merchant downward bid ladder with vintage decay. Still a pure LP: every
+price remains a balance dual. Calibrated on 2024: **335 modelled vs 352 observed FR negative hours**;
+depth beyond the merchant rung requires neighbour-zone surplus fidelity (backlog). Full algebra, phase
+history, and the calibration report: `FLEXIBILITY.md` and `FLEX_CALIBRATION_2024.md`.
+
 ## Hydro decomposition
 
 Two-level, **option (b)**: weekly reservoir energy budgets from historical seasonal generation (guide

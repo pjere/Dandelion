@@ -57,14 +57,66 @@ regulatorily contingent **regime** parameters are year-indexed workbook trajecto
 
 | tab | columns | meaning |
 |-----|---------|---------|
-| `dispatch_flex_costs` | variable, year, value | `c_mod`, `c_start_<class/tech>` (€/MWh, €/MW) |
+| `dispatch_flex_costs` | variable, year, value | `c_mod`, `c_start_<class/tech>`, `u_commit_frac` (κ), `alpha_band_op` (€/MWh, €/MW, fractions) |
 | `dispatch_minstab` | zone, year, value | grid-stability nuclear must-run `P_minstab` (MW) |
 | `dispatch_reserves` | variable, year, value | `r_up_req`, `r_down_req` (MW) |
-| `dispatch_oa_ladder` | variable, year, value | `cr_bid`, `oa_bid`, `market_floor`, `market_cap` (€/MWh) |
+| `dispatch_oa_ladder` | variable, year, value | `cr_bid`, `oa_bid`, `mer_bid`, `market_floor`, `market_cap` (€/MWh) |
 | `dispatch_res_vintages` | (existing) | RES capacity by (zone, tech, vintage, scheme) → OA/CR expiry |
 
-Reactor-class physics seeds and defaults are in the two `flexibility/` modules; the free calibration
-parameters (`c_mod`, `c_start`, `β`, D-caps, ε) are fitted in F7 to the §9 acceptance targets.
+Reactor-class physics seeds and defaults are in the two `flexibility/` modules; the calibrated values
+(F7, all measured/micro-founded — see `FLEX_CALIBRATION_2024.md`) are the seed defaults, workbook-overridable.
+
+## Complete algebraic statement (F8)
+
+Per zone *z*, hour *t* of a weekly window (times `T`, |T| = n). Decision variables (all continuous ≥ 0):
+`g[i,t]` generation per stack row, `r[k,t]` RES tranche output, `e[t]` unserved (ENS), `w[t]` dump,
+`f[b,t]`/`b[b,t]` directed border flows; per FR flex unit *j*: `u[j,t]` commitment, `d[j,t]` deep-mod,
+`su[j,t]` start.
+
+    min  Σ_z Σ_t [ Σ_i (srmc_i + ε_i)·g + Σ_k floor_k·r + VoLL·e − floor_z·w ]
+       + Σ_borders Σ_t ε_flow·(f + b)  +  Σ_j Σ_t [ c_mod·d + c_start_j·su ]
+
+    s.t.  (balance, dual = price)   Σ_i g + Σ_k r + e − w + imports_z(f,b) = D_z,t          ∀ z,t
+          (bounds)                  g ∈ [minf·gcap, gcap] ;  r_k ∈ [0, share_k·res_pot] ;
+                                    f ∈ [0, NTC→] ; b ∈ [0, NTC←] ;  e, w ≥ 0
+          (hydro budget)            Σ_t g_hydro ≤ E_week                                     [dual = water value]
+
+    FLEX rows, FR flex units j (nuclear + §4 fossil), all gated on the spec:
+          (commit)     u ∈ [κ_j·avail·cap, avail·cap]         κ_j = u_commit_frac (0 for fossil)
+          (cap)        g_j ≤ u
+          (C1a)        g_j ≥ α_op_j·u − d                     α_op = max(α_band_class, alpha_band_op)
+          (C1b)        d ≤ (α_op_j − α_tech_j)·s_j·u          s_j = deepband_scale (C4: full 1 / reduced ½ / none 0)
+          (C2a)        Σ_{k=0..7} d_{t−k} ≤ D8_j·cap          (rolling 8 h; seam RHS − Σd_hist, clamped ≥ 0)
+          (C2b)        Σ_{t∈day} d ≤ Dday_j·cap
+          (C3)         g_{j,t} − g_{j,t−1} ≤ r_up_j·u_t − β_j·Σ_{k=1..8} d_{t−k}
+                       β_j = min(β_class, r_up_j / (8·(α_op_j − α_tech_j)))   [the xénon ceiling]
+          (C5)         su_t ≥ u_t − u_{t−1}                   (seam: su_0 ≥ u_0 − u_init)
+          (min-down)   u_t − u_{t−1} ≤ ρ_j·avail_t·cap + κ_j·(Δavail_t)⁺      (outage returns pass)
+          (C4 none)    g_j = stretch_j·avail·cap              (must-run coast-down pin)
+          (C6 up)      Σ_nuc (u − g) + Σ_res (gcap − g) ≥ R↑
+          (C6 down)    Σ_nuc (g − α_tech·u) + Σ_res g ≥ R↓    (footroom above the TECHNICAL minimum)
+          (C7)         Σ_nuc g ≥ min(P_minstab, 0.98·Σ avail·cap)
+
+    §51 fixed point (outer loop): solve → find consecutive-negative runs per tranche → floors of tranches
+    past their trigger drop (stickily) to `fired_floor` (flag-off 0.0; FLEX: mer_bid) → re-solve to a
+    fixed pattern. FR tranches repriced by the ladder carry trigger = 0 (the French CR suspension is
+    instantaneous and lives in cr_bid itself).
+
+    F5 seam: `u_init, p_init, d_hist[8]` from the previous adjacent window enter as CONSTANTS in the
+    hour-0 rows above; infeasible seam ⇒ retry cold (F4 behaviour). Pure LP throughout — every price is
+    the balance dual of a vertex solution (dual simplex + the deterministic `ε_i` SRMC tie-break ≤ 0.01).
+
+## Deliberate exclusions (backlog, each with the expected sign of its impact)
+
+| exclusion | why | expected sign if added |
+|-----------|-----|------------------------|
+| **No binaries / convex-hull pricing** | pure-LP mandate: balance duals must stay prices | whole-unit commitment would *concentrate* the κ-slack in discrete weekend shutdowns (the observed "several units shut") instead of pro-rata spreading; slightly **fewer, deeper** negatives; convex-hull pricing would lift degenerate-hour prices marginally **up** |
+| **Single blended start cost** (per class, no hot/warm/cold) | data + LP simplicity | differentiated starts make weekend shutdowns cheaper than the blended cost ⇒ **more** shutdowns, marginally **fewer** shallow negatives |
+| **No intra-day re-optimisation** (day-ahead LP only) | scope: day-ahead price formation | intra-day recourse would relieve some forced deep-mod ⇒ **shallower** tail |
+| **National, not regional, min-stab (C7)** | CRE minimum-injection is specified nationally; no grid model | regional floors bind harder locally ⇒ **more** forced surplus hours (count **up**) |
+| **Neighbour-zone rigidities & ladders (BE/CH/ES/DE)** | F7 scope was the FR fleet; the LP is already zone-agnostic (`flex={zone: spec}`) — what's missing is a **spec builder per zone**: block-level pseudo-units for BE/CH/ES nuclear with a κ floor + two-tier band (reusing the `fr_nuclear` patterns); DE thermal can go unit-level via MaStR (`build_de_unit_stack`, #73) with §4 commitment; plus each zone's **measured calibration anchors** (own revealed socle share/bid via `stacks/revealed.py`, own operating regime — BE near-flat must-run, ES κ≈1 narrow band) | the depth unlock: coupled mid-band (−5…−50) appears (count ~unchanged, depth **much closer to observed**) |
+| **RES potential curtailment-censoring** | observed generation understates potential exactly on curtailed hours | deeper modelled surplus ⇒ **more and deeper** negatives |
+| **C4 maneuverability in projection** | needs the planned-outage scheduler hook (F1) | stretch-out units must-run in spring ⇒ slightly **more** projected negatives |
 
 ## Status
 
@@ -285,4 +337,21 @@ parameters (`c_mod`, `c_start`, `β`, D-caps, ε) are fitted in F7 to the §9 ac
   `u_commit_frac`=0.90, `c_mod`=45, `alpha_band_op`=0.74, `mer_bid`=−0.01 (all measured/micro-founded:
   campaign schedule, revealed socle bid, revealed socle share, curtailment microstructure). Full-year
   validation + calibration report in progress.
-- F8: see the phase tasks and the work plan.
+- **F8 (done):** scenario horizon, documentation, tests, golden. **(1) The cross-over** (headline result,
+  `FLEX_CALIBRATION_2024.md`): sampled 2028/2034/2040/2046 half-years, FLEX on, SMC level — negative count
+  rises 191 → 1779 h with RES build-out while depth attenuates with the ladder's vintage expiry (min −1.0
+  while CR lives → −0.01 merchant-only by 2040+). **(2) Sensitivities** (one-at-a-time, tabulated): the
+  2024 tail hangs on {κ, α_band_op, c_mod, mer_bid/fired_floor} + export caps; `cr_bid`/`oa_bid`/
+  `p_minstab`≤20 GW/reserves ×2 are inert. **(3) Docs**: the complete algebraic statement + the exclusions
+  backlog (above), `docs/MODELLING.md` §6h (incl. the formal correction of §6d's export-lock conclusion),
+  `METHODOLOGY.md` FLEX section, the `dispatch_README` workbook sheet. **(4) Walkthroughs**: two negative
+  episodes + one deep-winter scarcity hour decomposed via `debug_hour` (report). **(5) Dual-quality
+  hardening found in anger**: the ε tie-break extended to negative RES tranche floors; the flex path bounds
+  every solve on a *fresh* HiGHS instance (the resident instance's cumulative clock made `time_limit` fire
+  instantly) with an IPM+crossover rescue; a residual pathological window class (~9 % of high-RES weeks,
+  C3×seam degeneracy — bisected: dropping either clears it) is skipped by the fallback, backlogged for a
+  targeted seam-C3 relaxation. **(6) Golden**: flag-off byte-identical throughout (kept); the flag-on
+  baseline is opt-in via `tools/golden.py capture-flexon`/`check-flexon` on its own dataset
+  (`backtest_prices_flexon`). TODO (post-F8): the per-zone spec-builder extension — block-level pseudo-units
+  for BE/CH/ES nuclear with a κ floor and an operating band, DE thermal unit-level via MaStR, plus each
+  zone's calibration anchors — the depth unlock.

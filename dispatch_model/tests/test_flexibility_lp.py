@@ -171,6 +171,29 @@ def test_commitment_floor_forces_negatives_even_without_recovery():
     assert pr_k.iloc[3] < 0                                  # κ=0.9 floor → forced band floor → negative print
 
 
+def test_c3_survives_availability_step_after_maxed_deepmod():
+    # the 2034 projection infeasibility, at toy scale: 8 trough hours max the deep-mod budget (β at its
+    # ceiling → C3 up-ramp allowance ≈ 0), then availability steps 0.65→0.95 (an outage return) while
+    # demand recovers — the κ·α_op band floor jumps in one hour but xénon forbids the climb. The C3 RHS
+    # must widen by the availability-driven floor rise (a scheduled return, not an economic ramp).
+    import xarray as xr
+    n = 12
+    T = pd.date_range("2034-03-13", periods=n, freq="h", tz="UTC")
+    stack = pd.DataFrame({"unit_id": ["NUC", "GAS"], "tech": ["nuclear", "gas"],
+                          "capacity_mw": [10000.0, 8000.0], "srmc_eur_mwh": [7.0, 80.0],
+                          "min_gen_frac": [0.0, 0.0]})
+    av = xr.DataArray([[0.65] * 8 + [0.95] * 4, [1.0] * n],
+                      coords=[("unit", ["NUC", "GAS"]), ("time", T)])
+    dem = [1500.0] * 8 + [9000.0] * 4
+    zd = {"N": {"stack": stack, "demand": dem, "res_pot": [0.0] * n, "avail": av, "energy_caps": None}}
+    flex = {"N": {"idx": [0], "alpha_band": [0.74], "alpha_tech": [0.25], "c_mod": 45.0,
+                  "c_start": [50000.0], "u_min_frac": [0.9], "rho_recommit": [0.2],
+                  "d_max_8h": [2.27], "r_up": [0.28], "xenon_beta": [0.28 / (8 * 0.49)]}}
+    out = solve_multizone_highs(T, zd, [], {}, flex=flex)      # must solve, not raise infeasible
+    p = out["flex"]["N"]["p"][0]
+    assert p[9] > p[7] + 1.0                                   # output follows the returned capacity up
+
+
 def test_commitment_floor_survives_an_outage_return_step():
     # avail jumps 0.5→1.0 mid-window (a REMIT return): u_min jumps by κ·Δavail — the min-down ramp must let
     # the scheduled return through (solver widens the RHS), not go infeasible.

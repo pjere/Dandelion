@@ -162,6 +162,14 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         res_schemes[z] = [sc for _sh, _f, sc in trs]
         ntr = len(trs)
         r_up = np.concatenate([share * rp for share, _f, _s in trs])
+        if flex:
+            # F8 dual-quality extension of the F6 tie-break: perturb NEGATIVE tranche floors by a
+            # deterministic per-(zone, scheme) ε ≤ 0.008 (deeper). Fired §51 tranches all land on the same
+            # `fired_floor` (−0.01) across zones — thousands of identical-cost columns whose dual degeneracy
+            # stalls simplex on high-RES years (measured: one 2034 window churned >24 min; healthy windows
+            # take 3 s). Exact-0.0 regulatory floors (IT/ES pre-reform) stay untouched.
+            trs = [(sh, np.where(f < -1e-9, f - _tie_break([f"res:{z}:{i}:{sc}"])[0] * 0.8, f), sc)
+                   for i, (sh, f, sc) in enumerate(trs)]
         r_cost = np.concatenate([f for _sh, f, _s in trs])
         rbase = add_block(r_cost, np.zeros(ntr * n), r_up)
         rows.append(zrow[z] + np.tile(np.arange(n), ntr))
@@ -498,6 +506,31 @@ def solve_multizone_highs(times, zones_data: dict, borders: list, ntc: dict,
     indptr, indices, data = _to_csc(spec["ncol"], spec["nrow"], spec["coo"])
     lp.a_matrix_.format_ = highspy.MatrixFormat.kColwise
     lp.a_matrix_.start_ = indptr; lp.a_matrix_.index_ = indices; lp.a_matrix_.value_ = data
-    h = _get_highs()
+    if not flex:
+        h = _get_highs()
+        h.passModel(model)
+        return _solve_and_read(h, spec, price_sign, diagnose)
+    # FLEX path (F8 robustness): high-RES projection windows can stall dual simplex for tens of minutes
+    # (pathological degeneracy — measured on a 2034 window where healthy windows take seconds). Bound the
+    # solve and rescue with interior point + crossover (the standard degeneracy remedy; crossover restores
+    # a basic solution so the balance duals remain vertex prices). Runs on a FRESH Highs instance, never
+    # the resident one: HiGHS's run clock is owned by the instance, so a time_limit on the long-lived
+    # resident instance fires instantly once its cumulative clock exceeds the limit (measured: 0-second
+    # "kTimeLimit" failures poisoning every subsequent window) — and isolation also guarantees no option
+    # leakage into the flag-off/golden path. The ~85 ms instance cost is negligible against flex solves.
+    h = highspy.Highs()
+    h.setOptionValue("output_flag", False)
+    h.setOptionValue("presolve", "on")
+    h.setOptionValue("time_limit", 180.0)
     h.passModel(model)
-    return _solve_and_read(h, spec, price_sign, diagnose)
+    try:
+        return _solve_and_read(h, spec, price_sign, diagnose)
+    except RuntimeError:
+        h = highspy.Highs()                         # fresh again: discard the stalled simplex state entirely
+        h.setOptionValue("output_flag", False)
+        h.setOptionValue("presolve", "on")
+        h.setOptionValue("solver", "ipm")
+        h.setOptionValue("run_crossover", "on")
+        h.setOptionValue("time_limit", 600.0)
+        h.passModel(model)
+        return _solve_and_read(h, spec, price_sign, diagnose)
