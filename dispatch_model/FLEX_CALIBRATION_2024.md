@@ -155,6 +155,47 @@ solve (fresh HiGHS instance per solve — the resident instance's cumulative clo
 instantly, poisoning whole years) and skips the pathological weeks. Backlog: drop the seam `d_hist` carry
 from the C3 rows only (keep the C5/min-down/C2a seams) as the targeted fix.
 
+## Neighbour-zone extension (post-F8): pseudo-unit rigidities for BE/CH/ES(/DE)
+
+**Anchors, measured** (`scratchpad/nz_anchors.py`, the FR method — socle share / p5 bid / fleet floor on
+observed-negative hours, availability = installed − REMIT): the neighbour fleets are far more rigid than
+FR's — BE 0.96–0.97 / −52…−60 / 0.98; CH 0.98–0.99 / −64…−75 / 0.98–1.00; ES floor 0.98 but bid depth
+**market-censored** at −1.9 (negatives legal only since 2023-12) → BE/CH value borrowed; DE 2019 ≈ 1.0 /
+−67. FR remains the only load-following fleet (0.74 / −40 / 0.67). Implementation:
+`flexibility/neighbour_nuclear.py` — ~1 GW pseudo-unit split of each zone's nuclear block, κ floor +
+operating band + budgets + clamped xénon from the zone anchors; §4 fossil available standalone
+(`build_fossil_flex_spec`); per-zone F5 seam state in the backtest loop. No C6/C7 (French regime), no C4
+(no per-unit calendars abroad).
+
+**Four A/B probes** (15-week 2024 window, negative counts model vs obs):
+
+| zone | pre-ext | +pseudo+unitDE+fired−.01 | +blockDE | +fired 0.0 | +DE 2024 volumes | obs |
+|------|--------|--------|--------|--------|--------|-----|
+| FR | 83 | 59 | 136 | 107 | 102 | 65 |
+| BE | 0 | 5 | 67 | 37 | **19** | 55 |
+| CH | 0 | 5 | 50 | 25 | **14** | 50 |
+| ES | 0 | 0 | 0 | 0 | 0 | 62 |
+| DE_LU | — | 11 | 545 | 303 | **149** | 70 |
+| NL | 0 | 0 | 22 | 14 | 8 | 70 |
+
+Locked decisions from the A/Bs: (1) **unit-level DE reverted to opt-in** — the MaStR stack over-prices
+2024 DE (mean 79 vs 65) and drains the regional surplus (#73 validated it on 2019 only); (2)
+**fired-tranche floor back to the German-law 0.0** — fired hours clear AT zero in reality; the −0.01
+variant mass-printed phantom counts (DE 545). BE/CH counts sit between the two conventions (their prints
+are partly coupling-level at the region's fired tick — EPEX granularity mixes 0.00 and −0.01); (3) **DE
+tranche volumes year-correct from the registry** (fit 0.30→0.18, merchant 0.10→0.20, §51 trigger 6→4 h;
+DE 303→149) — **DE only**: the BE/CH/ES cohort registry is degenerate single-scheme and `scheme_shares`
+would bolt a German trigger onto paid-regardless certificate schemes that have none (static tab kept).
+
+**Where this leaves the region — the honest boundary.** The residual count errors now *track the zonal
+level biases*: the over-printers (FR −11, DE −13 vs obs mean — modelled too long) and the under-printers
+(CH +6, ES +5, NL +22 — modelled too short) are exactly the pre-existing baseload biases, not the
+rigidity machinery. FR's mid-band is still empty because model BE/CH never print DEEP (min −0.0 vs obs
+−55/−91): their deep floors (−80 certificates, −50 KEV) never become marginal while their surplus is
+capped by **curtailment-censored RES potential** and conservative capacity sizing. The rigidity layer is
+complete; the next binding constraints are the zonal level biases and RES-potential reconstruction.
+FR modulated energy unchanged at 33.3 TWh-eq (in band).
+
 ## What F7 changes when the flag is on (and only then)
 
 All F7 behaviour is gated: `flexibility.enabled: false` remains **byte-identical** (fingerprint-proven

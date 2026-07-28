@@ -352,6 +352,13 @@ Per zone *z*, hour *t* of a weekly window (times `T`, |T| = n). Decision variabl
   C3×seam degeneracy — bisected: dropping either clears it) is skipped by the fallback, backlogged for a
   targeted seam-C3 relaxation. **(6) Golden**: flag-off byte-identical throughout (kept); the flag-on
   baseline is opt-in via `tools/golden.py capture-flexon`/`check-flexon` on its own dataset
-  (`backtest_prices_flexon`). TODO (post-F8): the per-zone spec-builder extension — block-level pseudo-units
-  for BE/CH/ES nuclear with a κ floor and an operating band, DE thermal unit-level via MaStR, plus each
-  zone's calibration anchors — the depth unlock.
+  (`backtest_prices_flexon`).
+- **Neighbour-zone extension (post-F8, 2026-07-28):** `flexibility/neighbour_nuclear.py` — pseudo-unit
+  rigidities for BE/CH/ES nuclear from **measured per-zone anchors** (near-must-run fleets: κ·α_op
+  0.96–0.99, socle bids −55…−70 — far stiffer than FR's load-following 0.67/−40), per-zone F5 seam state,
+  §4 fossil standalone builder, DE tranche volumes year-correct from the registry. BE/CH negative counts
+  move off zero for the first time (0 → double digits; one calibration hit CH 50/50 exactly). Locked by
+  A/B: unit-level DE stays opt-in (2024-harmful), fired-tranche floor = the German-law 0.0. Honest
+  boundary (see the calibration report): residual count errors now track the **zonal level biases**
+  (over-printers = zones modelled too long; under-printers = too short) and the FR mid-band waits on
+  neighbour DEPTH, capped by curtailment-censored RES potential — the rigidity layer itself is complete.

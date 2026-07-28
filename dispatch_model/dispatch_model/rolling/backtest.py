@@ -67,7 +67,7 @@ def _fr_maneuverability(config, year, week_starts):
 
 
 def run_backtest(config: Config, year: int, n_weeks: int | None = None,
-                 use_remit_nuclear_avail: bool = False, de_unit_level: bool = False,
+                 use_remit_nuclear_avail: bool = False, de_unit_level: bool | None = None,
                  nuclear_curve: bool = True, hydro_sdp_level: bool = True,
                  diagnose: bool = False, flexibility: bool | None = None,
                  write_lake: bool = True) -> dict:
@@ -88,6 +88,15 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     resolver = PriceResolver(cm)
     gas_rules = load_gas_rules(wb)          # hub basis + Iberian gas-for-power cap (RDL 10/2022)
     res_schemes = load_res_schemes(wb)                          # RES subsidy bid tranches per zone (§51)
+
+    from ..flexibility import enabled as _flex_enabled
+    flex_on = _flex_enabled(config) if flexibility is None else bool(flexibility)
+    if flex_on:
+        use_remit_nuclear_avail = True         # FLEX needs the TRUE nuclear envelope, not the output proxy (F7)
+    if de_unit_level is None:
+        de_unit_level = False                  # unit-level DE stays explicit opt-in: #73 validated it on 2019,
+        #                                        but under FLEX-2024 it over-prices DE (mean 79 vs 65 obs) and
+        #                                        drains the regional surplus (A/B: FR 136→59, BE 67→5 negs)
 
     # ---- preload the year ----
     fr = load_fr_netload(config, f"{year}-01-01", f"{year + 1}-01-01").set_index("timestamp_utc")
@@ -118,15 +127,10 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         wv_levels = solve_levels(config, year, curves, tuple(["FR"] + list(neigh)))
     # meme traitement pour le nucleaire FR : 63 GW a un prix unique rendaient le prix francais degenere
     # (marginal 78,6 % des heures a exactement 7,0 EUR/MWh). Cf. stacks.nuclear_curve.
-    from ..flexibility import enabled as _flex_enabled
-    flex_on = _flex_enabled(config) if flexibility is None else bool(flexibility)
-    if flex_on:                                        # FLEX models the modulation endogenously, so nuclear
-        use_remit_nuclear_avail = True                 # must carry its TRUE envelope (installed − REMIT outages),
-        #                                                not the rolling-max-of-output proxy that pre-removes the
-        #                                                surplus FLEX exists to price (S1c). Couple them.
     from ..stacks import nuclear_curve as nuc
     nuc_installed = float(fr_stack.loc[fr_stack["tech"] == "nuclear", "capacity_mw"].sum())
     flex_spec = None
+    nb_flex: dict = {}                                     # neighbour-zone flex specs (static per year)
     fired_floor = 0.0                                      # flag-off: historic §51 fired-tranche floor
     if flex_on:
         # FLEX on: keep the per-reactor rows and build the C1–C7/§4 rigidity spec — the negatives now emerge
@@ -146,9 +150,43 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         if "FR" in res_schemes:                            # §6 (F4): the FLEX module owns the FR downward
             res_schemes = {**res_schemes,                  # bid ladder — OA at the market floor, CR ≈0
                            "FR": trajectories.apply_oa_ladder(res_schemes["FR"], ladder)}
-        fired_floor = float(ladder["mer_bid"])             # fired §51 tranches curtail just BELOW zero (F7):
-        #                                                    a 0.0 fired floor is an unlimited 0-priced sink
-        #                                                    that erases the coupled region's negative depth
+        fired_floor = 0.0                                  # fired §51 tranches bid the German-law 0.0: fired
+        #                                                    hours clear AT zero (reality prints 0.00), and the
+        #                                                    −0.01 variant mass-printed phantom negatives
+        #                                                    (A/B: DE 545 vs 70 obs). The F7 FR unlock was the
+        #                                                    trigger fix, not the fired level (65=65 at 0.0).
+        # year-correct DE tranche volumes: the static tab is a 2019 snapshot, but German FiT volumes shrank
+        # sharply by 2024 (registry vintage decay: fit 0.30→0.18, merchant 0.10→0.20, §51 trigger 6→4 h) —
+        # oversized deep floors over-print DE (probe: 303 vs 70 obs). DE_LU ONLY: its registry is plant-level
+        # MaStR and §51 trigger semantics are genuinely German; BE/CH/ES keep the static tab (their cohort
+        # registry tier is degenerate single-scheme, and scheme_shares would bolt a German trigger onto
+        # paid-regardless certificate schemes that have none).
+        if "DE_LU" in res_schemes:
+            try:
+                from powersim_core import registry as _registry
+
+                from ..scheme_evolution import scheme_shares
+                de_floors = {t["scheme"]: t["floor"] for t in res_schemes["DE_LU"]}
+                ys = scheme_shares("DE_LU", year, de_floors, reg=_registry.read(zone="DE_LU"))
+                if ys:
+                    res_schemes = {**res_schemes, "DE_LU": ys}
+            except Exception:                              # noqa: BLE001 — registry unavailable → static tab
+                pass
+        # neighbour-zone extension: pseudo-unit nuclear rigidity for BE/CH/ES (+DE 2019), measured per-zone
+        # anchors (near-must-run fleets, socle bids −55…−70) — the coupled mid-band depth the F7 report
+        # flagged as missing; DE thermal gets §4 commitment on its MaStR unit stack.
+        from ..flexibility import neighbour_nuclear as nnuc
+        for z in list(nb_stack):
+            st_z = nnuc.split_nuclear_block(nb_stack[z], z)
+            spec_z = nnuc.build_neighbour_flex_spec(st_z, z, costs)
+            if z == "DE_LU" and de_unit_level:
+                if spec_z is None:                         # 2024+: no German nuclear → standalone §4 fossil
+                    spec_z = nnuc.build_fossil_flex_spec(st_z, costs)
+                else:                                      # 2019: nuclear + unit-level fossil combined
+                    fr_nuclear._append_fossil(st_z, spec_z, costs)
+            if spec_z is not None:
+                nb_stack[z] = st_z
+                nb_flex[z] = spec_z
     elif nuclear_curve:
         fr_stack = nuc.expand_stack(fr_stack, nuc.load_curve(config, year, nuc_installed))
     nb_nl = {z: neighbour_netload(config, z, year).set_index("timestamp_utc") for z in neigh}
@@ -201,9 +239,13 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         cold = seam = None
         if flex_spec is not None:
             from ..flexibility import fr_nuclear
-            cold = fr_nuclear.window_spec(flex_spec, (maneuver_weekly or {}).get(w0))
-            seam = ({**cold, **prev_flex_state}                 # F5: link only across an adjacent seam
-                    if prev_flex_state is not None and prev_w1 == w0 else cold)
+            # multi-zone flex dict: FR (weekly C4 re-derate) + the static neighbour specs; F5 seam state
+            # per zone, linked only across an adjacent seam.
+            cold = {"FR": fr_nuclear.window_spec(flex_spec, (maneuver_weekly or {}).get(w0)),
+                    **{z: nb_flex[z] for z in nb_flex if z in zd}}
+            adjacent = prev_flex_state is not None and prev_w1 == w0
+            seam = ({z: {**sp, **prev_flex_state[z]} if z in prev_flex_state else sp
+                     for z, sp in cold.items()} if adjacent else cold)
 
         # try the seam-linked spec first; a seam link can over-constrain a window (a last-hour commitment shed
         # upstream + hard reserves) → fall back to a cold solve (F4 behaviour) rather than drop the window.
@@ -212,8 +254,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
             try:
                 out = solve_with_triggers(T, zd, borders, {b: ntc[b] for b in borders}, res_schemes,
                                           res_bid=res_bid, price_floor=price_floor, diagnose=diagnose,
-                                          flex=({"FR": sp} if sp is not None else None),
-                                          fired_floor=fired_floor)
+                                          flex=sp, fired_floor=fired_floor)
                 break
             except RuntimeError:
                 out = None
@@ -233,7 +274,8 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
             flex_stats["modulated_mwh"] += float((fx["u"][nucm] - fx["p"][nucm]).clip(min=0.0).sum())
             flex_stats["deepmod_mwh"] += float(fx["d"][nucm].sum())
             flex_stats["hours"] += int(fx["u"].shape[1])
-        prev_flex_state = fr_nuclear.tail_state(fx) if fx is not None else None   # F5: carry the tail forward
+        prev_flex_state = ({z: fr_nuclear.tail_state(v) for z, v in out.get("flex", {}).items()}
+                           if flex_spec is not None and out.get("flex") else None)   # F5 tails, per zone
         prev_w1 = w1
 
     model = pd.concat(price_chunks).sort_index()
