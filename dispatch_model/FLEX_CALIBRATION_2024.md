@@ -148,6 +148,28 @@ scheme-evolution design predicts. Caveats: SMC level (markup off), C4 maneuverab
 projection, and 7 of 81 windows skipped as solver-pathological (see below) — a small undercount on the
 heaviest weeks.
 
+**Refresh with storage on** (same design, PSP measured envelopes + BESS trajectory ×1→×10 wired in
+projection — see the storage section of FLEXIBILITY.md):
+
+| year | OA % | CR % | merchant % | FR neg hours | depth | min | P95 | max |
+|------|------|------|------------|--------------|-------|-----|-----|-----|
+| 2028 | 34 | 58 | 8 | 61 | all (−5,0) | −0.0 | 106 | 129 |
+| 2034 | 10 | 58 | 32 | 675 | all (−5,0) | −0.0 | 116 | 144 |
+| 2040 | 4 | 42 | 54 | 1328 | all (−5,0) | −0.0 | 136 | 180 |
+| 2046 | 0 | 0 | 100 | **1691** | all (−5,0) | −0.0 | 180 | 202 |
+
+Three results. (i) The cross-over **survives storage**: the count still rises steeply (61 → 1691,
+ending near the storage-off 1779) — RES build-out dominates the storage trajectory at the horizon.
+(ii) Storage bites hardest where surpluses are thin: 2028 drops 191 → 61 (−68 %) while 2046 barely
+moves (−5 %) — the same thin-tail/fat-tail asymmetry as the 2024 backtest gate. The composite shape is
+a genuine *dip-then-explosion*: near-term BESS build-out temporarily pushes negative-hour counts below
+the 2024 observed level before RES growth overwhelms it. (iii) The scarcity caps generalize: max
+129–202 €/MWh across the horizon, no 300/4000 spike prints anywhere. One caveat hardens: depth
+attenuation is now *total* (every negative hour in (−5,0), mean ≈ −0.01) — storage absorbs the marginal
+surplus before any deep floor can print, so deep negatives at the horizon require surpluses beyond
+storage + rigidity absorption simultaneously, which these BESS trajectories preclude. All 26 weeks
+solved in every year (seam-attempt failures recovered by the cold fallback; no windows dropped).
+
 *Solver pathology, isolated by bisection:* one window class (~9 % of high-RES weeks) is feasible but
 pathologically degenerate — removing **either** the C3 xénon rows **or** the F5 seam state clears it in
 seconds; both together defeat simplex (180 s) and IPM+crossover (600 s). The flex path now bounds every
@@ -230,3 +252,49 @@ documented input-data re-ingestion, pending a baseline re-capture).
 - **Episode-length dynamics** (3.6 vs ≈5 h) — longer runs come with neighbour surplus persistence.
 - Scenario checks (20-year cross-over), one-at-a-time workbook sensitivities, dual-decomposition
   walkthroughs, and the flag-on golden baseline — the F8 deliverables proper.
+
+## Out-of-sample 2025 (first true holdout — the record negative-price year; run 2026-07-29)
+
+Full-year 2025 backtest, calibration **frozen on 2024** (κ 0.90, c_mod 45, α_op 0.74, mer_bid −0.01 —
+in-code defaults, nothing refit), storage off (frozen-config parity), 2025 commodity anchors from public
+annual averages (TTF 36 / EUA 72 / API2 11.5 / Brent 69), all-zone 2025 ENTSO-E inputs (post
+truncated-chunk repair — see the ingest guard in `pricemodeling/entsoe/series.py::_do`). Observed side
+is hourly-mean of native prints (15-min MTUs live from Oct 2025).
+
+| zone | model neg | obs neg | model min | obs min | model mean | obs mean | model >200 | obs >200 |
+|------|-----------|---------|-----------|---------|------------|----------|------------|----------|
+| FR | 884 | 510 | −1.0 | −118.0 | 45.2 | 61.0 | 0 | 31 |
+| DE_LU | 235 | 573 | −10.0 | −250.3 | 68.4 | 89.4 | 0 | 162 |
+| BE | 274 | 516 | −1.0 | −462.3 | 58.1 | 82.6 | 0 | 74 |
+| CH | **347** | **303** | −10.0 | −262.2 | 74.2 | 101.8 | 20 | 52 |
+| ES | 8 | 556 | −0.0 | −15.0 | 50.7 | 65.2 | 0 | 20 |
+| NL | 6 | 581 | −1.0 | −350.0 | **89.6** | **86.9** | 0 | 127 |
+| IT_NORTH | 36 | 0 | −1.0 | 0.0 | 98.1 | 115.9 | 51 | 43 |
+
+FR depth: model 854/30/0/0 across (−0.05,0]/(−5,−0.05]/(−50,−5]/<−50 vs observed 254/148/91/17.
+FR timing: midday 57 % (obs 63), weekend 57 % (obs 49), mean episode 4.5 h (obs 5.0),
+spring share 42 % (obs 71). Modulated energy 42.2 TWh.
+
+**Honest verdict: the frozen calibration does not transfer as-is.** The 2024 gate result (335/352,
+−5 %) does not carry to 2025: FR **over-prints count** (+73 %) while still missing *all* depth
+(min −1.0 vs −118 observed), and the catalogued level-bias zones fail dramatically out-of-sample —
+ES 8/556 and NL 6/581 (the too-short stacks that under-printed mildly in 2024 miss an order of
+magnitude in 2025's fatter-surplus regime), DE −59 % (the measured 2024 must-run floors do not
+describe 2025), BE −47 %. What *does* transfer: CH count (+15 %, inside the ±30 % band — the only
+zone passing), the NL mean level (86.9 obs / 89.6 model — the capacity-fallback + tranche work closed
+the level gap), FR episode length (4.5 vs 5.0 h) and midday share. Scarcity is missed everywhere
+(obs 20–162 h >200 €/MWh per zone; model ≈0 outside CH/IT) and means run 14–28 € low — consistent
+with the flat annual commodity anchor missing 2025's front-loaded gas curve, and with the absent
+scarcity tail. Timing shape degrades too: only 42 % of model negatives fall in Mar–Jun vs 71 %
+observed — the surplus count inflates outside spring.
+
+**Reading.** The out-of-sample test did exactly its job: every weakness already catalogued in-sample
+(zonal level biases, censored RES potential, no mid-band depth, no neighbour ladders at depth) is
+re-exposed at 2025 amplitude, *plus* one new signal — the FR shallow-tail mechanism **over-fires**
+when surpluses fatten while depth stays capped, i.e. the count/depth trade-off is structural, not a
+2024 tuning artifact. Priorities the holdout confirms: (1) the zonal level-bias campaign (ES/NL/DE
+stacks) is the binding constraint, not FR parameters; (2) depth needs the deep rungs (censored wind,
+neighbour mid-band ladders) before any FR count retune is meaningful; (3) within-year commodity
+shape (monthly historical prices) is now measurable as a 14–28 € mean error. A κ/α_op refit on 2025
+is *not* warranted until (1)–(2) land — refitting frozen parameters against a structurally biased
+envelope would launder stack errors into behavioural ones.

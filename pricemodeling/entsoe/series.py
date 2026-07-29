@@ -100,11 +100,17 @@ def _fetch_retry(client_call, attempts=5):
             raise
 
 
-def _do(engine, client_call, table, source, key, force, build):
+def _do(engine, client_call, table, source, key, force, build, expect_end=None):
     """Fetch (unless cached in ingest_log) → build long df(s) → upsert. Returns rows written.
 
     Per-chunk failures are logged (status='error'/'nodata') and skipped so the backfill continues; a
     re-run retries anything not marked 'ok'. ENTSO-E returns no-data for zones/series it doesn't publish.
+
+    `expect_end` (near-realtime series only — pass None for annual series like installed capacity):
+    the requested chunk end. The API has a degraded mode where it returns a *truncated but parseable*
+    response (observed 2026-07: one single day for a full-year request), which would otherwise be
+    logged 'ok' and never retried. If the fetched data stops >45 days short of `expect_end`, the chunk
+    is upserted but logged status='partial', so the next run re-fetches it.
     """
     if not force and already_ingested(engine, source, key):
         return 0
@@ -120,8 +126,18 @@ def _do(engine, client_call, table, source, key, force, build):
         return 0
     frames = build(raw)
     total = 0
+    last_ts = None
     for df in frames:
         total += upsert_df(engine, table, df, ["ts_utc", "series_key", "sub_key"])
+        if len(df):
+            m = df["ts_utc"].max()
+            last_ts = m if last_ts is None else max(last_ts, m)
+    if expect_end is not None and total and last_ts is not None:
+        if pd.Timestamp(last_ts) < pd.Timestamp(expect_end) - pd.Timedelta(days=45):
+            log_ingest(engine, source, key, total, status="partial")
+            print(f"    ! {source} {key}: truncated response (data stops {last_ts}) — logged partial",
+                  flush=True)
+            return total
     log_ingest(engine, source, key, total)
     return total
 
@@ -135,7 +151,7 @@ def ingest_load(engine, client, start: date, end: date, zones=None, force=False)
                 s = s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s
                 return [_long(s.index, z, "", "load_mw", s.values)]
             total += _do(engine, lambda z=area, c0=c0, c1=c1: client.query_load(z, start=c0, end=c1),
-                         T_LOAD, f"entsoe:load:{z}", f"{z}_{c0.date()}", force, build)
+                         T_LOAD, f"entsoe:load:{z}", f"{z}_{c0.date()}", force, build, expect_end=c1)
     return total
 
 
@@ -155,7 +171,7 @@ def ingest_generation(engine, client, start: date, end: date, zones=None, force=
                     frames.append(_long(df.index, z, str(psr), "gen_mw", df[col].values))
                 return frames
             total += _do(engine, lambda z=area, c0=c0, c1=c1: client.query_generation(z, start=c0, end=c1),
-                         T_GEN, f"entsoe:gen:{z}", f"{z}_{c0.date()}", force, build)
+                         T_GEN, f"entsoe:gen:{z}", f"{z}_{c0.date()}", force, build, expect_end=c1)
     return total
 
 
@@ -179,7 +195,7 @@ def ingest_hydro_storage(engine, client, start: date, end: date, zones=None, for
             total += _do(engine,
                          lambda z=area, c0=c0, c1=c1:
                              client.query_aggregate_water_reservoirs_and_hydro_storage(z, start=c0, end=c1),
-                         T_HYDRO, f"entsoe:hydro:{z}", f"{z}_{c0.date()}", force, build)
+                         T_HYDRO, f"entsoe:hydro:{z}", f"{z}_{c0.date()}", force, build, expect_end=c1)
     return total
 
 
@@ -194,7 +210,7 @@ def ingest_prices(engine, client, start: date, end: date, zones=None, force=Fals
                 return [_long(s.index, z, "", "day_ahead_eur_mwh", s.values)]
             total += _do(engine,
                          lambda z=area, c0=c0, c1=c1: client.query_day_ahead_prices(z, start=c0, end=c1),
-                         T_PRICE, f"entsoe:price:{z}", f"{z}_{c0.date()}", force, build)
+                         T_PRICE, f"entsoe:price:{z}", f"{z}_{c0.date()}", force, build, expect_end=c1)
     return total
 
 
@@ -232,7 +248,8 @@ def ingest_flows(engine, client, start: date, end: date, borders=None, force=Fal
                 total += _do(engine,
                              lambda ax=ax, ay=ay, c0=c0, c1=c1: client.query_crossborder_flows(
                                  ax, ay, start=c0, end=c1),
-                             T_FLOW, f"entsoe:flow:{x}>{y}", f"{x}>{y}_{c0.date()}", force, build)
+                             T_FLOW, f"entsoe:flow:{x}>{y}", f"{x}>{y}_{c0.date()}", force, build,
+                             expect_end=c1)
     return total
 
 

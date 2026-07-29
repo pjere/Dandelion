@@ -340,7 +340,9 @@ Per zone *z*, hour *t* of a weekly window (times `T`, |T| = n). Decision variabl
 - **F8 (done):** scenario horizon, documentation, tests, golden. **(1) The cross-over** (headline result,
   `FLEX_CALIBRATION_2024.md`): sampled 2028/2034/2040/2046 half-years, FLEX on, SMC level — negative count
   rises 191 → 1779 h with RES build-out while depth attenuates with the ladder's vintage expiry (min −1.0
-  while CR lives → −0.01 merchant-only by 2040+). **(2) Sensitivities** (one-at-a-time, tabulated): the
+  while CR lives → −0.01 merchant-only by 2040+). *Refreshed with storage on* (July 2026, same report):
+  cross-over intact (61 → 1691 h), storage thins the early thin-surplus years most (2028 −68 %, 2046 −5 %
+  → a dip-then-explosion shape), scarcity spikes capped ≤202 €/MWh horizon-wide, depth attenuation total. **(2) Sensitivities** (one-at-a-time, tabulated): the
   2024 tail hangs on {κ, α_band_op, c_mod, mer_bid/fired_floor} + export caps; `cr_bid`/`oa_bid`/
   `p_minstab`≤20 GW/reserves ×2 are inert. **(3) Docs**: the complete algebraic statement + the exclusions
   backlog (above), `docs/MODELLING.md` §6h (incl. the formal correction of §6d's export-lock conclusion),
