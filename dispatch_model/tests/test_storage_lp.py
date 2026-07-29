@@ -34,6 +34,16 @@ def test_storage_arbitrages_trough_to_peak_and_stays_neutral():
     assert peak_st <= peak_base + 1e-6                      # arbitrage cannot raise the peak
 
 
+def test_bess_trajectory_scales_the_projection_spec():
+    from dispatch_model.flexibility.storage import bess_factor, bess_power_mw, storage_spec
+    assert bess_factor(2024) == 1.0 and abs(bess_factor(2040) - 10.0) < 1e-9
+    assert abs(bess_factor(2032) - 5.2) < 1e-9              # linear between the anchors (4→10 over 2030-40)
+    s24, s40 = storage_spec({}, 2024), storage_spec({}, 2040)
+    assert "DE_LU" in s40 and s40["DE_LU"]["p_dis"][-1] == 10 * s24["DE_LU"]["p_dis"][-1]   # BESS unit ×10
+    assert s40["CH"]["p_dis"][0] == s24["CH"]["p_dis"][0]   # measured PSP envelope constant over the horizon
+    assert bess_power_mw("DE_LU", 2040) == 16000.0          # the #83 flex-block shrink amount
+
+
 def test_storage_absorbs_negative_price_surplus():
     # must-take RES beyond demand with a −30 floor: storage charges instead of curtailing at −30
     dem = [2000.0] * 4 + [6000.0] * 8

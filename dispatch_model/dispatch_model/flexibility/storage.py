@@ -28,6 +28,22 @@ _PSP_MEASURED = {"DE_LU": (4.6, 41.6), "CH": (2.8, 46.7), "ES": (2.7, 34.8),
 #: every micro-spread; the effective round-trip threshold is ≈ vom_ch/η² ≈ 8.7 €/MWh. Calibration seed.
 _PUMP_VOM = 5.0
 _ETA_PSP, _ETA_BESS = 0.76 ** 0.5, 0.90 ** 0.5
+#: BESS build-out factor vs the 2024 seed (starter trajectory, TYNDP-order; workbook-overridable later).
+#: In PROJECTION the real storage machinery replaces the battery share of #83's crude `cap_flex_gw`
+#: block (the caller shrinks that block by the BESS power added — no double count).
+_BESS_GROWTH = [(2024, 1.0), (2030, 4.0), (2040, 10.0), (2050, 12.0)]
+
+
+def bess_factor(year: int) -> float:
+    ys, fs = zip(*_BESS_GROWTH)
+    return float(np.interp(year, ys, fs))
+
+
+def bess_power_mw(zone: str, year: int) -> float:
+    """BESS power (MW) the storage spec carries for `zone`/`year` — the amount the caller must SHRINK the
+    #83 `cap_flex_gw` adequacy block by, since that block already counts batteries (no double count)."""
+    b = _BESS_2024.get(zone)
+    return b[0] * 1e3 * bess_factor(year) if b else 0.0
 
 
 def storage_spec(psp_mw: dict[str, float], year: int) -> dict:
@@ -48,7 +64,8 @@ def storage_spec(psp_mw: dict[str, float], year: int) -> dict:
             ech.append(_ETA_PSP); edis.append(_ETA_PSP); vch.append(_PUMP_VOM)
         b = _BESS_2024.get(z)
         if b:
-            p_dis.append(b[0] * 1e3); p_ch.append(b[0] * 1e3); e_max.append(b[1] * 1e3)
+            f = bess_factor(year)
+            p_dis.append(b[0] * 1e3 * f); p_ch.append(b[0] * 1e3 * f); e_max.append(b[1] * 1e3 * f)
             ech.append(_ETA_BESS); edis.append(_ETA_BESS); vch.append(1.0)
         if p_dis:
             out[z] = {"p_dis": np.array(p_dis), "p_ch": np.array(p_ch), "e_max": np.array(e_max),

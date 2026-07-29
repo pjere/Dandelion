@@ -159,12 +159,27 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
             r_up_req=reserves["r_up_req"], r_down_req=reserves["r_down_req"],
             p_minstab=trajectories.minstab_mw(wb, "FR", target_year),
             include_fossil=True, fossil_c_start=costs)
-        fired_floor = float(trajectories.load_oa_ladder(wb, target_year)["mer_bid"])  # fired ⇒ merchant (F7)
+        fired_floor = 0.0                              # fired §51 tranches bid the German-law 0.0 (aligned
+        #                                                with the backtest revert: the −0.01 variant
+        #                                                mass-printed phantom negatives, A/B DE 545 vs 70)
         # C4 maneuverability in projection comes from the planned-outage scheduler (F1) — a separate hook not
         # yet wired here; projected reactors run `full` until it lands, same documented degrade as the backtest.
     nb_fac = {z: zfac(z) for z in neigh}
     nb_stack = {z: _append_flex(_scale_stack(s, k, g, cap_factors=nb_fac[z][2]), z, tyndp, target_year)
                 for z, s in ref["nb_stack"].items()}
+    # storage in PROJECTION (flex-gated; the machinery's real home per the backtest verdict — commit
+    # 0f84fb6): measured PSP envelopes + the BESS build-out trajectory replace the battery share of #83's
+    # crude `cap_flex_gw` block, which is SHRUNK by the BESS power added (no double count). No observed-
+    # count gate exists here; storage is essential to 2030+ price formation (it is what caps the spreads).
+    storage_proj = None
+    if flex_spec is not None:
+        from ..flexibility.storage import bess_power_mw, storage_spec
+        storage_proj = storage_spec({}, target_year) or None
+        for z, st_z in [("FR", fr_stack)] + list(nb_stack.items()):
+            b = bess_power_mw(z, target_year)
+            m = st_z["unit_id"] == f"{z}_flex"
+            if b > 0 and m.any():
+                st_z.loc[m, "capacity_mw"] = (st_z.loc[m, "capacity_mw"] - b).clip(lower=0.0)
     # #80: stochastic neighbour availability — per Monte-Carlo draw, derate neighbour firm capacity by a
     # mean-preserving REMIT-calibrated multiplier (≈1.0, no double-count with the p99 proxy). Central path
     # (avail_rng=None) leaves the stacks unchanged.
@@ -220,7 +235,7 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
                 out = solve_with_triggers(T, zd, borders, {b: ref["ntc"][b] for b in borders}, schemes,
                                           res_bid=res_bid, price_floor=price_floor,
                                           flex=({"FR": sp} if sp is not None else None),
-                                          fired_floor=fired_floor)
+                                          fired_floor=fired_floor, storage=storage_proj)
                 break
             except RuntimeError:
                 out = None
