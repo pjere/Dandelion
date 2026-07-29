@@ -49,7 +49,7 @@ def _tranches_for(zone, zones_data, res_bid, res_tranches, n):
     return [(1.0, np.full(n, bid), "res")], rp
 
 
-def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tranches, flex=None):
+def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tranches, flex=None, storage=None):
     """Assemble the LP as HiGHS column arrays + the index maps needed to read the solution back.
 
     Column blocks, in order, per zone: gen(units×t), res(tranches×t), ens(t), dump(t); then per border:
@@ -383,6 +383,44 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                     rows.append(rr); cols.append(gbase + i * n + np.arange(n)); vals.append(np.ones(n))
                 row_lo.append(np.full(n, float(fz["r_down_req"]))); row_up.append(np.full(n, _INF)); xrow += n
 
+    # ---- storage (opt-in, PSP + BESS — the v2 increment the CH/ES level biases named): per zone-unit s,
+    #      discharge gd ∈ [0, p_dis], charge gc ∈ [0, p_ch], state-of-charge e ∈ [0, e_max]; balance +gd −gc;
+    #      SoC dynamics e_t = e_{t−1} + η_ch·gc_t − gd_t/η_dis (LINEAR → still a pure LP, duals stay prices);
+    #      weekly energy neutrality via e pinned to 0.5·e_max at both window ends (no seam state, v1).
+    #      A small `vom` on discharge breaks arbitrage-timing degeneracy. Simultaneous charge+discharge is
+    #      allowed and occasionally optimal at negative prices (burning round-trip losses to absorb more) —
+    #      that is real storage behaviour, not an artifact. `storage=None` (default) ⇒ byte-identical.
+    storage_cols = {}
+    if storage:
+        for z, sz in storage.items():
+            if z not in zrow:
+                continue
+            pd_, pc_ = np.asarray(sz["p_dis"], float), np.asarray(sz["p_ch"], float)
+            em = np.asarray(sz["e_max"], float)
+            ech = np.asarray(sz["eta_ch"], float); edis = np.asarray(sz["eta_dis"], float)
+            vom = np.broadcast_to(np.asarray(sz.get("vom", 0.5), float), pd_.shape)
+            ns = pd_.size
+            gd = add_block(np.repeat(vom, n) + _tie_break([f"st:{z}:{k}" for k in range(ns)]).repeat(n),
+                           np.zeros(ns * n), np.repeat(pd_, n))
+            gc = add_block(np.zeros(ns * n), np.zeros(ns * n), np.repeat(pc_, n))
+            elo = np.zeros((ns, n)); eup = np.repeat(em, n).reshape(ns, n).astype(float)
+            elo[:, -1] = 0.5 * em; eup[:, -1] = 0.5 * em            # end-of-window neutrality pin
+            eb = add_block(np.zeros(ns * n), elo.ravel(), eup.ravel())
+            for k in range(ns):                                     # balance: +gd − gc
+                rows.append(zrow[z] + np.tile(np.arange(n), 1)); cols.append(gd + k * n + np.arange(n))
+                vals.append(np.ones(n))
+                rows.append(zrow[z] + np.arange(n)); cols.append(gc + k * n + np.arange(n))
+                vals.append(-np.ones(n))
+                # SoC: e_t − e_{t−1} − η_ch·gc_t + gd_t/η_dis = 0  (t ≥ 1); t=0 vs the 0.5·e_max start
+                rr = xrow + np.arange(n)
+                rows.append(rr); cols.append(eb + k * n + np.arange(n)); vals.append(np.ones(n))
+                rows.append(rr[1:]); cols.append(eb + k * n + np.arange(n - 1)); vals.append(-np.ones(n - 1))
+                rows.append(rr); cols.append(gc + k * n + np.arange(n)); vals.append(np.full(n, -ech[k]))
+                rows.append(rr); cols.append(gd + k * n + np.arange(n)); vals.append(np.full(n, 1.0 / edis[k]))
+                lo0 = np.zeros(n); lo0[0] = 0.5 * em[k]             # e_0 − η·gc_0 + gd_0/η = e_init
+                row_lo.append(lo0); row_up.append(lo0.copy()); xrow += n
+            storage_cols[z] = (gd, gc, eb, ns)
+
     # energy-cap rows (hydro budgets): Σ_{u∈z,tech} Σ_t gen ≤ mwh
     ecap_rows = {}
     for z in zones:
@@ -412,6 +450,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         "gen_cols": gen_cols, "res_cols": res_cols, "ens_cols": ens_cols, "dump_cols": dump_cols,
         "srmc_by_unit": srmc_by_unit, "res_schemes": res_schemes, "flex_cols": flex_cols,
         "flex_spec": flex,          # the input flex spec (params per zone) — for the F6 debug dump
+        "storage_cols": storage_cols,
     }
 
 
@@ -479,6 +518,12 @@ def _solve_and_read(h, spec, price_sign, diagnose: bool = False):
                            "su": cv[sb:sb + fidx.size * n].reshape(fidx.size, n),
                            "p": _p(z, fidx)}
                        for z, (ub, db, sb, fidx) in spec["flex_cols"].items()}
+    if spec.get("storage_cols"):                       # read-only storage primal (discharge/charge/SoC)
+        n = spec["n"]
+        out["storage"] = {z: {"dis": cv[gd:gd + ns * n].reshape(ns, n),
+                              "ch": cv[gc:gc + ns * n].reshape(ns, n),
+                              "soc": cv[eb:eb + ns * n].reshape(ns, n)}
+                          for z, (gd, gc, eb, ns) in spec["storage_cols"].items()}
     if diagnose:                       # lecture seule de la solution primale (cf. lp.diagnostics)
         from .diagnostics import binding_flows, debug_hour, marginal_report
         out["diag"] = marginal_report(spec, cv, prices)
@@ -490,13 +535,14 @@ def _solve_and_read(h, spec, price_sign, diagnose: bool = False):
 def solve_multizone_highs(times, zones_data: dict, borders: list, ntc: dict,
                           res_bid=-10.0, voll: float = 15000.0, price_floor=-500.0,
                           res_tranches: dict | None = None, price_sign: float = 1.0,
-                          diagnose: bool = False, flex: dict | None = None) -> dict:
+                          diagnose: bool = False, flex: dict | None = None,
+                          storage: dict | None = None) -> dict:
     """Cold-build + solve one window's dispatch LP directly in HiGHS. Same contract as
     ``multi_zone.solve_multizone`` (returns per-zone prices, flows, water values, objective).
 
     `price_sign` maps the HiGHS row dual to the market price; -1.0 reproduces linopy's sign (validated).
     `flex` opts into the plant-operating-rigidity rows (see ``_build``); None keeps the pure LP."""
-    spec = _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tranches, flex)
+    spec = _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tranches, flex, storage)
     model = highspy.HighsModel()
     lp = model.lp_
     lp.num_col_ = spec["ncol"]; lp.num_row_ = spec["nrow"]

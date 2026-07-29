@@ -70,7 +70,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
                  use_remit_nuclear_avail: bool = False, de_unit_level: bool | None = None,
                  nuclear_curve: bool = True, hydro_sdp_level: bool = True,
                  diagnose: bool = False, flexibility: bool | None = None,
-                 write_lake: bool = True) -> dict:
+                 write_lake: bool = True, enable_storage: bool = False) -> dict:
     """`flexibility` opts into the FLEX plant-operating-rigidity module (per-reactor FR nuclear stack with
     C1/C2/C3/C5 rigidities → endogenous negatives; see ``flexibility.fr_nuclear``). Default None reads
     ``flexibility.enabled`` from config.yaml (off unless set). When on, the FR nuclear tranche surrogate
@@ -112,6 +112,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         except (KeyError, ValueError):          # it lacks data rather than failing the whole backtest.
             neigh.remove(z)
             zones.remove(z)
+    psp_mw = {z: float(s.loc[s["tech"] == "hydro_psp", "capacity_mw"].sum()) for z, s in nb_stack.items()}
     nb_stack = {z: s[~s["tech"].isin(_EXCLUDE_DISPATCH)].reset_index(drop=True) for z, s in nb_stack.items()}
     # valeur de l'eau : le bloc hydraulique unique a 1 EUR/MWh devient une courbe de tranches calibree,
     # calculee une fois par annee (cf. hydro.water_value)
@@ -132,6 +133,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     flex_spec = None
     nb_flex: dict = {}                                     # neighbour-zone flex specs (static per year)
     nb_mustrun: dict = {}                                  # measured must-run floors (flex-gated, DE)
+    storage_lp: dict = {}                                  # PSP+BESS storage spec (flex-gated)
     fired_floor = 0.0                                      # flag-off: historic §51 fired-tranche floor
     if flex_on:
         # FLEX on: keep the per-reactor rows and build the C1–C7/§4 rigidity spec — the negatives now emerge
@@ -222,6 +224,19 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         # dominant share of DE's long bias (see blocks.observed_mustrun_floors).
         from ..neighbours.blocks import measured_chp_mw, observed_mustrun_floors
         nb_mustrun = {z: observed_mustrun_floors(config, z, year) for z in neigh if measured_chp_mw(z)}
+        # storage in the LP (EXPLICIT opt-in, `enable_storage`): PSP from the measured stack caps + BESS
+        # 2024 seeds (flexibility.storage). NOT auto-enabled under flex: at nameplate parameters the
+        # frictionless weekly arbitrage ANNIHILATES the region's negative tail (A/B probe I vs H: DE
+        # 70→0 vs 70 obs, FR 102→3, all zones →0; FR modulated energy 32→23 TWh) — model surpluses sit
+        # just above the zero-absorbers, so uncosted pumping eats them, while reality's negatives coexist
+        # with real pumping (bigger true surpluses + PSP scheduling frictions). Calibration path: measured
+        # per-zone pumping envelopes from observed PSP data, then derated power/energy — until then the
+        # machinery fails its negative-count gate and stays off.
+        if enable_storage:
+            from ..flexibility.storage import storage_spec
+            from ..io.entsoe_hist import load_installed_capacity
+            psp_mw["FR"] = float(load_installed_capacity(config, "FR", year).get("hydro_psp", 0.0))
+            storage_lp = storage_spec(psp_mw, year)
     ntc = flow_derived_ntc(config, year)                        # effective NTC from realized flows
     nuc_unavail = None
     if use_remit_nuclear_avail:                                 # #78: true FR nuclear availability from REMIT
@@ -277,7 +292,8 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
             try:
                 out = solve_with_triggers(T, zd, borders, {b: ntc[b] for b in borders}, res_schemes,
                                           res_bid=res_bid, price_floor=price_floor, diagnose=diagnose,
-                                          flex=sp, fired_floor=fired_floor)
+                                          flex=sp, fired_floor=fired_floor,
+                                          storage=(storage_lp or None))
                 break
             except RuntimeError:
                 out = None

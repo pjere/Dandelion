@@ -63,7 +63,8 @@ def _zone_tranches(zone, schemes, res_bid_z, n) -> list[dict]:
 
 def solve_with_triggers(times, zones_data, borders, ntc, schemes,
                         res_bid, price_floor, max_iter: int = 3, diagnose: bool = False,
-                        flex: dict | None = None, fired_floor: float = 0.0) -> dict:
+                        flex: dict | None = None, fired_floor: float = 0.0,
+                        storage: dict | None = None) -> dict:
     """`solve_multizone` wrapped in the §51 fixed point: re-solve, zeroing premiums whose consecutive
     negative-run exceeds their trigger, until the trigger pattern stops changing.
 
@@ -90,7 +91,7 @@ def solve_with_triggers(times, zones_data, borders, ntc, schemes,
     fired = {z: [np.zeros(n, bool) for _ in tranches[z]] for z in zones}
 
     out = solve_multizone(times, zones_data, borders, ntc, price_floor=price_floor,
-                          res_tranches=tranches, diagnose=diagnose, flex=flex)
+                          res_tranches=tranches, diagnose=diagnose, flex=flex, storage=storage)
     for _ in range(max_iter - 1):
         changed = False
         for z in zones:
@@ -107,5 +108,5 @@ def solve_with_triggers(times, zones_data, borders, ntc, schemes,
         if not changed:
             break
         out = solve_multizone(times, zones_data, borders, ntc, price_floor=price_floor,
-                              res_tranches=tranches, diagnose=diagnose, flex=flex)   # carry diag to the last solve
+                              res_tranches=tranches, diagnose=diagnose, flex=flex, storage=storage)
     return out
