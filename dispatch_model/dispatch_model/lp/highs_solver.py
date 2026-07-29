@@ -402,7 +402,8 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             ns = pd_.size
             gd = add_block(np.repeat(vom, n) + _tie_break([f"st:{z}:{k}" for k in range(ns)]).repeat(n),
                            np.zeros(ns * n), np.repeat(pd_, n))
-            gc = add_block(np.zeros(ns * n), np.zeros(ns * n), np.repeat(pc_, n))
+            vch = np.broadcast_to(np.asarray(sz.get("vom_ch", 0.0), float), pd_.shape)   # pumping friction
+            gc = add_block(np.repeat(vch, n), np.zeros(ns * n), np.repeat(pc_, n))
             elo = np.zeros((ns, n)); eup = np.repeat(em, n).reshape(ns, n).astype(float)
             elo[:, -1] = 0.5 * em; eup[:, -1] = 0.5 * em            # end-of-window neutrality pin
             eb = add_block(np.zeros(ns * n), elo.ravel(), eup.ravel())
