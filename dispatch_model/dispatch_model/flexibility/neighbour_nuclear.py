@@ -34,12 +34,16 @@ from . import reactor_class as rc
 _ANCHORS: dict[str, dict] = {
     # zone: {kappa, alpha_op, socle_bid, source}  —  κ·α_op ≈ the measured fleet floor
     "BE": {"kappa": 0.99, "alpha_op": 0.97, "socle_bid": -55.0,
-           "source": "measured 2023+2024: socle 0.96/0.97, p5 −52/−60, floor 0.98/0.99"},
+           "source": "measured 2023+2024: socle 0.96/0.97, p5 −52/−60, floor 0.98/0.99; "
+                     "2025 holdout confirms: p5 −56.4"},
     "CH": {"kappa": 0.99, "alpha_op": 0.98, "socle_bid": -70.0,
-           "source": "measured 2023+2024: socle 0.98/0.99, p5 −64/−75, floor 0.98/1.00"},
-    "ES": {"kappa": 0.98, "alpha_op": 0.96, "socle_bid": -60.0,
-           "source": "floor measured 2024 (socle 0.95, floor 0.98); bid depth MARKET-CENSORED at −1.9 "
-                     "(negatives legal only since 2023-12, all shallow) → BE/CH value borrowed"},
+           "source": "measured 2023+2024: socle 0.98/0.99, p5 −64/−75, floor 0.98/1.00; "
+                     "2025 holdout: p5 −61.2 (slightly shallower, within the 2023-25 spread)"},
+    "ES": {"kappa": 0.98, "alpha_op": 0.96, "socle_bid": -10.0,
+           "source": "measured 2025 (first usable sample: 544 neg hours): socle 0.93, floor 0.96, p5 bid "
+                     "−9.6 — the Spanish fleet yields ~6× SHALLOWER than the BE/CH −60 borrowed in 2024 "
+                     "(when ES depth was market-censored at −1.9). Right-censored at the market's own "
+                     "floor (obs min −15): 'holds through −10' is measured, deeper is unobservable"},
     "DE_LU": {"kappa": 0.99, "alpha_op": 0.98, "socle_bid": -67.0,
               "source": "measured 2019 (socle 1.19 clipped to 1.0 — REMIT/installed mismatch, same artefact "
                         "as FR's >1 tranche); fleet closed 2023-04, spec only attaches pre-2023"},

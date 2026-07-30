@@ -65,3 +65,20 @@ def test_les_frontieres_sans_ch_sont_intactes():
 def test_seule_la_suisse_est_reallouee():
     """Garde-fou : étendre la liste est un choix mesuré (cf. commentaire du module)."""
     assert _NTC_FLOOR_ZONES == frozenset({"CH"})
+
+
+def test_regime_cap_arrays_swap_caps_on_exporter_surplus_hours():
+    """Regime-conditional NTC: the exporter's surplus hours get the (smaller) regime cap, others keep
+    the static cap; a zone without a mask (GB) keeps the static scalar."""
+    import numpy as np
+    import pandas as pd
+    from dispatch_model.rolling.assemble import regime_cap_arrays
+
+    T = pd.date_range("2025-05-01", periods=6, freq="h", tz="UTC")
+    mask_a = pd.Series([True, True, False, False, True, False], index=T)
+    rn = {"mask": {"A": mask_a}, "caps": {("A", "B"): (1500.0, 900.0)}}
+    ntc = {("A", "B"): (2000.0, 1000.0)}
+    out = regime_cap_arrays([("A", "B")], ntc, rn, T)
+    ab, ba = out[("A", "B")]
+    assert list(ab) == [1500.0, 1500.0, 2000.0, 2000.0, 1500.0, 2000.0]   # A-side regime hours swapped
+    assert ba == 1000.0                                                    # B has no mask -> static scalar

@@ -211,13 +211,25 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         # negative. Envelope-based solar uplift, price-unconditioned per hour (see flexibility.res_potential
         # for the estimator and its leakage boundary). FR is deliberately excluded in v1 (its negative count
         # already runs above observed; an uplift there would compound the overshoot).
-        from ..flexibility.res_potential import solar_uplift
+        from ..flexibility.res_potential import btm_solar, solar_uplift
         for z in neigh:
             up = solar_uplift(nb_gen[z], obs.get(z))
             if not up.empty and float(up.sum()) > 0:
                 nl = nb_nl[z]
                 add = up.reindex(nl.index).fillna(0.0)
                 nl["musttake_res_mw"] = nl["musttake_res_mw"] + add
+        # NL behind-the-meter PV (flex-gated): ~98 % of the Dutch solar fleet (29.3 GW installed 2025,
+        # 0.5 TWh/yr metered) is invisible on BOTH sides of the ENTSO-E balance — not in generation
+        # (behind-the-meter) and not netted from the load series (measured: net load does not collapse
+        # on observed-negative noons). Without it the real Dutch surplus does not exist in the inputs
+        # (2025 decomposition: model-NL ~88 €/MWh on obs-negative hours, gas marginal 470/581 h).
+        if "NL" in neigh:
+            from ..io.entsoe_hist import load_installed_capacity
+            inst = load_installed_capacity(config, "NL", year).get("solar", 0.0)
+            btm = btm_solar(nb_gen["NL"], inst)
+            if not btm.empty and float(btm.sum()) > 0:
+                nl = nb_nl["NL"]
+                nl["musttake_res_mw"] = nl["musttake_res_mw"] + btm.reindex(nl.index).fillna(0.0)
                 nl["netload_mw"] = nl["load_mw"] - nl["musttake_res_mw"]
         # measured must-run floors (flex-gated): p10 of observed generation per tech-month replaces the
         # chp×heat_factor heuristic, which forced ~10 GW of phantom German gas on surplus hours — the
@@ -238,6 +250,16 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
             psp_mw["FR"] = float(load_installed_capacity(config, "FR", year).get("hydro_psp", 0.0))
             storage_lp = storage_spec(psp_mw, year)
     ntc = flow_derived_ntc(config, year)                        # effective NTC from realized flows
+    # regime-conditional caps (flex-gated): static caps over-couple exactly on surplus hours — the
+    # flow-based exchange domain shrinks when RES is high; measured collapse + design in
+    # assemble.regime_ntc. Applied per window/hour via regime_cap_arrays.
+    rn = None
+    if flex_on:
+        from .assemble import regime_ntc
+        try:
+            rn = regime_ntc(config, year, ntc)
+        except Exception:                              # noqa: BLE001 — thin data → static caps
+            rn = None
     nuc_unavail = None
     if use_remit_nuclear_avail:                                 # #78: true FR nuclear availability from REMIT
         from pricemodeling.config import load_settings
@@ -287,10 +309,15 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
 
         # try the seam-linked spec first; a seam link can over-constrain a window (a last-hour commitment shed
         # upstream + hard reserves) → fall back to a cold solve (F4 behaviour) rather than drop the window.
+        if rn is not None:
+            from .assemble import regime_cap_arrays
+            ntc_w = regime_cap_arrays(borders, ntc, rn, T)
+        else:
+            ntc_w = {b: ntc[b] for b in borders}
         out = None
         for sp in ([seam, cold] if seam is not cold else [seam]):
             try:
-                out = solve_with_triggers(T, zd, borders, {b: ntc[b] for b in borders}, res_schemes,
+                out = solve_with_triggers(T, zd, borders, ntc_w, res_schemes,
                                           res_bid=res_bid, price_floor=price_floor, diagnose=diagnose,
                                           flex=sp, fired_floor=fired_floor,
                                           storage=(storage_lp or None))

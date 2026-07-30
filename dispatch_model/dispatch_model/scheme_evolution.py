@@ -22,6 +22,13 @@ import pandas as pd
 # §51 EEG (and analogous CfD) consecutive-negative-hours trigger, by commissioning-independent market year.
 _TRIGGER_BY_YEAR = [(2021, 6), (2025, 4), (2026, 3), (2027, 2), (9999, 1)]
 
+# §51 is GRANDFATHERED by commissioning vintage, not market-year-wide: pre-2016 stock (EEG ≤2014 FiT)
+# has no negative-price clause at all; EEG 2017 (2016-20) = 6 h; EEG 2021 (2021-22) = 4 h; EEG 2023
+# (2023-24) = 3 h; Solarspitzengesetz (from Feb 2025) = any negative hour (1 h). The 2025 fleet is a
+# blend of all five classes — a single market-year trigger both under-fires the old stock and
+# over-fires the new (the 2025 holdout's DE trigger chicken-and-egg, FLEX_CALIBRATION_2024.md).
+_TRIGGER_BY_VINTAGE = [(2016, 0), (2021, 6), (2023, 4), (2025, 3), (9999, 1)]
+
 RES_TECHS = ("solar", "wind_onshore", "wind_offshore", "biomass")
 SUPPORT_TERM_YEARS = 20
 
@@ -30,6 +37,14 @@ def trigger_hours(year: int) -> int:
     """Consecutive negative hours after which the premium is cancelled, for market `year`."""
     for cutoff, hrs in _TRIGGER_BY_YEAR:
         if year < cutoff:
+            return hrs
+    return 1
+
+
+def vintage_trigger(commissioning_year: int) -> int:
+    """§51 trigger class for a plant's commissioning vintage (0 = exempt, pre-2016 stock)."""
+    for cutoff, hrs in _TRIGGER_BY_VINTAGE:
+        if commissioning_year < cutoff:
             return hrs
     return 1
 
@@ -58,16 +73,25 @@ def scheme_shares(zone: str, year: int, floors: dict[str, float],
     yr = pd.Timestamp(f"{year}-07-01", tz="UTC")
     end = pd.to_datetime(reg["support_end"], utc=True, errors="coerce")
     eff = reg["scheme"].where(end.isna() | (end > yr), "merchant")
-    by_scheme = reg.groupby(eff)["cap"].sum().to_dict()
+
+    # vintage-correct §51: commissioning ≈ support_end − term ⇒ grandfathered trigger class per plant.
+    # Subsidised capacity splits into per-trigger sub-tranches (same floor, scheme name suffixed @Nh);
+    # plants without a support_end fall back to the market-year trigger (the pre-vintage behaviour).
+    n_year = trigger_hours(year)
+    vint = (end.dt.year - support_term).where(end.notna())
+    trig = vint.map(lambda v: vintage_trigger(int(v)) if pd.notna(v) else n_year)
+    trig = trig.where(eff != "merchant", 0).astype(int)
+    by_key = reg.groupby([eff, trig])["cap"].sum().to_dict()
 
     for scheme, mw in (new_build_mw or {}).items():        # future vintages under the prevailing scheme
-        by_scheme[scheme] = by_scheme.get(scheme, 0.0) + float(mw)
+        k = (scheme, 0 if scheme == "merchant" else vintage_trigger(year))
+        by_key[k] = by_key.get(k, 0.0) + float(mw)
 
-    total = sum(by_scheme.values()) or 1.0
-    n = trigger_hours(year)
+    total = sum(by_key.values()) or 1.0
     out = []
-    for scheme, mw in sorted(by_scheme.items(), key=lambda kv: -kv[1]):
-        out.append({"scheme": scheme, "share": mw / total,
+    for (scheme, n), mw in sorted(by_key.items(), key=lambda kv: -kv[1]):
+        name = scheme if (n == 0 or scheme == "merchant") else f"{scheme}@{n}h"
+        out.append({"scheme": name, "share": mw / total,
                     "floor": float(floors.get(scheme, 0.0)),
-                    "trigger": 0 if scheme == "merchant" else n})
+                    "trigger": int(n)})
     return out

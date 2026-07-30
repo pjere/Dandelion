@@ -183,7 +183,25 @@ from the C3 rows only (keep the C5/min-down/C2a seams) as the targeted fix.
 observed-negative hours, availability = installed − REMIT): the neighbour fleets are far more rigid than
 FR's — BE 0.96–0.97 / −52…−60 / 0.98; CH 0.98–0.99 / −64…−75 / 0.98–1.00; ES floor 0.98 but bid depth
 **market-censored** at −1.9 (negatives legal only since 2023-12) → BE/CH value borrowed; DE 2019 ≈ 1.0 /
-−67. FR remains the only load-following fleet (0.74 / −40 / 0.67). Implementation:
+−67. FR remains the only load-following fleet (0.74 / −40 / 0.67). *Update 2026-07-29 — the 2025 holdout
+lifted the ES censoring (544 observed negative hours): measured socle 0.93 / p5 bid −9.6 / floor 0.96.
+The borrowed −60 was 6× too deep — the Spanish fleet yields at ~−10 (right-censored at the market's own
+−15 floor); `_ANCHORS["ES"].socle_bid` re-set to −10. BE/CH confirmed out-of-sample (p5 −56.4 / −61.2 vs
+frozen −55 / −70). A/B on the full 2025 year: byte-identical output — with only 8 shallow model-ES
+negative hours the socle is never ridden, so the bid depth is inert until the ES surplus/level bias is
+fixed; the correction is preventive (a 6×-too-deep bid would print phantom −60s the moment surpluses
+fatten).*
+
+*ES surplus decomposition (2026-07-30, `scratchpad/es_surplus_decompose.py`, full-year 2025 diagnose):
+on the 556 obs-negative hours the model is NOT short of surplus — it prices 0.0 across the whole
+distribution (p10=p50=p90) with the ES `merchant` RES tranche marginal on 526 h (nuclear pseudo-unit
+30 h; gas/hydro only on obs-positive hours). Gross surplus before imports exists on just 153/544 h;
+the boundary is reached via the nuclear floor (4.8 GW) + French imports (FR>ES binding 40 %). The
+8-vs-556 count gap is therefore the **workbook 0.0 merchant-floor convention** — the same boundary
+artifact noted for NL — against genuinely shallow Spanish negatives (obs mean −2.1, p5 −9.2). Fix
+path: measured tranche floors from the 2025 revealed curtailment curve (a −1…−2 merchant floor alone
+flips ~526 h ⇒ count ~534/556 with roughly correct depth); queued with the per-zone
+curtailment-response measurement.* Implementation:
 `flexibility/neighbour_nuclear.py` — ~1 GW pseudo-unit split of each zone's nuclear block, κ floor +
 operating band + budgets + clamped xénon from the zone anchors; §4 fossil available standalone
 (`build_fossil_flex_spec`); per-zone F5 seam state in the backtest loop. No C6/C7 (French regime), no C4
@@ -298,3 +316,117 @@ neighbour mid-band ladders) before any FR count retune is meaningful; (3) within
 shape (monthly historical prices) is now measurable as a 14–28 € mean error. A κ/α_op refit on 2025
 is *not* warranted until (1)–(2) land — refitting frozen parameters against a structurally biased
 envelope would launder stack errors into behavioural ones.
+
+## Curtailment-response measurement, 2025 negative hours (the revealed RES ladder, per zone)
+
+`scratchpad/curtailment_response_2025.py` — per price-depth band: print mass, solar yield vs the
+±7-day same-hour envelope (F8-validated for solar), wind response vs its same-window median
+(slope-only), and the **still-producing volume at depth** (no potential estimate needed: production AT
+−150/−500 *is* the revealed price-insensitive stock). FR included as method reference — its known
+ladder reproduces (p50 −0.1 ≈ the merchant −0.01 rung; 11–14 GW OA-exempt still on at −50…−150).
+
+Two regimes, measured:
+
+**Shallow-market zones (ES).** All 544 prints between −15 and 0 (p50 −1.0); solar yield ≈ baseline
+even at depth (0.79/0.72/0.68 vs ref 0.72 — no measurable response in the observable range). The
+ladder is {merchant ≈ −1 : 370 h, subsidized ≈ −5…−10 : 174 h}. With the decomposition result (model
+sits at the 0.0 boundary on 526 h), the workbook fix is floor values, not volumes.
+
+**Deep-ladder zones (DE/BE, NL intermediate).**
+- **DE: solar yield RISES with depth (0.76→0.86, ref 0.77) — ~44 GW of German solar still producing
+  at ≤−150** (the rooftop/exempt-vintage stock, measured directly); wind is the responsive half
+  (resp 1.4 shallow → 0.25 at ≤−150, only 2–4 GW left). German deep prints are exempt-solar days
+  after responsive wind has already left the market. The model's DE tranches must carry tens of GW at
+  deep floors; its current under-print (235/573, min −10) lacks exactly this block.
+- **BE: solar rides through everything (yield 0.96 at ≤−150, 6.9 GW on at −462)**; offshore
+  green-certificate wind holds ABOVE its median through −150 (resp 1.15) and halves only below. The
+  −462 minimum is this stock's bid. BE currently has no scheme ladder in the workbook at all.
+- **NL: metered solar responds strongly (0.50→0.15 vs ref 0.72) but is a ~0.2 GW utility sliver —
+  the ~25 GW salderen/rooftop fleet is behind-the-meter, invisible in ENTSO-E generation** (it nets
+  demand; consistent with modelling it as a demand-side −500 tranche). SDE wind/solar rung validated:
+  106 h mass in [−50,−10) matches the SDE −20 floor; deep-exempt wind ~0.6–0.9 GW at ≤−50.
+
+Workbook implication set (measured, not yet applied): ES merchant floor 0.0 → −1 with a −5…−10
+subsidized rung (predicted count 8 → ~530/556); NL merchant floor → −2; DE deep-exempt tranche
+(tens of GW, floors −150…−500, vintage-decayed); BE ladder with the certificate stock (~7 GW solar +
+~1 GW offshore) at deep floors. FR ladder unchanged — its miss is depth *frequency* (needs the
+neighbour mid-band above), not ladder shape.
+
+## NL/DE under-reach decomposition (2025, post-measured-ladders)
+
+`scratchpad/nl_de_surplus_decompose.py` — same playbook as ES, on each zone's observed-negative hours.
+Two different diseases:
+
+**DE — boundary reached, trigger starved.** Model-DE reaches the boundary on 573/573 obs-negative
+hours (mean −0.4) with `market_premium` marginal on 355 — but pins at −0.0/0.0: the §51 trigger needs
+6 consecutive *strictly negative* hours to unlock the −20 rung, and nothing prints strictly negative
+because the DE merchant floor was still 0.0 (the one cell the measured-ladder pass missed; measured
+p50 −2.0). Chicken-and-egg: no negative prints → no runs → no trigger → no depth. German surplus is
+real (demand 50.1 / must-take 47.4 GW, p10 residual −3.4 GW). Fix applied: DE merchant → −2 (measured);
+open design item: vintage-correct trigger mix (the 2025 stock is 6h/4h/3h/1h blended — EEG 2017/2021 +
+Solarspitzengesetz — while the workbook carries a single 6h).
+
+**NL — the surplus does not exist in the inputs.** Model-NL prices ~88 (NL_gas_0 marginal 470/581 h),
+imports saturated inward (DE→NL 92 %, BE→NL 96 % binding), balance: demand 12.2 GW vs must-take
+**2.3 GW** — the ~26 GW rooftop/salderen fleet is invisible on BOTH sides of the ENTSO-E data (not in
+generation: behind-the-meter; not netted from load either, or negative-noon net load would collapse
+and it doesn't). No ladder can print what the balance cannot see. **Chantier: NL behind-the-meter PV
+reconstruction** (installed capacity × irradiance shape netted into the NL balance) — the NL analog of
+the RES-censoring work, and the gating item for NL's 35-vs-880 boundary gap.
+
+## 2025 campaign A/B ladder: floors → +DE floor → +BTM & vintage triggers (full-year gates)
+
+| zone | floors only | +DE merchant −2 | +NL BTM & vintage §51 | obs | boundary m<+5 (final) | o<+5 |
+|------|------------|-----------------|----------------------|-----|----------------------|------|
+| FR | 1311 | 1418 | 1636 | 510 | 2078 | 1066 |
+| DE_LU | 292 | 897 | 1115 | 573 | 2118 | 887 |
+| BE | 1194 | 1350 | 1688 | 516 | 2147 | 804 |
+| CH | 624 | 927 | 1120 | 303 | 1921 | 435 |
+| ES | 2808 | 2838 | 2899 | 556 | 3137 | 1458 |
+| NL | 6→35 | 74 | **1254** | 581 | **1992** | 873 |
+| IT_NORTH | 109 | 176 | 187 | 0 | 761 | 23 |
+
+**Mechanisms now demonstrably live**: NL prints its SDE −20 rung (min −20, from min −1/−2 pre-BTM — the
+reconstructed rooftop surplus exists and reaches the ladder); BE couples to it (BE min −2 → −20 via
+import of the Dutch floor); DE's vintage classes fire as designed (the exempt+6h majority rides
+through, count 897 → 1115 with *longer* episodes — FR mean episode 5.9 → 6.4 h — exactly what
+grandfathering less-triggerable stock should do). FR weekend share 43–49 %, episode ~6.4 vs 5.0 h.
+
+**Honest state of the misses, sharpened to two structural items**:
+1. **Regional boundary over-reach, now uniform ×2–2.7** (CH ×4.4, IT ×33): every zone spends
+   ~1900–2100 h at the RES-marginal boundary vs 435–1458 observed, and the model's boundary hours are
+   REGIONALLY SYNCHRONIZED (FR/DE/BE/CH within ±5 % of each other) while reality's zones decouple.
+   Prime suspect: flow-derived NTC / coincidence factors too generous exactly on surplus hours —
+   which would ALSO explain the missing scarcity tail (0 model hours >200 vs 20–162 observed;
+   imports shave the spikes the same way exports share the surplus) and the 15–29 € low means.
+   The two tails are plausibly ONE coupling problem.
+2. **Depth below −20 still absent** (model min −20 vs obs −118…−462): the deep rungs stand (−300/−500
+   with real volume) but model surpluses never exhaust the shallow+mid rungs — the censored-wind /
+   deep-surplus question, unchanged.
+NL refinement flagged: the BTM overshoot (boundary ×2.3, mean now 18.6 LOW vs exact pre-BTM) says the
+0.85-derate full-production addition over-injects — the self-consumed share may be partially netted in
+the load after all; a sunny-vs-cloudy noon-load regression would measure the true double-count split.
+
+## Regime-conditional NTC: implemented, gated, verdict — necessary physics, insufficient lever
+
+Measured basis (`scratchpad/border_decoupling_2025.py` / `border_regime_caps.py`): on the exporter's
+boundary hours, observed flows run at median 0–60 % of the static p99.5 cap (at-cap 0–6 %) while
+prices decouple 34–100 % — the flow-based domain shrinks with RES, which a static cap misses.
+Implementation: `assemble.regime_ntc` (regime = raw residual load < year-p20; cap = p95 of observed
+flow on regime hours, clamped to static; fundamentals-only ⇒ projection-valid) + per-window-hour
+arrays (`regime_cap_arrays`; the LP already broadcast time-varying caps). Real caps shrink hard where
+the biases live (FR>CH 2178→818, CH>FR 1318→188).
+
+**Gate A/B (full 2025): boundary masses −1…−9 % only (CH 1921→1800, NL 1992→1830), no scarcity tail,
+means <1.5 € moved.** The over-coupling is real in the data but is NOT what synchronizes the model's
+boundary hours: each zone's OWN fundamentals sit at the boundary ~2000 h — restricting exchange
+redistributes little when every zone is simultaneously long from home-grown surplus. Kept (measured,
+physically right, mildly positive everywhere, projection-valid) but demoted from "the lever" to
+"necessary realism". The ×2 boundary bias is therefore ZONE-LEVEL: too-frequent per-zone surplus at
+the bottom AND missing tightness at the top (0 model hours >200 vs 20–162 observed; means 15–29 low)
+— the two live suspects, in testable order: (1) the flat annual commodity anchor (2025 gas was
+front-loaded ~47 €/MWh in Q1 vs the 36 annual — winter SRMCs ~30 % too cheap ⇒ no winter scarcity,
+low means) — the queued monthly-commodity-shape item, now the top candidate; (2) the price-insensitive
+supply floor stack (κ·α rigidity + p10 must-run floors + must-take) overstating the bottom in every
+zone simultaneously (the p10-of-observed-generation floors include economically-motivated output, an
+upward-biased "must"-run).

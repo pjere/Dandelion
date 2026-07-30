@@ -46,3 +46,34 @@ def solar_uplift(gen: pd.DataFrame, prices: pd.Series | None) -> pd.Series:
     else:
         floor = 0.0
     return (dip - floor).clip(lower=0).rename("solar_uplift_mw")
+
+
+_BTM_DERATE = 0.85           # rooftop vs utility shape: orientation/pitch mix + soiling (physical prior;
+#                              cross-check: 27 GW BTM × NL solar CF ~0.115 × 0.85 ≈ 23 TWh/yr ≈ the CBS
+#                              statistical total 2025 that the ENTSO-E feed almost entirely lacks)
+_BTM_NETTED = 0.05           # fraction of rooftop production ALREADY netted in the ENTSO-E load series —
+#                              measured (scratchpad/nl_netting_regression.py, within month×hod×weekend
+#                              cells): φ = 0.066 (2024) / 0.037 (2025), se 0.003. The load is ~gross;
+#                              the wholesale addition is (1 − φ) × production.
+
+
+def btm_solar(gen: pd.DataFrame, installed_solar_mw: float) -> pd.Series:
+    """→ hourly MW of behind-the-meter solar to ADD to a zone's must-take RES (the NL salderen fix).
+
+    The NL ENTSO-E feed carries only the metered utility fleet (~0.2 GW mean vs 29.3 GW installed 2025)
+    and the load series does not net the rooftop fleet either (measured: net load does NOT collapse on
+    observed-negative noons) — the real Dutch surplus is invisible on BOTH sides of the balance
+    (2025 decomposition: model-NL prices ~88 on obs-negative hours, demand 12.2 vs must-take 2.3 GW).
+    Reconstruction: the metered utility series provides the zone's irradiance shape; the invisible
+    capacity (installed − utility p99.9) rides that shape at `_BTM_DERATE`. Year-correct via the
+    installed-capacity input (nearest-year fallback upstream). Returns an empty series when the metered
+    fleet is too small to carry a shape (<50 MW) or nothing is invisible."""
+    s = (gen[gen["tech"].isin(_SOLAR)].groupby("timestamp_utc")["gen_mw"].sum().asfreq("h"))
+    if s.dropna().empty:
+        return pd.Series(dtype=float)
+    utility_cap = float(s.quantile(0.999))
+    btm_cap = max(float(installed_solar_mw) - utility_cap, 0.0)
+    if utility_cap < 50.0 or btm_cap <= 0.0:
+        return pd.Series(dtype=float)
+    shape = (s / utility_cap).clip(lower=0.0, upper=1.0)
+    return (shape * btm_cap * _BTM_DERATE * (1.0 - _BTM_NETTED)).fillna(0.0).rename("btm_solar_mw")

@@ -66,3 +66,25 @@ def test_block_level_fleet_prints_a_negative_in_surplus():
     pr = out["prices"]["BE"]
     # committed floor ≈ κ·α_op·4 GW ≈ 2.66 GW > trough net load 0.7 GW → forced surplus → negative print
     assert pr.iloc[3] < 0
+
+
+def test_btm_solar_reconstructs_invisible_fleet_from_metered_shape():
+    """NL salderen fix: the metered utility sliver carries the irradiance shape; the invisible
+    capacity (installed - utility p99.9) rides it at the rooftop derate. Empty when nothing is
+    invisible or the metered fleet is too small to carry a shape."""
+    import numpy as np
+    import pandas as pd
+    import pytest
+    from dispatch_model.flexibility.res_potential import _BTM_DERATE, _BTM_NETTED, btm_solar
+
+    idx = pd.date_range("2025-06-01", periods=21 * 24, freq="h", tz="UTC")
+    shape = np.clip(np.sin((idx.hour - 6) / 12 * np.pi), 0, None)          # daylight bell, peak 1.0
+    gen = pd.DataFrame({"timestamp_utc": idx, "tech": "solar", "gen_mw": 400.0 * shape})
+    out = btm_solar(gen, installed_solar_mw=29_000.0)
+    assert not out.empty
+    peak = out[idx.hour == 12].mean()                                       # noon rides ~full shape
+    assert peak == pytest.approx((29_000.0 - 400.0) * _BTM_DERATE * (1 - _BTM_NETTED), rel=0.05)
+    assert float(out[idx.hour == 0].max()) == 0.0                           # dark hours contribute 0
+    assert btm_solar(gen, installed_solar_mw=300.0).empty                   # nothing invisible
+    tiny = gen.assign(gen_mw=gen["gen_mw"] * 0.05)                          # 20 MW fleet: no shape
+    assert btm_solar(tiny, installed_solar_mw=29_000.0).empty

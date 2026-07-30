@@ -137,6 +137,100 @@ def flow_derived_ntc(config: Config, year: int, coincident: bool = True) -> dict
     return _apply_ntc_floor(out)
 
 
+_REGIME_NTC_MEMO: dict = {}      # (db_path, year) → result; the measurement is deterministic per year
+#                                  and its full-year loads cost minutes — repeated flex backtests in one
+#                                  process (tests, probes) must not re-pay it.
+
+
+def regime_ntc(config: Config, year: int, base: dict) -> dict:
+    """Surplus-regime border caps: {"mask": {zone: hourly bool}, "caps": {(a,b): (reg_ab, reg_ba)}}.
+
+    The static caps over-couple exactly on surplus hours: measured 2024+2025, observed flows on the
+    exporter's low-residual-load hours run at a median 0-60 % of the p99.5 cap with an at-cap share of
+    0-6 %, while prices decouple across the border on 34-100 % of boundary hours — under flow-based
+    market coupling the exchange domain SHRINKS when RES is high (loop flows), the exact anti-correlation
+    a static cap misses. Result: the model's boundary hours are regionally synchronized (~2000 h in every
+    zone, ±5 %) where reality's spread 435-1458 (`scratchpad/border_regime_caps.py`).
+
+    Regime = the exporter's residual load (demand − must-take RES, raw data — deliberately NOT the
+    flex-uplifted window inputs, so the regime definition cannot drift with model changes) below its
+    year p20. Cap on regime hours = p95 of the observed flow on those hours (revealed capability: with
+    prices decoupled and flows below cap, the binding constraint IS the capability). Fundamentals-only
+    conditioning — projection-valid, no price leakage. Falls back to the static cap where the flow or
+    residual history is thin (GB has no load data post-Brexit)."""
+    from ..io.entsoe_hist import load_demand_hist, load_generation_hist
+    import sqlite3
+    memo_key = (config.resolve(config.section("data")["sqlite_path"]), int(year))
+    if memo_key in _REGIME_NTC_MEMO:
+        return _REGIME_NTC_MEMO[memo_key]
+    mt_techs = ("solar", "wind_onshore", "wind_offshore", "ror")
+    con = sqlite3.connect(config.resolve(config.section("data")["sqlite_path"]))
+    try:
+        df = pd.read_sql("SELECT ts_utc, series_key, value FROM entsoe_flows "
+                         "WHERE ts_utc >= ? AND ts_utc < ?",
+                         con, params=(f"{year}-01-01", f"{year + 1}-01-01"))
+    finally:
+        con.close()
+    df["ts"] = pd.to_datetime(df["ts_utc"], utc=True)
+    piv = df.pivot_table(index="ts", columns="series_key", values="value").fillna(0.0)
+    piv = piv.resample("1h").mean()
+
+    def flow_series(x, y):
+        cols = [f"{i}>{j}" for i in constituents(x) for j in constituents(y) if f"{i}>{j}" in piv.columns]
+        return piv[cols].sum(axis=1) if cols else pd.Series(dtype=float)
+
+    zones = {z for bd in NTC for z in bd}
+    mask = {}
+    for z in zones:
+        try:
+            cons = constituents(z)
+            dem = load_demand_hist(config, year, zones=cons)
+            g = load_generation_hist(config, year, zones=cons)
+        except Exception:                             # noqa: BLE001 — no data (GB) → no regime for z
+            continue
+        if dem.empty or g.empty:
+            continue
+        d = dem.groupby("timestamp_utc")["load_mw"].sum()
+        mt = (g[g["tech"].isin(mt_techs)].groupby("timestamp_utc")["gen_mw"].sum())
+        resid = (d - mt.reindex(d.index).fillna(0.0)).dropna()
+        if len(resid) < 1000:
+            continue
+        mask[z] = resid < resid.quantile(0.20)
+    caps = {}
+    for (a, b), (ab, ba) in base.items():
+        reg_ab, reg_ba = ab, ba
+        for direction, (x, y, cap_static) in enumerate((( a, b, ab), (b, a, ba))):
+            m = mask.get(x)
+            f = flow_series(x, y)
+            if m is None or f.empty:
+                continue
+            fr = f.reindex(m.index[m]).dropna()
+            if len(fr) >= 100:
+                reg = min(float(fr.quantile(0.95)), cap_static)
+                if direction == 0:
+                    reg_ab = reg
+                else:
+                    reg_ba = reg
+        caps[(a, b)] = (reg_ab, reg_ba)
+    out = {"mask": mask, "caps": caps}
+    _REGIME_NTC_MEMO[memo_key] = out
+    return out
+
+
+def regime_cap_arrays(borders: list, ntc: dict, rn: dict, T) -> dict:
+    """Per-window NTC arrays: the static cap everywhere, the regime cap on the EXPORTER's surplus
+    hours (per direction, per hour — the LP broadcasts scalars or arrays via `_as_time_array`)."""
+    out = {}
+    for (a, b) in borders:
+        ab, ba = ntc[(a, b)]
+        reg_ab, reg_ba = rn["caps"].get((a, b), (ab, ba))
+        ma, mb = rn["mask"].get(a), rn["mask"].get(b)
+        arr_ab = np.where(ma.reindex(T).fillna(False).to_numpy(), reg_ab, ab) if ma is not None else ab
+        arr_ba = np.where(mb.reindex(T).fillna(False).to_numpy(), reg_ba, ba) if mb is not None else ba
+        out[(a, b)] = (arr_ab, arr_ba)
+    return out
+
+
 def _month_prices(cm: CommodityModel, ts: pd.Timestamp) -> dict:
     pm = cm.monthly_prices(ts.year, ts.year)
     row = pm[(pm["date"].dt.month == ts.month)]

@@ -371,7 +371,20 @@ Per zone *z*, hour *t* of a weekly window (times `T`, |T| = n). Decision variabl
   ~780 s → ~110 s; results unchanged by construction.
 - **Neighbour-zone extension (post-F8, 2026-07-28):** `flexibility/neighbour_nuclear.py` — pseudo-unit
   rigidities for BE/CH/ES nuclear from **measured per-zone anchors** (near-must-run fleets: κ·α_op
-  0.96–0.99, socle bids −55…−70 — far stiffer than FR's load-following 0.67/−40), per-zone F5 seam state,
+  0.96–0.99, socle bids −55…−70 — far stiffer than FR's load-following 0.67/−40; *2026-07-29: the ES bid,
+  borrowed from BE/CH while ES depth was market-censored, re-measured on 2025's 544 observed negative
+  hours → −10, six times shallower — the Spanish fleet yields early; BE/CH anchors confirmed out-of-sample
+  on 2025, p5 −56.4/−61.2*), per-zone F5 seam state,
+- **2025 revealed-ladder campaign (2026-07-30):** measured tranche floors in `dispatch_res_schemes`
+  (ES merchant −1, NL −2, DE −2, DE fit −300, BE split gc_residential −500 / gc_offshore −300 — all from
+  `scratchpad/curtailment_response_2025.py`); **§51 triggers vintage-grandfathered**
+  (`scheme_evolution.vintage_trigger`: pre-2016 exempt / 6h / 4h / 3h / 1h per commissioning class,
+  sub-tranches `scheme@Nh`, `apply_oa_ladder` matches base names) replacing the market-year-wide
+  schedule; **NL behind-the-meter PV reconstruction** (`res_potential.btm_solar`, flex-gated): ~98 % of
+  the 29.3 GW Dutch solar fleet is invisible on both sides of the ENTSO-E balance — the metered utility
+  sliver carries the irradiance shape, the invisible capacity rides it at 0.85 derate (annual energy
+  cross-checks with the CBS statistical total). Calibration trail in FLEX_CALIBRATION_2024.md
+  (2025 sections: decompositions, boundary-mass metric, gate A/Bs).
   §4 fossil standalone builder, DE tranche volumes year-correct from the registry. BE/CH negative counts
   move off zero for the first time (0 → double digits; one calibration hit CH 50/50 exactly). Locked by
   A/B: unit-level DE stays opt-in (2024-harmful), fired-tranche floor = the German-law 0.0. Honest

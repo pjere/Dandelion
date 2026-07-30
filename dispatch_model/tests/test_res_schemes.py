@@ -25,9 +25,10 @@ def test_schemes_load_and_shares_normalise():
         assert abs(sum(t["share"] for t in trs) - 1.0) < 1e-6, zone
     de = {t["scheme"]: t for t in s["DE_LU"]}
     assert de["market_premium"]["floor"] < 0 and de["market_premium"]["trigger"] == 6  # §51 6h (2019)
-    assert de["merchant"]["floor"] == 0.0 and de["merchant"]["trigger"] == 0
+    assert de["merchant"]["floor"] == -2.0 and de["merchant"]["trigger"] == 0  # measured 2025 (p50 −2.0)
     be = {t["scheme"]: t for t in s["BE"]}
-    assert be["green_certificate"]["trigger"] == 0                 # GCs paid regardless → no §51
+    assert be["gc_residential"]["trigger"] == 0                    # GCs paid regardless → no §51
+    assert be["gc_residential"]["floor"] == -500.0 and be["gc_offshore"]["floor"] == -300.0  # measured 2025
 
 
 # --- §51 run-length trigger -------------------------------------------------

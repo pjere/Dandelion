@@ -139,7 +139,9 @@ def apply_oa_ladder(schemes: list[dict], ladder: dict) -> list[dict]:
     lo, hi = float(ladder["market_floor"]), float(ladder["market_cap"])
     out = []
     for t in schemes:
-        bid = _LADDER_BID.get(t["scheme"])
+        # match on the base scheme name: scheme_shares may emit vintage sub-tranches ("cr@6h" style
+        # suffixes for §51-analog trigger classes) — the FR ladder reprices them all identically
+        bid = _LADDER_BID.get(str(t["scheme"]).split("@")[0])
         if bid is None:
             out.append({**t, "floor": min(max(float(t["floor"]), lo), hi)})
         else:
