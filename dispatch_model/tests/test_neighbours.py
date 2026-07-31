@@ -51,4 +51,29 @@ def test_german_fuel_switch_2022(cfg):
     b19, b22 = by_tech(2019), by_tech(2022)
     assert abs(b19["coal"] - b19["gas"]) < 12                     # 2019: coal≈gas (close competition)
     assert b22["coal"] < b22["gas"] and b22["lignite"] < b22["gas"]   # 2022 gas shock → switch to coal/lignite
-    assert b22["gas"] > 250
+    # measured monthly history: Jan-2022 gas was 85.8 (the pre-invasion lull, not the generic winter
+    # premium's 145) — the SRMC is ~210; the crisis peak moved to August (gas 240 → SRMC ~450+)
+    assert b22["gas"] > 180
+    m_aug = {c: cm.monthly_prices(2022, 2022).pipe(
+        lambda pm: pm[(pm.commodity == c) & (pm.date.dt.month == 8)].price.iloc[0])
+        for c in ["gas", "co2", "coal", "oil"]}
+    assert st.assign(s=srmc(st, m_aug)).groupby("tech")["s"].mean()["gas"] > 400
+
+
+def test_participation_caps_measures_p999_of_observed_generation(monkeypatch):
+    """Revealed participation: the ceiling is the annual p99.9 of observed generation per thermal
+    tech; thin series (<1000 h or <300 MW) are excluded."""
+    import numpy as np
+    import pandas as pd
+    from dispatch_model.neighbours import blocks
+
+    idx = pd.date_range("2025-01-01", periods=5000, freq="h", tz="UTC")
+    rng = np.random.default_rng(7)
+    gen = pd.concat([
+        pd.DataFrame({"timestamp_utc": idx, "tech": "gas", "gen_mw": rng.uniform(0, 10_000, len(idx))}),
+        pd.DataFrame({"timestamp_utc": idx, "tech": "oil", "gen_mw": rng.uniform(0, 100, len(idx))}),
+    ])
+    monkeypatch.setattr(blocks, "load_generation_hist", lambda cfg, year, zones=None: gen)
+    caps = blocks.participation_caps(None, "DE_LU", 2025)
+    assert abs(caps["gas"] - 9990) < 30                    # ~p99.9 of U(0, 10000)
+    assert "oil" not in caps                               # <300 MW: too thin to be a ceiling

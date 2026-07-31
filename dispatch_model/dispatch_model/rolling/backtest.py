@@ -70,7 +70,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
                  use_remit_nuclear_avail: bool = False, de_unit_level: bool | None = None,
                  nuclear_curve: bool = True, hydro_sdp_level: bool = True,
                  diagnose: bool = False, flexibility: bool | None = None,
-                 write_lake: bool = True, enable_storage: bool = False) -> dict:
+                 write_lake: bool = True, enable_storage: bool | None = None) -> dict:
     """`flexibility` opts into the FLEX plant-operating-rigidity module (per-reactor FR nuclear stack with
     C1/C2/C3/C5 rigidities → endogenous negatives; see ``flexibility.fr_nuclear``). Default None reads
     ``flexibility.enabled`` from config.yaml (off unless set). When on, the FR nuclear tranche surrogate
@@ -234,17 +234,32 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         # measured must-run floors (flex-gated): p10 of observed generation per tech-month replaces the
         # chp×heat_factor heuristic, which forced ~10 GW of phantom German gas on surplus hours — the
         # dominant share of DE's long bias (see blocks.observed_mustrun_floors).
-        from ..neighbours.blocks import measured_chp_mw, observed_mustrun_floors
+        from ..neighbours.blocks import measured_chp_mw, observed_mustrun_floors, participation_caps
         nb_mustrun = {z: observed_mustrun_floors(config, z, year) for z in neigh if measured_chp_mw(z)}
-        # storage in the LP (EXPLICIT opt-in, `enable_storage`): PSP from the measured stack caps + BESS
-        # 2024 seeds (flexibility.storage). NOT auto-enabled under flex: at nameplate parameters the
-        # frictionless weekly arbitrage ANNIHILATES the region's negative tail (A/B probe I vs H: DE
-        # 70→0 vs 70 obs, FR 102→3, all zones →0; FR modulated energy 32→23 TWh) — model surpluses sit
-        # just above the zero-absorbers, so uncosted pumping eats them, while reality's negatives coexist
-        # with real pumping (bigger true surpluses + PSP scheduling frictions). Calibration path: measured
-        # per-zone pumping envelopes from observed PSP data, then derated power/energy — until then the
-        # machinery fails its negative-count gate and stays off.
-        if enable_storage:
+        # revealed thermal participation (flex-gated): nameplate × 0.95 offers phantom capacity — the
+        # market fleet saturates at the annual p99.9 of observed generation (validated as a true
+        # ceiling on >150/>200 €/MWh hours: DE gas 0.51 of nameplate, ES 0.50, NL 0.60, BE 0.66;
+        # the excess is mothballed/Netzreserve stock that cleared every model scarcity hour at
+        # mid-stack SRMC). Clamp each thermal tech's block rows to min(nameplate, revealed ceiling).
+        for z in neigh:
+            caps = participation_caps(config, z, year)
+            st = nb_stack[z]
+            for tech, ceil in caps.items():
+                rows = st["tech"] == tech
+                tot = float(st.loc[rows, "capacity_mw"].sum())
+                if tot > ceil > 0:
+                    st.loc[rows, "capacity_mw"] *= ceil / tot
+        # storage in the LP (`enable_storage=None` → ON under flex since the 2025 re-gate): PSP from
+        # the measured envelopes + BESS 2024 seeds (flexibility.storage). History: at nameplate
+        # parameters the frictionless arbitrage ANNIHILATED the thin 2024-era negative tail (probe I:
+        # DE 70→0) and storage stayed opt-in — but once the surpluses became realistic (measured
+        # ladders, BTM-NL, participation ceilings), the re-gate PASSED decisively: FR 530/510 strict
+        # and 1042/1066 boundary (essentially exact), CH scarcity 248→39/52 and IT 192→34/43 (the
+        # excluded PSP was exactly their over-print), no annihilation (FR keeps 530 vs the 3 of the
+        # 2024 probes). Known residual: discharge is still frictionless — observed PSP discharge
+        # utilization is only 32–54 % in the top price quartile (psp_envelopes) and the discharge-side
+        # derate is NOT yet encoded, so model peaks are shaved slightly too hard (DE 44 vs 162 h >200).
+        if enable_storage or (enable_storage is None and flex_on):
             from ..flexibility.storage import storage_spec
             from ..io.entsoe_hist import load_installed_capacity
             psp_mw["FR"] = float(load_installed_capacity(config, "FR", year).get("hydro_psp", 0.0))

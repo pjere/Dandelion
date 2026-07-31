@@ -41,7 +41,9 @@ def test_merit_order_and_fuel_switch(stack):
     # 2022 gas shock flips gas above coal (endogenous fuel switching)
     by22 = st.assign(s=srmc(st, _month(cm, 2022))).groupby("tech")["s"].mean()
     assert by22["coal"] < by22["gas"]
-    assert by22["gas"] > 250                                       # crisis-level gas SRMC
+    assert by22["gas"] > 180                                       # crisis-level gas SRMC (measured
+    # monthly history: Jan-2022 gas = 85.8 €/MWh_th, the pre-invasion lull — the generic winter
+    # premium's ~145 was fiction; the crisis peak is August, asserted in test_neighbours)
 
 
 def test_efficiency_dispersion_gives_slope(stack):

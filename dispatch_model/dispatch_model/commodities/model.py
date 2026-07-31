@@ -105,11 +105,21 @@ class CommodityModel:
         dates = pd.date_range(f"{start_year}-01-01", f"{end_year}-12-01", freq="MS", tz="UTC")
         yr = dates.year.to_numpy(); mo = dates.month.to_numpy()
         n = len(dates)
-        # deterministic level × seasonal shape
+        # deterministic level × seasonal shape; backtest years with measured monthly history take the
+        # MEASURED within-year shape (normalized mean-1, so the calibrated annual anchors are preserved)
+        # instead of the generic climatology — see commodities.monthly_hist (2025's front-loaded gas,
+        # 2022's within-year explosion). Oil has no measured history and keeps the generic shape.
+        from .monthly_hist import measured_shape
         base = {}
         for c in COMMODITIES:
             lvl = _interp_annual(self.annual[c], yr)
-            base[c] = lvl * np.array([self.shape[c][m - 1] for m in mo])
+            mult = np.array([self.shape[c][m - 1] for m in mo], float)
+            for y in np.unique(yr):
+                ms = measured_shape(c, int(y))
+                if ms:
+                    sel = yr == y
+                    mult[sel] = [ms.get(int(m), self.shape[c][m - 1]) for m in mo[sel]]
+            base[c] = lvl * mult
         dev = {c: np.zeros(n) for c in COMMODITIES}
         if stochastic:
             dev = self._ou_deviations(n, draw, seed)

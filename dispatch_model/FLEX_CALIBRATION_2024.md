@@ -430,3 +430,91 @@ low means) — the queued monthly-commodity-shape item, now the top candidate; (
 supply floor stack (κ·α rigidity + p10 must-run floors + must-take) overstating the bottom in every
 zone simultaneously (the p10-of-observed-generation floors include economically-motivated output, an
 upward-biased "must"-run).
+
+## Measured monthly commodities: the null A/B that eliminated commodity levels entirely
+
+Monthly TTF/EUA/coal 2019-01–2026-07 measured twice (in-browser TradingEconomics scrape + the user's
+daily-based CSV export — identical ±0.01 over 2019–2025-07; CSV canonical) and wired as normalized
+within-year shapes × the calibrated annual anchors (`commodities/monthly_hist.py`). **Gate A/B: null**
+(means +0.2–0.3, counts identical, scarcity unchanged) — and the diagnosis of the null is the finding:
+`PriceResolver.explain` shows the backtest was ALREADY serving observed monthly gas/coal/oil (World
+Bank series, 2014-01–2025-12) — the "flat annual anchor" premise behind the winter-SRMC hypothesis was
+wrong; only the CO2 shape was genuinely new (EUA has no open observed source — that part stays live,
+plus gas/coal from 2026-01 where the WB series ends). **Consequence — stronger than the hypothesis it
+killed: with correct monthly fuel prices all along, the missing scarcity tail (0 model hours >200 vs
+20–162 observed) and the 15–29 € low means CANNOT be commodity levels. The single surviving suspect
+for both is the SUPPLY side of the stack: availability too high / the must-run floor stack / import
+tranches at the top / understated demand — winter gas at 48 €/MWh_th implies CCGT SRMC ≈ 115+, yet
+model DE winter means sit at 67 with zero spikes: cheap capacity is clearing tight hours that reality
+priced at 200+.**
+
+## Scarcity-side decomposition (2025 obs>200 hours) — the top tail splits into two mechanisms
+
+`scratchpad/scarcity_decompose_2025.py`, full-year diagnose, per zone on the observed >200 hours
+(DE 162 / NL 127 / BE 74 / CH 52 / FR 31 / ES 20; 56–96 % winter, ~half evening-peak):
+
+**The model sits at its top thermal rungs with headroom** — marginal = the zone's least-efficient gas
+blocks (gas_1/gas_2, coal_2, oil) at SRMC ≈ 120–165, `set_by_constraint` ≈ 0 % (a partially-loaded
+block carries the price — spare thermal exists at ~150 while reality clears 230–270 mean, 580 max).
+Only CH behaves (5 h >200, max 201): its scarcity is carried by hydro WATER VALUES + imports binding
+90–96 % — the one zone whose top tail has a working mechanism.
+
+**Mechanism 1 — thermal participation overstated ~2× on tight hours (structural, measurable).** The
+observed generation mix ON those hours reveals the real fleet: DE ran 15.3 GW gas at 250+ €/MWh out of
+a ~30 GW fleet the model offers at 0.95 availability (~12 GW model excess; real German tight-hour
+supply was 52 GW domestic + 13 GW imports for 65 GW demand); NL ran 9.1 of ~15 GW; BE 4.5 of ~7 GW.
+At 250 €/MWh every AVAILABLE CCGT runs — the shortfall IS revealed non-participation (mothballing,
+Netzreserve/strategic reserves outside the market, winter outages). Fix path: revealed-participation
+derate per (zone, tech) measured on tight hours — same method as the whole campaign.
+
+**Mechanism 2 — the 200+ prints themselves are the step-vii markup's mandate.** Even with correct
+participation, SMC tops out near the marginal thermal cost (~150–165); reality's 250–580 on such hours
+is scarcity rent above SRMC — exactly the tightness terms of the SMC→spot markup layer, which is
+fitted on 2019 ONLY and not applied in backtest gates. The multi-year markup refit (2019+2022–2025)
+was blocked on missing panel inputs — **the 2025/26 backfill has now unblocked it.**
+
+Also mirrored here: FR is nuclear-marginal with headroom on half its tight hours (set_by_constraint
+100 % — export borders carry the price), and the import side of tight hours does NOT show the
+over-coupling seen on surplus hours (DE imports bind 64 %, reality imported 13 GW — direction right).
+
+## Revealed-participation thermal ceilings: the scarcity tail exists, both tails move together
+
+`blocks.participation_caps` (p99.9 of observed generation per thermal tech — validated as a true
+ceiling by saturation at >150/>200 €/MWh: DE gas 0.51 of nameplate, ES 0.50, NL 0.60, BE 0.66, stable
+2024/2025) clamps the neighbour stacks flex-gated. Full-2025 gate A/B (prev → now, obs):
+
+| zone | h>200 | mean | strict neg | boundary m<+5 |
+|------|-------|------|-----------|----------------|
+| FR | 0 → **28** (31) | 44.9 → 49.7 (61.0) | 1627 → 1413 (510) | 2043 → 1858 (1066) |
+| DE_LU | 0 → **200** (162) | 67.4 → **83.5** (89.4) | 1040 → 899 (573) | 2089 → 1893 (887) |
+| BE | 0 → **74** (74 — exact) | 57.4 → 67.4 (82.6) | 1705 → 1510 (516) | 2124 → 1934 (804) |
+| CH | 24 → 248 (52) | 73.8 → 84.0 (101.8) | 950 → 845 (303) | 1801 → 1651 (435) |
+| ES | 0 → 67 (20) | 50.3 → **62.8** (65.2) | 2911 → 2317 (556) | 3141 → 2538 (1458) |
+| NL | 0 → 187 (127) | 70.7 → **88.3** (86.9) | 1153 → 998 (581) | 1830 → 1526 (873) |
+| IT_NORTH | 52 → 192 (43) | 99.4 → 103.4 (115.9) | 122 → 118 (0) | 693 → 679 (23) |
+
+**Both tails moved toward observed simultaneously** — the signature of a true structural fix, not a
+trade-off: scarcity counts now exist and three zones pass (±30 %: BE 74/74 exact, FR 28/31, DE
+200/162), means closed most of the 15–29 € hole (NL +1.4 essentially exact, ES −2.4, DE −5.9), and
+the boundary masses/strict counts all dropped 10–20 % as the phantom fleet stopped inflating supply.
+Remaining, sharply visible: (i) import-fed zones over-print scarcity (CH 248/52, IT 192/43 — their
+neighbours' clamped thermal starves them harder than reality did; likely interacts with tight-hour
+import caps), (ii) residual mean gaps BE −15 / CH −18 / IT −12 / FR −11 are the step-vii markup's
+mandate (SMC vs spot) — the multi-year refit (2019+2022–2025 panel, now unblocked) is the designed
+consumer, (iii) the surplus side still over-reaches ~×1.7-2 and depth below −20 stays absent (wind
+censoring / deep-surplus, unchanged).
+
+## Storage re-gate on the realistic-surplus model: PASSED — default-on under flex
+
+The machinery that failed its 2024 gate (frictionless absorption annihilated thin surpluses: DE 70→0)
+re-gated on the current model (`scratchpad/f7_gate_2025_storage.py`; measured PSP envelopes + BESS
+seeds). Storage-off → storage-on (obs): FR strict 1413→**530 (510)** and boundary 1858→**1042
+(1066)** — essentially exact on the holdout year; CH >200 248→**39 (52)** and IT 192→**34 (43)** (the
+excluded 6.7/7 GW PSP was precisely their scarcity over-print — real CH ran 3 GW PSP and EXPORTED on
+its tight hours); ES boundary ×1.13, NL count ×1.29; NO annihilation (FR keeps 530 negatives vs the
+3 of the 2024-era probes — coexistence now proven in backtest). `enable_storage=None` → on under
+flex; explicit False retains the A/B. Named residual: the discharge side is still frictionless —
+observed PSP discharge utilization is 32–54 % in the top price quartile (measured, psp_envelopes)
+but not yet encoded, so model peaks shave slightly hard (DE 44 vs 162 h >200, BE 21/74, NL 44/127);
+a measured discharge derate is the next dial, then the multi-year markup refit carries the residual
+mean gaps (BE −18, CH −17, FR −13, IT −14).

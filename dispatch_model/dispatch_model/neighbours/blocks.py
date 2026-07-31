@@ -238,6 +238,25 @@ def observed_mustrun_floors(config: Config, zone: str, year: int) -> dict[int, d
     return out
 
 
+def participation_caps(config: Config, zone: str, year: int) -> dict[str, float]:
+    """→ {tech: MW ceiling} — the REVEALED market-participating thermal fleet (p99.9 of observed gen).
+
+    Nameplate × 0.95 offers phantom capacity: at >150 €/MWh every available unit runs, yet the p95 of
+    observed generation on those hours saturates far below nameplate and EQUALS the annual p99.9
+    (measured 2024+2025, `scratchpad/participation_measure.py`: DE gas 19.4/36.7 GW = 0.51, ES gas
+    0.50, NL 0.60, BE 0.66; stable across years and thresholds). The shortfall is mothballed /
+    strategic-reserve (Netzreserve) / long-outage capacity that never bids — offering it cleared
+    every observed scarcity hour at mid-stack SRMC (model 0 h >200 vs 20–162 observed). The ceiling
+    is data-driven and year-correct; the caller clamps block capacity to min(nameplate, ceiling)."""
+    g = load_generation_hist(config, year, zones=constituents(zone))
+    out: dict[str, float] = {}
+    for tech in ("gas", "coal", "lignite", "oil"):
+        s = g[g["tech"] == tech].groupby("timestamp_utc")["gen_mw"].sum()
+        if len(s) >= 1000 and float(s.max()) >= 300.0:
+            out[tech] = float(s.quantile(0.999))
+    return out
+
+
 def neighbour_netload(config: Config, zone: str, year: int) -> pd.DataFrame:
     """→ hourly [timestamp_utc, load_mw, musttake_res_mw, netload_mw] from ENTSO-E actuals.
 

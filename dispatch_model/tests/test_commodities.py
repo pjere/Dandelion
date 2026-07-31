@@ -15,12 +15,21 @@ def test_deterministic_levels_and_seasonality():
     df = m.monthly_prices(2019, 2024)
     assert abs(_gas(df, 2022).mean() - 123.0) < 5           # crisis year seeded from public average
     assert abs(_gas(df, 2019).mean() - 13.5) < 2            # cheap-gas year
-    # winter gas premium
-    g22 = df[(df["commodity"] == "gas") & (df["date"].dt.year == 2022)]
-    jan = g22[g22["date"].dt.month == 1]["price"].mean()
-    jul = g22[g22["date"].dt.month == 7]["price"].mean()
-    assert jan > jul
+    # measured within-year shape (monthly_hist): 2022's explosion peaked in SUMMER (Aug ≈ 2× Jan) —
+    # the generic winter-premium climatology is overridden for years with measured history
+    g22 = _gas(df, 2022)
+    aug = df[(df["commodity"] == "gas") & (df["date"].dt.year == 2022) & (df["date"].dt.month == 8)]
+    jan = df[(df["commodity"] == "gas") & (df["date"].dt.year == 2022) & (df["date"].dt.month == 1)]
+    assert aug["price"].iloc[0] > 2 * jan["price"].iloc[0]
     assert (df["price"] > 0).all()
+
+
+def test_projection_years_keep_the_generic_winter_premium():
+    df = CommodityModel().monthly_prices(2030, 2030)        # no measured history → climatology
+    g = df[df["commodity"] == "gas"]
+    jan = g[g["date"].dt.month == 1]["price"].iloc[0]
+    jul = g[g["date"].dt.month == 7]["price"].iloc[0]
+    assert jan > jul
 
 
 def test_co2_rises_to_2046():
