@@ -518,3 +518,211 @@ observed PSP discharge utilization is 32–54 % in the top price quartile (measu
 but not yet encoded, so model peaks shave slightly hard (DE 44 vs 162 h >200, BE 21/74, NL 44/127);
 a measured discharge derate is the next dial, then the multi-year markup refit carries the residual
 mean gaps (BE −18, CH −17, FR −13, IT −14).
+
+## PSP discharge friction: REFUTED — no storage dial can restore the missing spikes
+
+The named residual after the storage re-gate (peaks shaved: DE 44 vs 162 h >200) was to be closed by
+encoding the measured "observed PSP discharge lands only 32–54 % in the top price quartile" as a
+discharge-side friction. A 9-agent investigation (4 independent measurement angles → a measured
+two-tranche design → 4 adversarial lenses) **refuted the premise; all four lenses returned fatal.**
+No change was made. Three independent proofs:
+
+1. **Reality discharges MORE than the model at the top.** On 2025 hours >200 €/MWh observed PSP ran
+   at 0.93–1.12× the LP's own power envelope (DE 4297 MW vs 4600, FR 3696 vs 3300, CH 2958 vs 2800,
+   ES 2724 vs 2700; per-hour maxima 1.14–1.45×), and delivered up to 1.20–1.54× the measured daily
+   *energy* envelope on the tightest days. There is no withholding at the top to encode.
+2. **NL falsifies storage as the cause outright.** NL has **zero installed PSP** (`hydro_psp` = 0.0;
+   its entire storage is one 450 MW / 0.9 GWh BESS unit) yet shows the same shortfall as PSP-rich DE
+   (44/127 vs 44/162). 450 MW cannot shave 83 spike hours.
+3. **Direct LP experiment.** Any withheld tranche offers *below* 200 €/MWh (measured offer points:
+   ES 38, FR 93, BE 145, DE 142–162, CH 128–168), so in any hour clearing above 200 both tranches are
+   fully dispatched and supply above 200 is unchanged **by construction**: sweeping the tranche VOM
+   from 0 to 1000 €/MWh left h>200 fixed at 5 and h>150 at 6, at every value.
+
+Two further defects would have made the change actively harmful: the weekly SoC pin locks discharge
+and charge at 1:1.316, so throttling discharge withdraws pumping one-for-one — costing FR ~21 % of its
+negative-hour absorption, in the zone already at 530/510; and an absolute €/MWh threshold does not
+transfer (the tranche is *dead* — 0 h/yr — in 2019 and a *no-op* — 6381 h/yr — in 2022, the same
+non-transfer this campaign recorded in `0a435f6`). The diagnosis motivating it was also wrong about
+the model: the weekly SoC pin gives the LP ~52 water values a year, so its own offer curve is already
+a ramp (a weekly top-k proxy reproduces the observed curve to L1 0.10–0.14 vs 0.43–0.82 for the
+assumed step) — the gap the tranche was sized to remove is ~0.1 of envelope, not 0.4–0.65.
+
+**The "32–54 % in the top quartile" statistic is a composition artifact** of a heterogeneous fleet
+(dozens of basins with different water values summing to a smooth aggregate offer), not evidence of
+retention. **Consequence: the scarcity residual is not storage.** It belongs at the top of the merit
+order — peaker VOM ceilings, the #83 adequacy-block pricing, NTC at peak — and in the step-vii markup
+(scarcity rent above SRMC), whose multi-year refit the backfill has unblocked.
+
+**Model-side confirmation** (`scratchpad/storage_vs_observed_probe.py`, 9 winter weeks of 2025, the
+model's own solved storage primal — the diagnostic `run_backtest` now returns as `res["storage"]`):
+
+| zone | obs h>200 | model discharge @tight | obs PSP @tight | ratio | model EFPH | obs EFPH |
+|------|-----------|------------------------|----------------|-------|-----------|----------|
+| DE_LU | 58 | 4065 MW | 4262 MW | **0.95** | 156 | 244 |
+| CH | 34 | 1984 | 2904 | **0.68** | 104 | 478 |
+| ES | 16 | 2835 | 2749 | 1.03 | 282 | 528 |
+| FR | 28 | 2542 | 3806 | **0.67** | 185 | 371 |
+| BE | 45 | 542 | 404 | 1.34 | 185 | 132 |
+| NL | 53 | 255 | — (no PSP) | — | 185 | 0 |
+
+On the hours the model fails to price, it discharges **less** than reality did in the three big PSP
+zones (CH 0.68, FR 0.67, DE 0.95) and cycles far less energy over the window everywhere (EFPH 104–282
+model vs 132–528 observed). A discharge friction would push both further from observed while — per the
+LP sweep — leaving h>200 untouched. Four independent confirmations now: reality's envelope
+utilization at the top, NL's zero-PSP counterexample, the 0→1000 €/MWh VOM sweep, and the model's own
+solved dispatch. **The under-cycling is itself a finding**: the LP is more conservative with storage
+than the real fleet, so if anything the storage envelopes are tight, not loose — which reinforces that
+the scarcity residual lives at the top of the merit order and in the step-vii markup, not here.
+
+## Multi-year markup refit: FAILS out-of-sample — the residual is no longer markup-shaped
+
+The scarcity decomposition placed the residual mean gaps and the missing >200 hours with the step-vii
+markup, whose multi-year refit the 2025/26 backfill unblocked. Five full-year flex-on backtests
+(2019/2022/2023/2024/2025, `scratchpad/markup_panel_runs.py`, `write_lake=False` so the flag-off
+golden artifact is untouched) then a leave-one-year-out evaluation of all three shipped variants
+(`scratchpad/markup_refit.py`). **Result: no variant helps.**
+
+*Scope, verified:* the panel is genuinely the five years. A direct gate computation (median ratio in
+[0.56, 1.8], corr ≥ 0.2) keeps every zone-year except FR-2024 (ratio 0.28 — the model's FR median
+collapses under storage + ladders, worth its own look), and the drivers align for the old years
+(8735 SMC hours in 2019/2022). The per-year rows for 2019/2022/2023 were lost to console-output
+truncation, not absent from the fit — the totals prove their presence: 33 173 observed hours >200
+across held-out zone-years can only come from the 2022 crisis year.
+
+| variant | mean ΔMAE out-of-sample | h>200 fitted / raw SMC / observed |
+|---------|------------------------|-----------------------------------|
+| regression ×0.5 (shipped default) | **+0.15** (no-op) | 32273 / 32658 / 33173 |
+| regression ×1.0 | +3.65 (harmful) | 32364 |
+| monotone quantile map | +6.13 (harmful) | 32442 |
+
+**The markup does not deliver scarcity rent**: every variant produces FEWER hours >200 than the raw
+SMC already does (32273–32442 vs 32658, observed 33173). The hypothesis that the markup would recover
+the missing spikes is refuted, not merely unproven.
+
+**Why it cannot work — the wedge sign-flips.** Mean (observed − SMC) per zone-year:
+
+| zone | 2019 | 2022 | 2023 | 2024 | 2025 |
+|------|------|------|------|------|------|
+| FR | +2 | +71 | +16 | +22 | +13 |
+| ES | +4 | +23 | +4 | +5 | +2 |
+| DE_LU | −3 | +78 | +5 | +1 | +10 |
+| BE | −4 | +47 | +15 | +3 | +18 |
+| CH | −10 | +14 | **−18** | **−14** | +17 |
+| NL | **−32** | — | — | −2 | +4 |
+| IT_NORTH | −1 | **−19** | −7 | +10 | +14 |
+
+Five of seven zones flip sign. **A markup cannot legitimately be negative** — it represents bidding
+above short-run marginal cost (start-up recovery, unit commitment, scarcity rent), all non-negative by
+construction. Where the model prices *above* observed the cause is a dispatch level error, and fitting
+a regression to absorb it launders dispatch defects into a behavioural parameter that is then carried
+into every projection (the mechanism behind the −68 €/MWh markups in this module's own history). A
+function trained where CH needs −14 cannot serve a year where CH needs +17.
+
+**Reading — this is a campaign success, not a failure.** The markup was designed in 2019 when SMC sat
+systematically €12–20 below spot; the structural fixes since (participation ceilings, storage, measured
+ladders, BTM-NL, vintage triggers) have absorbed that systematic wedge INTO the dispatch, leaving a
+residual that is zone-year-specific and sign-flipping — i.e. remaining dispatch error, not behaviour.
+**Recommendation: do not ship a multi-year refit.** Keep the existing model for projection continuity,
+and treat the negative-wedge zone-years as the dispatch defect list they are — CH first (negative in
+three of five years; import-dependent and hydro-priced, the two hardest things in this model).
+
+## Multi-year re-gate: the campaign was validated on 2025 alone, and it regressed 2024/2019
+
+Re-scoring the saved panel SMC (no new solves) against 2024 — **the year the frozen calibration was
+built on, where F7 passed at FR 335 model / 352 observed (−5 %)** — and 2019:
+
+| zone | 2024 m_neg / o_neg | 2024 median m/o | 2019 m_neg / o_neg | 2019 mean m/o |
+|------|--------------------|-----------------|--------------------|---------------|
+| FR | **891 / 352** | **16.3 / 58.5** | 54 / 27 | 37.2 / 39.5 |
+| DE_LU | 305 / 457 | 87.3 / 79.6 | 426 / 210 | 40.5 / 37.7 |
+| BE | 822 / 403 | 82.2 / 71.5 | 3 / 71 | 43.4 / 39.3 |
+| CH | 9 / 292 | 88.9 / 75.6 | 0 / 17 | 51.4 / 40.9 |
+| ES | 1645 / 247 | 71.7 / 64.0 | 0 / 0 | 43.9 / 47.7 |
+| NL | 823 / 458 | 88.7 / 80.0 | 0 / 3 | **73.6 / 41.2** (222 h >200 vs 0 obs) |
+
+FR now over-prints **2.5× on its own calibration year** (891 vs the F7 gate's 335) with its median
+collapsed to 16.3 against 58.5 — i.e. far too much mass at the bottom — and NL-2019 is badly broken
+(mean +32, 222 scarcity hours where reality had none).
+
+**This is the mirror image of the failure that launched the campaign.** The campaign began because the
+2024-frozen calibration did not transfer to 2025; every change since has been gated on 2025 alone, and
+the result is a model tuned to 2025 that has given back 2024 and 2019. The 2025 gains are real and
+measured, but they were partly bought, and no multi-year gate existed to notice. **Process fix: the
+gate must be multi-year from here on** — 2025 results alone are not evidence a change is right.
+
+Bisection in flight (`scratchpad/campaign_bisect_2024.py`): 2024 re-run with each campaign feature
+disabled in turn (storage, regime NTC, participation ceilings, NL BTM, vintage triggers). Prior
+suspicion is the **regime NTC**, which restricts FR exports exactly on surplus hours — the mechanism
+most directly capable of manufacturing FR negatives, and the one change already demoted once (its own
+2025 A/B moved boundary masses only −1…−9 %, so it was kept on physical grounds rather than measured
+gain).
+
+**Bisection result — four changes exonerated, one convicted.** 2024 re-run with each campaign feature
+disabled in turn (`scratchpad/campaign_bisect_2024.py`, FR negatives against 352 observed):
+
+| variant | FR | DE_LU | BE | CH | ES | verdict |
+|---------|----|-------|----|----|----|---------|
+| baseline (all on) | 891 | 305 | 822 | 9 | 1645 | — |
+| **no regime NTC** | **414** | 290 | **508** | 58 | **1342** | **← the regression** |
+| no NL BTM | 766 | 189 | 614 | 5 | 1602 | but NL collapses 823 → **1**/458: BTM essential |
+| no vintage triggers | 869 | 255 | 826 | 3 | 1647 | ≈ neutral on 2024 |
+| no participation ceilings | 1106 | 381 | 1005 | 8 | 2529 | worse (FR mean 36.1 → 32.4): confirmed good |
+| no storage | 1668 | 757 | 1377 | 438 | 2530 | much worse: confirmed good |
+| *observed* | *352* | *457* | *403* | *292* | *247* | |
+
+**The regime NTC is reverted to opt-in** (`run_backtest(regime_ntc_caps=True)`, default off). Its
+measurement stands — on surplus hours observed flows run at 0–60 % of the p99.5 cap with prices
+decoupled 34–100 %, so the flow-based domain genuinely shrinks with RES — but the **encoding** was
+wrong: a hard p95 flow cap over-restricts, whereas reality decouples prices *without* hard-capping
+flows. Blocking FR exports exactly on surplus hours manufactures FR negatives (891 vs 414 without),
+for a 2025 gain of only −1…−9 % boundary mass and no scarcity recovery. A softer encoding — a
+price-spread penalty on regime hours rather than a hard cap — is the open path.
+
+Everything else the campaign added survives 2024: storage (the largest single contributor — without it
+FR 1668), participation ceilings, NL BTM (indispensable for NL), vintage triggers (neutral here,
+physically correct, and DE-beneficial elsewhere). **The multi-year gate (`scratchpad/gate_multiyear.py`,
+2019/2022/2024/2025 with boundary-mass, median, mean and scarcity per zone-year) is now the standing
+acceptance test — no change is to be kept on one year's evidence again.**
+
+## The multi-year gate, and the two fixes it forced (2026-08-01)
+
+`scratchpad/gate_multiyear.py` — 2019 (normal) / 2022 (crisis) / 2024 (the frozen-calibration year) /
+2025 (record negatives), scored per zone-year on count, boundary mass (<+5), median, mean and
+scarcity. **This is now the acceptance test: no change is kept on one year's evidence again.**
+
+| year | boundary ratio | mean err | | zone | boundary ratio | mean err |
+|------|---------------|----------|-|------|---------------|----------|
+| 2019 | **0.99** | −1.6 | | FR | 0.52 | −27.0 |
+| 2022 | 1.84 | −37.2 | | CH | 0.72 | −5.5 |
+| 2024 | 4.79 | −4.5 | | ES | 1.35 | −7.8 |
+| 2025 | 3.95 | −12.1 | | BE | 1.69 | −18.3 |
+| | | | | NL | 2.19 | −2.0 |
+| | | | | DE_LU | 2.49 | −22.2 |
+| | | | | IT_NORTH | **11.39** | −5.3 |
+
+Pooled: **mean |log ratio| 0.89** (was 1.17), **|mean error| 15.0 €/MWh** (was 16.2), scarcity recall
+29 729/32 409. *The raw ratio mean is asymmetric and must not be optimised on* — under- and
+over-printing are both errors but averaging ratios rewards the former, so 2019's genuine 0.32 → 0.99
+repair pushes the raw pooled mean UP. The gate reports mean |log ratio| as the scalar.
+
+**Fix 1 — regime NTC reverted to opt-in** (see the bisection above): it alone caused the 2024
+regression. FR is now in band in both key years for the first time: **414/352 (2024)** and
+**487/510 (2025)**.
+
+**Fix 2 — the participation ceiling's precondition, enforced.** The ceiling assumes that above
+150 €/MWh every available unit runs. Measured hours above 150 per zone-year: **2019 = 0 in every
+zone**; 2022 = 5158–8263; 2023 = 360–1937; 2024 = 95–613; 2025 = 278–844. So in 2019 the p99.9
+measured *economic* dispatch, not availability — NL gas clamped to 7.5 GW (vs 11.2 in 2025, 18.4
+nameplate) — and the model invented **202 hours >200 €/MWh in a year that observed none**. The test is
+now year-level (`_year_reveals_fleet`), computed over the zones that have prices: 2019 lands at
+boundary ratio **0.99** and mean error **−1.6**, NL-2019 exactly 41/41 with zero phantom scarcity.
+*A per-zone test was tried first and was wrong twice over*: FR-2024 sits at 95 hours (knife-edge
+against a 100 threshold), and the cluster zones (AT_SI/DK/PL_CZ/IT_SOUTH) carry no price series, so
+`obs is None` silently stripped THEIR clamps and handed back phantom capacity (2024 FR 414 → 496,
+ES 1342 → 1409). Absence of price data is a data limitation, not evidence about scarcity.
+
+**Ranked residuals on the multi-year view**: IT-North boundary ×11.4 (largest single-zone defect, and
+it prints 25–28 negatives in 2025 where reality had 0); the 2022 crisis under-priced by −37 €/MWh;
+FR's median collapse (16 vs 58 in 2024) — counts are in band but far too much mass sits at the bottom;
+DE/BE mean deficits of −18…−22.

@@ -385,6 +385,20 @@ Per zone *z*, hour *t* of a weekly window (times `T`, |T| = n). Decision variabl
   sliver carries the irradiance shape, the invisible capacity rides it at 0.85 derate (annual energy
   cross-checks with the CBS statistical total). Calibration trail in FLEX_CALIBRATION_2024.md
   (2025 sections: decompositions, boundary-mass metric, gate A/Bs).
+- **Scarcity campaign (2026-07-31, `13eaf57` + follow-up):** revealed **thermal participation ceilings**
+  (`blocks.participation_caps`: market fleet = p99.9 of observed generation — DE gas 0.51 of nameplate,
+  ES 0.50, NL 0.60, BE 0.66; the rest is mothballed/Netzreserve stock that never bids) — both tails moved
+  to observed at once, and **storage re-gated and PASSED** on the resulting realistic surpluses
+  (`enable_storage` now defaults on under flex: FR 530/510 strict, 1042/1066 boundary; CH scarcity
+  248→39/52, IT 192→34/43 — the excluded PSP was exactly their over-print). **PSP discharge friction:
+  REFUTED, not implemented** — 9-agent investigation, all four adversarial lenses fatal: real PSP runs
+  0.93–1.12× the model's envelope above 200 €/MWh (no withholding to encode), NL has *zero* PSP yet the
+  same shortfall, and any withheld tranche offers below 200 so a 0→1000 €/MWh VOM sweep leaves h>200
+  unchanged. The "32–54 % in the top quartile" figure is a composition artifact of a heterogeneous
+  fleet, not retention. Scarcity residual therefore sits at the **top of the merit order** (peaker VOM
+  ceilings, #83 adequacy-block pricing, NTC at peak) and in the **step-vii markup**, whose multi-year
+  refit the 2025/26 backfill unblocked. `run_backtest` now returns `res["storage"]` (hourly
+  discharge/charge/SoC per zone) for storage validation.
   §4 fossil standalone builder, DE tranche volumes year-correct from the registry. BE/CH negative counts
   move off zero for the first time (0 → double digits; one calibration hit CH 50/50 exactly). Locked by
   A/B: unit-level DE stays opt-in (2024-harmful), fired-tranche floor = the German-law 0.0. Honest

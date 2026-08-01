@@ -70,7 +70,8 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
                  use_remit_nuclear_avail: bool = False, de_unit_level: bool | None = None,
                  nuclear_curve: bool = True, hydro_sdp_level: bool = True,
                  diagnose: bool = False, flexibility: bool | None = None,
-                 write_lake: bool = True, enable_storage: bool | None = None) -> dict:
+                 write_lake: bool = True, enable_storage: bool | None = None,
+                 regime_ntc_caps: bool = False) -> dict:
     """`flexibility` opts into the FLEX plant-operating-rigidity module (per-reactor FR nuclear stack with
     C1/C2/C3/C5 rigidities → endogenous negatives; see ``flexibility.fr_nuclear``). Default None reads
     ``flexibility.enabled`` from config.yaml (off unless set). When on, the FR nuclear tranche surrogate
@@ -265,11 +266,17 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
             psp_mw["FR"] = float(load_installed_capacity(config, "FR", year).get("hydro_psp", 0.0))
             storage_lp = storage_spec(psp_mw, year)
     ntc = flow_derived_ntc(config, year)                        # effective NTC from realized flows
-    # regime-conditional caps (flex-gated): static caps over-couple exactly on surplus hours — the
-    # flow-based exchange domain shrinks when RES is high; measured collapse + design in
-    # assemble.regime_ntc. Applied per window/hour via regime_cap_arrays.
+    # regime-conditional caps: OPT-IN (`regime_ntc=True`), default OFF — REVERTED after the 2024
+    # bisection. The measurement behind it is real (on surplus hours observed flows run at 0–60 % of
+    # the p99.5 cap, at-cap 0–6 %, prices decoupled 34–100 %: the flow-based domain shrinks when RES is
+    # high), but the ENCODING — a hard p95-of-observed cap on regime hours — over-restricts: reality
+    # decouples prices WITHOUT hard-capping flows. Measured cost (scratchpad/campaign_bisect_2024.py):
+    # blocking FR exports exactly on surplus hours manufactures FR negatives — 2024 FR 414 → 891 vs 352
+    # observed, BE 508 → 822, ES 1342 → 1645 — against a 2025 benefit of only −1…−9 % boundary mass and
+    # no scarcity recovery. A softer encoding (a price-spread penalty rather than a hard cap) is the
+    # open path; until then the static coincident caps stand.
     rn = None
-    if flex_on:
+    if regime_ntc_caps and flex_on:
         from .assemble import regime_ntc
         try:
             rn = regime_ntc(config, year, ntc)
@@ -290,7 +297,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     # C4 maneuverability: per-week {name: (state, stretch_power)} from the REMIT refuelling calendar (None
     # when REMIT is unavailable → every reactor `full`). Applied to the base flex spec window by window.
     maneuver_weekly = _fr_maneuverability(config, year, weeks[:-1]) if flex_spec is not None else None
-    price_chunks, diag_chunks, flow_chunks = [], [], []
+    price_chunks, diag_chunks, flow_chunks, storage_chunks = [], [], [], []
     flex_stats = {"modulated_mwh": 0.0, "deepmod_mwh": 0.0, "hours": 0}   # F7 §9: fleet modulation aggregates
     prev_flex_state = None                                       # F5: previous window's tail state (FR), or None
     prev_w1 = None                                               # end of the previous window (seam-adjacency check)
@@ -343,6 +350,12 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
             prev_flex_state = None
             continue
         price_chunks.append(out["prices"])
+        if out.get("storage"):          # storage primal → hourly per-zone dispatch (validation of the
+            for z, sv in out["storage"].items():        # storage calibration against observed PSP)
+                storage_chunks.append(pd.DataFrame(
+                    {"timestamp_utc": T, "zone": z,
+                     "dis_mw": sv["dis"].sum(axis=0), "ch_mw": sv["ch"].sum(axis=0),
+                     "soc_mwh": sv["soc"].sum(axis=0)}))
         if diagnose and out.get("diag") is not None:
             diag_chunks.append(out["diag"])
             if out.get("diag_flows") is not None:
@@ -367,6 +380,8 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         lake.write_table(model, "dispatch", "backtest_prices", year=year)
         metrics.to_csv(outdir / f"backtest_{year}_metrics.csv", index=False)   # CSV = human export (§6)
     res = {"model_prices": model, "observed": obs, "metrics": metrics}
+    if storage_chunks:                          # hourly storage dispatch per zone (empty when off)
+        res["storage"] = pd.concat(storage_chunks, ignore_index=True)
     if flex_stats["hours"]:                     # F7: fleet modulation aggregates (see §9 calibration targets)
         res["flex_stats"] = {k: float(v) for k, v in flex_stats.items()}
     if diagnose:                                # lecture de la solution primale (cf. lp.diagnostics), opt-in

@@ -238,16 +238,53 @@ def observed_mustrun_floors(config: Config, zone: str, year: int) -> dict[int, d
     return out
 
 
+_REVEAL_PRICE = 150.0        # above this every available thermal unit is in the money (SRMC ≤ ~130)
+_REVEAL_HOURS = 100          # …and the year needs enough such hours for the fleet to be revealed
+
+
+@lru_cache(maxsize=32)
+def _year_reveals_fleet(config: Config, year: int) -> bool:
+    """Did `year` price high enough, anywhere in the modelled region, to reveal the available fleet?
+
+    Scarcity is a property of the YEAR, not the zone — measured hours above 150 €/MWh per zone-year:
+    2019 = 0 in every zone; 2022 = 5158–8263; 2023 = 360–1937; 2024 = 95–613; 2025 = 278–844. So the
+    test is year-level, taken over the zones that have observed prices: this both avoids a knife-edge
+    per-zone threshold (FR-2024 sits at 95) and prevents the *cluster* zones (AT_SI/DK/PL_CZ/IT_SOUTH,
+    which carry no price series of their own) from being mistaken for cheap-year zones and silently
+    losing their clamp — absence of price data is a data limitation, not evidence about scarcity."""
+    from ..rolling.backtest import _observed_prices        # lazy: backtest imports this module
+    zones = [z for z in config.all_zones if z != "GB"]
+    try:
+        obs = _observed_prices(config, year, zones)
+    except Exception:                                      # noqa: BLE001 — no price data → assume revealing
+        return True
+    best = 0
+    for s in obs.values():
+        if s is not None:
+            best = max(best, int((s.dropna() > _REVEAL_PRICE).sum()))
+    return best >= _REVEAL_HOURS
+
+
 def participation_caps(config: Config, zone: str, year: int) -> dict[str, float]:
-    """→ {tech: MW ceiling} — the REVEALED market-participating thermal fleet (p99.9 of observed gen).
+    """→ {tech: MW ceiling} — the REVEALED market-participating thermal fleet (p99.9 of observed gen),
+    **only for years where the market actually revealed it**; `{}` (no clamp) otherwise.
 
     Nameplate × 0.95 offers phantom capacity: at >150 €/MWh every available unit runs, yet the p95 of
     observed generation on those hours saturates far below nameplate and EQUALS the annual p99.9
     (measured 2024+2025, `scratchpad/participation_measure.py`: DE gas 19.4/36.7 GW = 0.51, ES gas
-    0.50, NL 0.60, BE 0.66; stable across years and thresholds). The shortfall is mothballed /
-    strategic-reserve (Netzreserve) / long-outage capacity that never bids — offering it cleared
-    every observed scarcity hour at mid-stack SRMC (model 0 h >200 vs 20–162 observed). The ceiling
-    is data-driven and year-correct; the caller clamps block capacity to min(nameplate, ceiling)."""
+    0.50, NL 0.60, BE 0.66). The shortfall is mothballed / strategic-reserve (Netzreserve) /
+    long-outage capacity that never bids — offering it cleared every observed scarcity hour at
+    mid-stack SRMC (model 0 h >200 vs 20–162 observed).
+
+    **The revealing condition is a precondition, not a detail.** In a cheap year the p99.9 measures
+    *economic* dispatch, not availability, and clamping to it starves the model: 2019 had ZERO hours
+    above 150 €/MWh in every zone, its NL-gas p99.9 is 7.5 GW (vs 11.2 in 2025, 18.4 nameplate), and
+    the resulting phantom shortage made the model invent 202 hours >200 €/MWh in a year that observed
+    none (multi-year gate, `scratchpad/gate_multiyear.py`). So the ceiling applies only in years the
+    market actually revealed the fleet (`_year_reveals_fleet`); otherwise no clamp is returned and the
+    caller keeps the nameplate stack."""
+    if not _year_reveals_fleet(config, year):
+        return {}                       # cheap year: p99.9 measures economics, not availability
     g = load_generation_hist(config, year, zones=constituents(zone))
     out: dict[str, float] = {}
     for tech in ("gas", "coal", "lignite", "oil"):

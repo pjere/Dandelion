@@ -60,12 +60,17 @@ def test_german_fuel_switch_2022(cfg):
     assert st.assign(s=srmc(st, m_aug)).groupby("tech")["s"].mean()["gas"] > 400
 
 
-def test_participation_caps_measures_p999_of_observed_generation(monkeypatch):
+def test_participation_caps_only_clamp_in_years_the_market_revealed_the_fleet(monkeypatch):
     """Revealed participation: the ceiling is the annual p99.9 of observed generation per thermal
-    tech; thin series (<1000 h or <300 MW) are excluded."""
+    tech — but only in a YEAR that priced high enough to reveal the available fleet. In a cheap year
+    the p99.9 measures economic dispatch, not availability (2019 had zero hours >150 EUR/MWh in every
+    zone, and clamping to its p99.9 made the model invent 202 scarcity hours), so no clamp is
+    returned. The test is year-level so cluster zones without their own price series keep their
+    clamp — absent price data is not evidence of a cheap year."""
     import numpy as np
     import pandas as pd
     from dispatch_model.neighbours import blocks
+    from dispatch_model.rolling import backtest as bt
 
     idx = pd.date_range("2025-01-01", periods=5000, freq="h", tz="UTC")
     rng = np.random.default_rng(7)
@@ -74,6 +79,23 @@ def test_participation_caps_measures_p999_of_observed_generation(monkeypatch):
         pd.DataFrame({"timestamp_utc": idx, "tech": "oil", "gen_mw": rng.uniform(0, 100, len(idx))}),
     ])
     monkeypatch.setattr(blocks, "load_generation_hist", lambda cfg, year, zones=None: gen)
-    caps = blocks.participation_caps(None, "DE_LU", 2025)
-    assert abs(caps["gas"] - 9990) < 30                    # ~p99.9 of U(0, 10000)
-    assert "oil" not in caps                               # <300 MW: too thin to be a ceiling
+
+    class _Cfg:                                   # hashable (lru_cache) config stub
+        all_zones = ["DE_LU", "AT_SI"]
+    cfg = _Cfg()
+    scarce = pd.Series(np.where(np.arange(len(idx)) < 500, 300.0, 50.0), index=idx)   # 500 h > 150
+    cheap = pd.Series(np.full(len(idx), 50.0), index=idx)                             # never > 150
+
+    # revealing year: clamp applies, and the cluster zone WITHOUT prices is clamped too
+    blocks._year_reveals_fleet.cache_clear()
+    monkeypatch.setattr(bt, "_observed_prices",
+                        lambda c, y, z: {"DE_LU": scarce, "AT_SI": None})
+    assert abs(blocks.participation_caps(cfg, "DE_LU", 2025)["gas"] - 9990) < 30
+    assert "oil" not in blocks.participation_caps(cfg, "DE_LU", 2025)   # <300 MW: too thin
+    assert blocks.participation_caps(cfg, "AT_SI", 2025)                # cluster zone still clamped
+
+    # cheap year: no zone revealed the fleet → no clamp anywhere
+    blocks._year_reveals_fleet.cache_clear()
+    monkeypatch.setattr(bt, "_observed_prices", lambda c, y, z: {"DE_LU": cheap, "AT_SI": None})
+    assert blocks.participation_caps(cfg, "DE_LU", 2019) == {}
+    assert blocks.participation_caps(cfg, "AT_SI", 2019) == {}
