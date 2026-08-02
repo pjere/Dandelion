@@ -837,3 +837,57 @@ changes are argued from mechanism and measured only as A/B deltas — the multi-
 And the neighbour zones still receive no flex specs in projection (`project_year` passes
 `flex={'FR': …}` only), leaving ~10 GW of the identical one-price nuclear defect across the border: the
 last known instance of this family.
+
+## Nuclear capacity trajectories from policy, and the phantom German fleet (2026-08-02)
+
+Wiring the neighbour flex specs into projection exposed a defect underneath them: `dispatch_tyndp` had
+**no `cap_nuclear_gw` row for DE_LU at all**, and `_scale_stack` leaves unlisted techs untouched — so
+every projected year carried **7.42 GW of German nuclear**, seventeen years after Germany shut its last
+reactor (ENTSO-E installed: 9516 MW in 2019 → 4056 in 2022 → absent from 2024 on). The other zones'
+rows were hand-seeded round numbers.
+
+**Trajectories are now derived reactor-by-reactor from policy**, pre-filled into the workbook and
+editable (`stacks/nuclear_fleet.py` + `scripts/gen_nuclear_trajectory.py`):
+* **committed phase-out (DE, ES)** — retire on the plan's dates regardless of age (Germany 2023-04-15;
+  Spain's 2019 protocol 2027→2035);
+* **lifetime extension (FR, BE, CH, NL)** — 60-year operating life, with explicit closures always
+  winning (a historical fact outranks a rule);
+* **EPR2** — a dedicated `dispatch_nuclear_newbuild` sheet pre-filled with EDF's retained schedule
+  (Penly 1 2038, Penly 2 2040, Gravelines 2041/2043, Bugey 2044/2046; 1670 MW each), read back so user
+  edits win.
+
+| cap_nuclear_gw | 2019 | 2025 | 2030 | 2040 | 2050 |
+|----------------|------|------|------|------|------|
+| FR | 64.01 | 64.01 | 64.01 | 50.53 | 17.71 |
+| DE_LU | 8.35 | **0** | **0** | **0** | **0** |
+| ES | 7.40 | 7.40 | 3.18 | 0 | 0 |
+| BE | 5.94 | 2.08 | 2.08 | 2.08 | 0 |
+| CH | 2.96 | 2.96 | 2.60 | 1.22 | 0 |
+| NL | 0.49 | 0.49 | 0.49 | 0 | 0 |
+
+The 2019 row is not decoration: `tyndp_factors` computes target/**reference-year**, so a table starting
+after the reference year yields 0/0 and the tech escapes scaling — precisely how the German fleet
+survived. 2019 values cross-check against ENTSO-E (BE 5.943 vs 5943 MW, NL 0.485 vs 486, ES 7.40 vs 7.12).
+
+**Fessenheim** (1.75 GW, closed Feb/Jun 2020 by political decision) is now an explicit `FR_CLOSURES`
+fact in `build_fr_stack`, which returns 57 reactors instead of 59. `io.fr_fleet.active_units` already
+hid it on year-aware paths by inferring liveness from observed generation — implicit, and only as
+current as the data; a legislated shutdown belongs in the fleet definition.
+
+**Projection A/B (2040, 13 weeks), toggling DE_LU's nuclear rows alone:**
+
+| | phantom (old) | policy (new) |
+|---|---|---|
+| DE_LU mean | 33.9 | **45.6** (+11.7) |
+| DE_LU negatives | 1180 | **1008** (−172) |
+| DE_LU P95 / max | 141 / 202 | **180 / 300** |
+| FR / NL / CH / BE mean | 74.9 / 125.1 / 162.4 / 141.1 | 76.7 / 127.1 / 163.6 / 141.9 |
+
+Every direction as predicted: removing phantom near-must-run capacity raises German prices, thins the
+negative tail, lets Germany reach scarcity levels it could not before, and firms neighbours through the
+border. ES is unmoved — correctly, it has no German border.
+
+**Known limit of the mechanism**: TYNDP scaling is a RATIO applied to the model's own stack base, so
+where that base differs from the policy baseline (BE's stack reads 4.64 GW against ENTSO-E's 5.94) the
+projected absolute lands below the policy number (1.62 vs 2.08 GW in 2040). The trajectory sets the
+SHAPE of decline exactly; the LEVEL inherits the stack's calibration. DE is exact because its ratio is 0.

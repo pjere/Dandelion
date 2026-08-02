@@ -221,12 +221,14 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
     # levels do not — and the free-mass re-map then prices the offered band along it.
     from ..flexibility import enabled as _flex_enabled
     flex_spec = None
+    flex_costs = None                                      # kept for the neighbour specs built below
+    nb_flex: dict = {}                                     # neighbour-zone flex specs (static per year)
     fired_floor = 0.0                                      # flag-off: historic §51 fired-tranche floor
     if _flex_enabled(config):
         from ..flexibility import fr_nuclear, trajectories
         from ..stacks import nuclear_curve as nuc
         nuc_installed = float(fr_stack.loc[fr_stack["tech"] == "nuclear", "capacity_mw"].sum())
-        costs = trajectories.load_flex_costs(wb, target_year)
+        costs = flex_costs = trajectories.load_flex_costs(wb, target_year)
         reserves = trajectories.load_reserves(wb, target_year)
         fr_stack, flex_spec = fr_nuclear.build_flex_spec(
             fr_stack, nuc.load_curve(config, target_year, nuc_installed) or nuc.default_curve(),
@@ -243,6 +245,21 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
     nb_stack = {z: _append_flex(_scale_stack(s, k, g, cap_factors=nb_fac[z][2]), z, tyndp, target_year)
                 for z, s in ref["nb_stack"].items()}
     nb_stack = {z: _wv(s, z) for z, s in nb_stack.items()}      # same water-value treatment (see above)
+    # neighbour-zone rigidity — the LAST instance of the one-price defect. `project_year` used to pass
+    # `flex={"FR": …}` only, so BE/CH/ES nuclear stayed a single free block bidding a flat SRMC in every
+    # projected year: ~10 GW of the exact degeneracy the FR fix removed, sitting across the border where
+    # a backtest-based gate cannot see it. The specs consume only workbook trajectories + the measured
+    # per-zone anchors (`neighbour_nuclear._ANCHORS`) — no observed price — so they are projection-legal.
+    # Built AFTER the stacks are final: `split_nuclear_block` adds pseudo-unit ROWS and the spec indexes
+    # rows (the same ordering constraint the hydro expansion above has).
+    if flex_costs is not None:
+        from ..flexibility import neighbour_nuclear as nnuc
+        for z in list(nb_stack):
+            st_z = nnuc.split_nuclear_block(nb_stack[z], z)
+            spec_z = nnuc.build_neighbour_flex_spec(st_z, z, flex_costs)
+            if spec_z is not None:
+                nb_stack[z] = st_z
+                nb_flex[z] = spec_z
     # storage in PROJECTION (flex-gated; the machinery's real home per the backtest verdict — commit
     # 0f84fb6): measured PSP envelopes + the BESS build-out trajectory replace the battery share of #83's
     # crude `cap_flex_gw` block, which is SHRUNK by the BESS power added (no double count). No observed-
@@ -310,7 +327,8 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
             try:
                 out = solve_with_triggers(T, zd, borders, {b: ref["ntc"][b] for b in borders}, schemes,
                                           res_bid=res_bid, price_floor=price_floor,
-                                          flex=({"FR": sp} if sp is not None else None),
+                                          flex=({**{z: s for z, s in nb_flex.items() if z in zd},
+                                                 "FR": sp} if sp is not None else None),
                                           fired_floor=fired_floor, storage=storage_proj)
                 break
             except RuntimeError:

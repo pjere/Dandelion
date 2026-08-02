@@ -45,9 +45,28 @@ def build_fr_stack(config: Config, fleet: pd.DataFrame | None = None,
                      "capacity_mw": float(u["capacity_mw"]), "efficiency": eff,
                      "min_gen_frac": mn, "ramp_frac": ramp, "vom": VOM.get(tech, 2.5)})
     st = pd.DataFrame(rows)
+    # closures by political decision (`nuclear_fleet.FR_CLOSURES`): dropped from the year they shut.
+    # `io.fr_fleet.active_units` already infers liveness from observed generation when a `year` is
+    # given, but that is implicit and only as current as the data; a legislated shutdown is a fact.
+    # Without this, a year-less stack keeps Fessenheim 1/2 — 1.75 GW closed in Feb/Jun 2020.
+    from .nuclear_fleet import FR_CLOSURES
+    ref = int(year) if year is not None else _latest_fleet_year(config)
+    dead = [n for n, cy in FR_CLOSURES.items() if ref is None or cy <= ref]
+    if dead and "name" in st.columns:
+        st = st[~st["name"].astype(str).str.upper().isin(dead)].reset_index(drop=True)
     if year is not None:
         st = _topup_to_installed(config, st, year, rng)
     return st
+
+
+def _latest_fleet_year(config) -> int | None:
+    """The fleet year a year-less stack should represent — today's fleet, resolved from the data (not
+    the wall clock, so the build stays deterministic)."""
+    try:
+        from ..io.fr_fleet import latest_fleet_year
+        return int(latest_fleet_year(config))
+    except Exception:                                       # noqa: BLE001 — no fleet data → filter all
+        return None
 
 
 def _topup_to_installed(config: Config, st: pd.DataFrame, year: int, rng) -> pd.DataFrame:
