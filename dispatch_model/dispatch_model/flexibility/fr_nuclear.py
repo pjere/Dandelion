@@ -33,8 +33,11 @@ import numpy as np
 import pandas as pd
 
 from ..stacks.costs import nuclear_srmc
+from ..stacks.nuclear_curve import SCARCITY_BID
 from ..stacks.revealed import BID_COL
 from . import reactor_class as rc
+
+_SCARCITY_GUARD = SCARCITY_BID       # the curve's residual top rung — never map real reactors onto it
 
 _STATE_CAP_SCALE = {"full": 1.0, "reduced": 0.5, "none": 0.0}   # F1 maneuverability → deep-mod cap derate
 
@@ -47,7 +50,7 @@ _FOSSIL_RHO_RECOMMIT = 0.50            # fossil re-commits faster than nuclear (
 _FOSSIL_TECHS = tuple(_FOSSIL_MIN_LOAD)
 
 
-def _reactor_bids(caps: np.ndarray, curve, floor_bid: float) -> np.ndarray:
+def _reactor_bids(caps: np.ndarray, curve, floor_bid: float, s0: float = 0.0) -> np.ndarray:
     """Per-reactor opportunity bid (€/MWh): spread the reactors along the revealed supply curve by
     cumulative capacity share, then floor each at ``floor_bid`` (the fuel cost). Flooring is what keeps the
     negatives endogenous — the curve's sub-zero socle bid is dropped, not written into the merit order.
@@ -64,10 +67,33 @@ def _reactor_bids(caps: np.ndarray, curve, floor_bid: float) -> np.ndarray:
     mid = cum - 0.5 * caps[order] / caps.sum()                 # each reactor's midpoint on the share axis
     edges = np.cumsum([s for s, _ in tr])
     bids = np.asarray([b for _, b in tr], float)
+    # FREE-MASS axis (s0>0): the LP already HOLDS s0 of the fleet via the C1a band row (α_op·u), so only
+    # the remaining (1−s0) is actually offered. Spreading reactors over the TOTAL-capacity axis and then
+    # flooring puts that whole free block at the fuel cost — infinite elasticity at one price, which pins
+    # the FR dual at 7 €/MWh in a third of the year. Mapping the midpoint onto the free mass first prices
+    # the offered band along the measured curve instead. s0 is read from the curve's OWN socle share so
+    # both live on the same availability axis (the α_op constant is calibrated on a different denominator
+    # — see the backlog note in FLEXIBILITY.md).
+    if s0 > 0.0:
+        mid = float(s0) + (1.0 - float(s0)) * mid
+    # never map onto the residual scarcity tranche: `nuclear_curve` documents its top rung as "almost
+    # always empty — it exists only so as not to erase real capacity". Without this clip the re-map parks
+    # 15–20 % of the fleet at 200 €/MWh, capacity never observed producing.
+    obs_edge = float(edges[-1]) if len(edges) else 1.0
+    if len(bids) > 1 and bids[-1] >= _SCARCITY_GUARD:
+        obs_edge = float(edges[-2])
+        mid = np.minimum(mid, obs_edge - 1e-9)
     slot = np.searchsorted(edges, mid, side="right").clip(0, len(bids) - 1)
     out = np.empty(caps.size, float)
     out[order] = np.maximum(bids[slot], float(floor_bid))
     return out
+
+
+def socle_share(curve) -> float:
+    """Cumulative share of the revealed curve sitting at sub-zero bids — the fleet's measured socle, on
+    the CURVE's own availability axis (so it can be composed with the curve without a units mismatch)."""
+    tr = list(getattr(curve, "tranches", None) or [])
+    return float(sum(s for s, b in tr if b < 0.0)) if tr else 0.0
 
 
 def build_flex_spec(stack: pd.DataFrame, curve, c_mod: float, c_start_by_class: dict,
@@ -112,7 +138,15 @@ def build_flex_spec(stack: pd.DataFrame, curve, c_mod: float, c_start_by_class: 
     st = st.copy()
     if BID_COL not in st.columns:
         st[BID_COL] = np.nan
-    st.loc[nuc, BID_COL] = _reactor_bids(caps, curve, floor_bid)   # applied by fr_window's apply_bids
+    # bids: spread the OFFERED (free) band along the revealed curve — see `_reactor_bids`. The socle
+    # share comes from the curve itself so the two share an availability axis; κ scales it because only
+    # the committed fleet is held. `bids_cur` is the pre-remap ladder, kept to preserve each reactor's
+    # deep-mod reservation below.
+    kappa0 = float(c_start_by_class.get("u_commit_frac", 0.85))
+    s0 = kappa0 * socle_share(curve)
+    bids_cur = _reactor_bids(caps, curve, floor_bid)
+    bids_new = _reactor_bids(caps, curve, floor_bid, s0=s0)
+    st.loc[nuc, BID_COL] = bids_new                                # applied by fr_window's apply_bids
 
     def _col(k):
         return np.asarray([p[k] for p in phys], float)
@@ -133,7 +167,14 @@ def build_flex_spec(stack: pd.DataFrame, curve, c_mod: float, c_start_by_class: 
     # available fleet — `alpha_band_op`), not at the per-unit technical band (0.55–0.60): the fleet never
     # rides its mode-G floor simultaneously. Below the operating floor is deep-mod `d`, priced c_mod — both
     # anchored on the same revealed-curve measurement (socle share / socle bid).
-    ab_op = float(c_start_by_class.get("alpha_band_op", 0.74))
+    # The operating floor and the revealed curve must live on the SAME availability axis, or the band
+    # floor and the bid ladder describe different fleets. The workbook's 0.74 was measured against a
+    # rolling-72h-max-of-output proxy, but under flex the LP's availability is REMIT-based
+    # (`use_remit_nuclear_avail` is forced on) and the curve's shares are REMIT-based too — a systematic
+    # 7–9 point gap (measured pooled socle: REMIT 0.811 vs rolling 0.722). Deriving α_op from the curve's
+    # own sub-zero share removes the mismatch by construction and keeps it year-correct; the workbook
+    # value remains the fallback when no curve could be measured (projection default curve included).
+    ab_op = socle_share(curve) or float(c_start_by_class.get("alpha_band_op", 0.74))
     ab_, at_ = np.maximum(_col("alpha_band"), ab_op), _col("alpha_tech")
     # β ceiling (F7): the C3 ramp allowance `r_up·u − β·Σ₈d` must stay ≥ 0 at worst case, else sustained
     # deep-mod *forces* p down against the C1 band floor of a committed fleet → an infeasible "xénon death
@@ -141,9 +182,18 @@ def build_flex_spec(stack: pd.DataFrame, curve, c_mod: float, c_start_by_class: 
     # down). Since Σ₈d ≤ 8·(α_band−α_tech)·u, the unit-free ceiling is β ≤ r_up/(8·deep_band); the seeds
     # exceed it, so the LP-effective β is the clamped value (auto-tracks the operating band width).
     beta_eff = np.minimum(_col("xenon_beta"), _col("r_up") / np.maximum(8.0 * (ab_ - at_), 1e-9))
+    # deep-mod cost, PER REACTOR. The engagement threshold is λ < bid − c_mod, so spreading the bids with
+    # a scalar c_mod would silently re-calibrate the negative tail (measured on a toy LP built from the
+    # real fleet + real curve: reactors bidding above c_mod deep-modulate at POSITIVE prices, withdrawing
+    # 2.4–3.8 GW from the shallow-negative regime; negatives 49 → 35, and the effect grows as negatives
+    # get rarer — −100 % at a realistic 4 % frequency). Reservation-PRESERVING: each reactor keeps the
+    # threshold it has today (bids_cur − c_mod), so the re-pricing acts only where the p-column bid
+    # legitimately sets price — the free-modulation band — and the calibrated tail is untouched by
+    # construction (measured neutral: 2024 49 → 49, 2025 50 → 51).
+    c_mod_j = bids_new - (bids_cur - float(c_mod))
     spec = {"idx": nuc, "is_nuclear": np.ones(nuc.size, bool),
             "alpha_band": ab_, "alpha_tech": at_,
-            "c_mod": float(c_mod), "c_start": c_start,
+            "c_mod": c_mod_j, "c_start": c_start,
             "d_max_8h": d8, "d_max_day": dd,
             "r_up": _col("r_up"), "xenon_beta": beta_eff,
             "rho_recommit": _col("rho_recommit"), "u_min_frac": np.full(nuc.size, kappa),
@@ -224,6 +274,10 @@ def _append_fossil(st: pd.DataFrame, spec: dict, fossil_c_start: dict) -> None:
     spec["alpha_band"] = np.concatenate([spec["alpha_band"], amin])
     spec["alpha_tech"] = np.concatenate([spec["alpha_tech"], amin])   # band == tech ⇒ no deep-mod room
     spec["c_start"] = np.concatenate([spec["c_start"], cs])
+    # c_mod is per-reactor since the bid re-map; fossil rows have alpha_band == alpha_tech ⇒ deep band 0
+    # ⇒ d is pinned at 0 and the coefficient is inert, but the vector must still cover every flex row.
+    spec["c_mod"] = np.concatenate([np.broadcast_to(np.asarray(spec["c_mod"], float),
+                                                   (spec["is_nuclear"].size - fos.size,)), np.zeros(fos.size)])
     spec["d_max_8h"] = np.concatenate([spec["d_max_8h"], z])
     spec["d_max_day"] = np.concatenate([spec["d_max_day"], z])
     spec["r_up"] = np.concatenate([spec["r_up"], r_up])

@@ -21,7 +21,15 @@ _COSTS = {"c_mod": 8.0, "c_start_900": 300.0, "c_start_1300": 320.0, "c_start_N4
 def test_spec_indexes_only_the_nuclear_rows_with_class_physics():
     st, spec = fn.build_flex_spec(_STACK, _CURVE, c_mod=8.0, c_start_by_class=_COSTS)
     assert list(spec["idx"]) == [0, 1, 2]                       # the three nuclear rows, not the gas row
-    assert spec["c_mod"] == 8.0
+    # c_mod is per-reactor since the bid re-map: the deep-mod engagement threshold is bid - c_mod, and
+    # it is preserved reactor-by-reactor so the calibrated negative tail cannot move (see _reactor_bids).
+    import numpy as _np
+    cm = _np.asarray(spec["c_mod"], float)
+    assert cm.shape == (3,)
+    caps = st.loc[spec["idx"], "capacity_mw"].to_numpy(float)
+    bids = st.loc[spec["idx"], BID_COL].to_numpy(float)
+    bids_cur = fn._reactor_bids(caps, _CURVE, 7.0)          # the pre-remap ladder
+    assert _np.allclose(bids - cm, bids_cur - 8.0)          # thresholds unchanged by the re-map
     assert list(spec["c_start"]) == [300.0, 320.0, 340.0]       # 900 / 1300 / N4(1450) class start costs
     for key in ("alpha_band", "alpha_tech", "r_up", "xenon_beta", "d_max_8h", "d_max_day", "rho_recommit"):
         assert np.asarray(spec[key]).shape == (3,)

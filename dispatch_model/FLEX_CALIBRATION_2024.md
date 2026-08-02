@@ -726,3 +726,66 @@ ES 1342 → 1409). Absence of price data is a data limitation, not evidence abou
 it prints 25–28 negatives in 2025 where reality had 0); the 2022 crisis under-priced by −37 €/MWh;
 FR's median collapse (16 vs 58 in 2024) — counts are in band but far too much mass sits at the bottom;
 DE/BE mean deficits of −18…−22.
+
+## The FR median collapse: diagnosed, fixed, gated (2026-08-02)
+
+**The defect.** `fr_nuclear._reactor_bids` spread reactors along the revealed curve on the TOTAL-capacity
+axis and floored each at fuel cost. Since the curve's socle is most of the fleet, ~83–91 % of French
+nuclear bid **exactly 7.0 €/MWh** — infinite elasticity at one price — so nuclear pinned the FR dual at
+7 in 2789 hours of 2024 (32 % of the year): FR median 16 vs 58 observed. In PROJECTION it was 100 % of
+the fleet (`load_curve` returns None without observed prices). This is the same degeneracy
+`nuclear_curve` was built to cure ("63 GW at a single price… marginal 78.6 % of hours at exactly 7.0").
+
+**Two hypotheses were killed first, by measurement.** (i) A projectable opportunity-cost λ: the
+ratio-to-gas-SRMC rule does not transfer (ρ = 0.55/0.25/0.54/0.37/0.26 across 2019–25) and the
+duration-curve rule gives q_boundary ≈ 1.00 every year — **the annual energy budget never binds, so the
+premium is not a budget dual**; the revealed premium's seasonality also flips sign across years.
+(ii) The "revealed λ" figures themselves (32.0 / 23.7) are **selection-circular** — read off hours the
+*model* prices nuclear-marginal; a model-free selection gives 25.4 / 12.9–17.1 and a flat-to-falling
+series where the model-conditioned one rises.
+
+**The fix — band elasticity was double-counted, not a missing level.** The LP already holds the fleet
+at α_op·u through the C1a row; spreading bids over the total-capacity axis then dumped the *free* band
+at the floor. Three coupled changes:
+1. **Free-mass re-map** (`_reactor_bids`, `mid_free = s0 + (1−s0)·mid`): the offered band is priced along
+   the measured curve. Fleet at exactly 7.0 falls 88 % → 54 % (2024) / 46 % (2025).
+2. **Per-reactor `c_mod`** (solver + spec), set **reservation-preserving** (`c_mod_j = bid_new −
+   (bid_cur − c_mod)`). Mandatory, not optional: engagement is `λ < bid − c_mod`, so laddered bids with a
+   scalar `c_mod` silently re-calibrate the negative tail — an adversarial toy LP on the real fleet
+   measured negatives 49 → 35 with a `deepband_scale=0` control proving the deep-mod threshold was the
+   entire mechanism, and the damage grows as negatives get rarer (−100 % at a realistic 4 % frequency).
+   Thresholds verified identical before/after: −38..25 (2024), −38..−10 (2025).
+3. **Scarcity-rung clip**: without it the re-map parks 15–20 % of the fleet on the residual 200 €/MWh
+   tranche that the curve documents as "almost always empty".
+4. **α_op derived from the curve** (denominator fix): the workbook's 0.74 was measured against a
+   rolling-72h-max proxy, but under flex the LP's availability is REMIT-based and the curve's shares are
+   REMIT-based — a systematic 7–9 pt gap (pooled socle REMIT 0.811 vs rolling 0.722). α_op now comes from
+   the curve's own sub-zero share (0.798 / 0.836, year-correct; workbook value kept as fallback), so floor
+   and ladder describe the same fleet.
+
+**Multi-year gate** (2019/2022/2024/2025):
+
+| | pre-fix | +re-map | +denominator | observed |
+|---|---|---|---|---|
+| FR 2024 median / mean | 16 / 36 | 47 / 46 | **44 / 45** | 58 / 58 |
+| FR 2025 median / mean | 34 / 48 | 52 / 58 | **52 / 56** | 60 / 61 |
+| FR 2025 neg / boundary | 487 / 1028 | 404 / 906 | **543 / 1070** | 510 / 1066 |
+| FR 2024 neg | 414 | 366 | **428** | 352 |
+| pooled log-err | 1.77 | 1.78 | **1.68** | 0 |
+| pooled \|mean err\| | 15.0 | 13.6 | **13.8** | 0 |
+
+Both pooled metrics beat the pre-fix baseline; FR's own log-error falls 1.24 → 0.54 and its 2025
+boundary ratio lands at 1.004. **Honest caveat**: the pre-registered "negative counts stable within
+±10" criterion FAILED (2025 drifted 487 → 543). The isolation claim was wrong — beyond the deep-mod
+channel (which the reservation-preserving `c_mod` does close exactly), there is a direct merit-order
+channel: withholding free-band output in mid hours necessarily changes the surplus at the bottom. The
+resulting counts are nonetheless defensible in both years (+21.6 % on 2024, +6.5 % on 2025, both inside
+±30 %), which is why the change was kept rather than reverted.
+
+**Deferred**: hydro projection (the investigation found projection stacks are **never tranche-expanded
+at all** — hydro bids ~1 €/MWh VOM under a frozen ref-year budget, a worse defect than stale water
+values; the Bellman λ-generator already exists and needs only a weekly price series); neighbour flex
+specs in projection (`project_year` passes `flex={'FR': …}` only, leaving ~10 GW of the identical
+one-price disease across the border, invisible to a backtest-based gate); and the REMIT data-quality
+problem underneath the denominator choice (output exceeds REMIT-implied availability in 32 % of 2024
+hours because partial derating is reported as full outage).

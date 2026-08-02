@@ -399,6 +399,18 @@ Per zone *z*, hour *t* of a weekly window (times `T`, |T| = n). Decision variabl
   ceilings, #83 adequacy-block pricing, NTC at peak) and in the **step-vii markup**, whose multi-year
   refit the 2025/26 backfill unblocked. `run_backtest` now returns `res["storage"]` (hourly
   discharge/charge/SoC per zone) for storage validation.
+- **FR median collapse fixed (2026-08-02, calibration report §"FR median collapse"):** `_reactor_bids`
+  spread reactors on the TOTAL-capacity axis and floored at fuel cost ⇒ ~88 % of the fleet bid exactly
+  7.0 €/MWh (100 % in projection) and nuclear pinned the FR dual at 7 for a third of the year. Fixed by
+  pricing the **free** band along the measured curve (`mid_free = s0 + (1−s0)·mid`), with three coupled
+  guards: per-reactor `c_mod` set reservation-preserving (mandatory — with a scalar `c_mod` the laddered
+  bids move the deep-mod threshold `λ < bid − c_mod` and silently re-calibrate the negative tail), a clip
+  off the residual 200 €/MWh scarcity rung, and **α_op derived from the curve's own socle share** so the
+  band floor and the bid ladder share an availability axis (the workbook 0.74 is rolling-max-based, the
+  curve and the flex LP are REMIT-based — a 7–9 pt gap). Gate: FR 2024 median 16→44, 2025 34→52 with the
+  2025 boundary ratio at 1.004; pooled log-err 1.77→1.68, |mean err| 15.0→13.8. Two prior hypotheses were
+  refuted by measurement first (a projectable opportunity-cost λ — the annual budget never binds,
+  q_boundary ≈ 1.00 every year; and the "revealed λ" statistic itself — selection-circular).
   §4 fossil standalone builder, DE tranche volumes year-correct from the registry. BE/CH negative counts
   move off zero for the first time (0 → double digits; one calibration hit CH 50/50 exactly). Locked by
   A/B: unit-level DE stays opt-in (2024-harmful), fired-tranche floor = the German-law 0.0. Honest

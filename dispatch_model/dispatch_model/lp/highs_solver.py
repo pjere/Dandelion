@@ -216,7 +216,14 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             ab = np.asarray(fz["alpha_band"], float); at = np.asarray(fz["alpha_tech"], float)
             dbs = np.broadcast_to(np.asarray(fz.get("deepband_scale", 1.0), float), (mu,))   # C4 reduced→½, none→0
             dband = np.repeat((ab - at) * dbs, n); ab_rep = np.repeat(ab, n)
-            c_mod = float(fz["c_mod"]); c_start = np.asarray(fz["c_start"], float)
+            # c_mod may be a scalar (neighbour/fossil specs) or a PER-REACTOR vector. The vector form is
+            # required whenever the p-column bids are spread: the deep-mod engagement threshold is
+            # λ < b_j − c_mod, so a laddered bid with a scalar c_mod silently re-calibrates the negative
+            # tail (measured: reactors above bid 45 deep-modulate at POSITIVE prices, withdrawing 2.4–3.8 GW
+            # from the shallow-negative regime — toy-LP control with `deepband_scale=0` isolates this as the
+            # entire mechanism). Broadcasting keeps the scalar path byte-identical.
+            c_mod = np.broadcast_to(np.asarray(fz["c_mod"], float), (mu,))
+            c_start = np.asarray(fz["c_start"], float)
             # F5 window-seam state (opt-in): the previous window's tail carried in as fixed parameters, so the
             # intertemporal rigidities stay continuous across the seam. u_init/p_init are u/p at hour −1;
             # d_hist[j] = [d_{-1}, …, d_{-8}] the deep-mod of the 8 pre-window hours (for the 8h budget + xénon).
@@ -231,7 +238,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             umf = np.broadcast_to(np.asarray(fz.get("u_min_frac", 0.0), float), (mu,))
             ulo = (umf[:, None] * gc).ravel() if umf.any() else np.zeros(mu * n)
             ub = add_block(np.zeros(mu * n), ulo, gc.ravel())                 # u ∈ [u_min·avail·cap, avail·cap]
-            db = add_block(np.full(mu * n, c_mod), np.zeros(mu * n), np.full(mu * n, _INF))  # deep-mod d ≥ 0
+            db = add_block(np.repeat(c_mod, n), np.zeros(mu * n), np.full(mu * n, _INF))     # deep-mod d ≥ 0
             sb = add_block(np.repeat(c_start, n), np.zeros(mu * n), np.full(mu * n, _INF))   # start su ≥ 0
             flex_cols[z] = (ub, db, sb, fidx)
             pcols = np.concatenate([gbase + ui * n + np.arange(n) for ui in fidx])   # p of flex units (j-major)
