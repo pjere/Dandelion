@@ -52,6 +52,68 @@ def _load_growth(wb) -> dict:
     return g
 
 
+_HYDRO_EFF, _HYDRO_CO2 = 0.50, 0.202      # the marginal thermal unit water competes against (CCGT-ish)
+
+
+def _hydro_level_ratio(ref: dict, target_year: int) -> float:
+    """Water-value level multiplier target/reference, from the exogenous commodity trajectory.
+
+    Water is worth what it displaces, so its level tracks the marginal thermal SRMC — a scenario
+    quantity, available for any future year and independent of observed prices and of the LP. Returns
+    1.0 (no re-levelling) when the resolver cannot price either year."""
+    res = ref.get("resolver")
+    if res is None:
+        return 1.0
+
+    def _srmc(year: int) -> float:
+        vals = []
+        for m in (1, 4, 7, 10):                       # quarterly probes → an annual mean, cheap
+            try:
+                p = res.prices_at(pd.Timestamp(f"{year}-{m:02d}-15", tz="UTC"))
+            except Exception:                          # noqa: BLE001 — missing year → skip the probe
+                continue
+            vals.append(p["gas"] / _HYDRO_EFF + (_HYDRO_CO2 / _HYDRO_EFF) * p["co2"])
+        return float(np.mean(vals)) if vals else float("nan")
+
+    a, b = _srmc(int(ref.get("ref_year", 2019))), _srmc(int(target_year))
+    if not (np.isfinite(a) and np.isfinite(b)) or a <= 0:
+        return 1.0
+    return float(np.clip(b / a, 0.2, 5.0))            # bounded: a scenario shock must not invert the curve
+
+
+def _hydro_expander(ref: dict, target_year: int):
+    """→ f(stack, zone) applying the reference-year water-value tranches, re-levelled to `target_year`.
+
+    Identity when no curve was calibrated for the zone (never substitute a default for missing data).
+    The re-level shifts only the ARBITRAGED tranches by w̄·(ratio−1), w̄ being their capacity-weighted
+    mean: the reserved-flow tranche (cheapest) and the scarcity tranche (dearest) are physical anchors,
+    not prices, and `shift_hydro_bids` holds them fixed."""
+    curves = ref.get("hydro_curves") or {}
+    if not curves:
+        return lambda st, z: st
+    from ..hydro.synthesis import shift_hydro_bids
+    from ..hydro.water_value import expand_stack as _wv_expand
+    from ..stacks.revealed import BID_COL as _BID
+    lvl = _hydro_level_ratio(ref, target_year)
+
+    def apply(st, zone):
+        st = _wv_expand(st, curves, zone)
+        if not lvl or abs(lvl - 1.0) <= 1e-6 or _BID not in st.columns:
+            return st
+        m = (st["tech"] == "hydro_reservoir").to_numpy()
+        if m.sum() <= 2:
+            return st
+        bids = st.loc[m, _BID].to_numpy(float)
+        caps = st.loc[m, "capacity_mw"].to_numpy(float)
+        mid = np.argsort(bids)[1:-1]                            # drop both anchors
+        if mid.size == 0 or not np.isfinite(bids[mid]).all():
+            return st
+        wbar = float(np.average(bids[mid], weights=np.maximum(caps[mid], 1e-9)))
+        return shift_hydro_bids(st, wbar * (lvl - 1.0), bid_col=_BID)
+
+    return apply
+
+
 def _scale_stack(stack: pd.DataFrame, k: int, g: dict, cap_factors: dict | None = None) -> pd.DataFrame:
     """Evolve a stack's firm capacity to the projection year.
 
@@ -141,9 +203,22 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         fr["demand_mw"] = fr["demand_mw"] * fr_dem
         fr["musttake_res_mw"] = fr["musttake_res_mw"] * fr_res
     fr_stack = _append_flex(_scale_stack(ref["fr_stack"], k, g, cap_factors=fr_cap), "FR", tyndp, target_year)
-    # FLEX module (opt-in): keep the per-reactor nuclear rows and attach the C1/C2/C3/C5 rigidity spec. On a
-    # future year there is no observed price to reveal a curve, so the per-reactor bids fall back to the fuel
-    # cost and the negatives emerge purely from the rigidity — the intended endogenous behaviour.
+    # water value — the projection was MISSING this: `run_backtest` expands the single `hydro_reservoir`
+    # block into calibrated water-value tranches, `_preload` never did, so every projected year dispatched
+    # reservoirs at ~1 €/MWh VOM under a hard reference-year energy budget (an all-or-nothing budget dual
+    # instead of a graded opportunity cost). Expanded on the REFERENCE year's curves — the tranche SHAPE
+    # (reserved flow / arbitraged water / scarcity) is hydrological and transfers — then RE-LEVELLED to the
+    # target year, because the level is a price and does not (a 2019 curve belongs to a €39/MWh world).
+    # MUST run before `build_flex_spec`: the flex spec indexes stack ROWS, and expanding changes them.
+    _wv = _hydro_expander(ref, target_year)
+    fr_stack = _wv(fr_stack, "FR")
+    # FLEX module (opt-in): keep the per-reactor nuclear rows and attach the C1/C2/C3/C5 rigidity spec.
+    # A future year has no observed price, so `load_curve` returns None — and the bids then fell back to
+    # the fuel cost for the WHOLE fleet: 100 % of FR nuclear at 7 €/MWh, the degeneracy the revealed curve
+    # exists to prevent (in backtest it caught ~88 % of the fleet and pinned the FR price at 7 for a third
+    # of the year; measured here as a projection median stuck at exactly 7.0). `default_curve()` supplies
+    # the measured 2019-24 mean SHAPE instead — utilisation shares transfer across years where price
+    # levels do not — and the free-mass re-map then prices the offered band along it.
     from ..flexibility import enabled as _flex_enabled
     flex_spec = None
     fired_floor = 0.0                                      # flag-off: historic §51 fired-tranche floor
@@ -154,7 +229,7 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         costs = trajectories.load_flex_costs(wb, target_year)
         reserves = trajectories.load_reserves(wb, target_year)
         fr_stack, flex_spec = fr_nuclear.build_flex_spec(
-            fr_stack, nuc.load_curve(config, target_year, nuc_installed),
+            fr_stack, nuc.load_curve(config, target_year, nuc_installed) or nuc.default_curve(),
             c_mod=costs["c_mod"], c_start_by_class=costs,
             r_up_req=reserves["r_up_req"], r_down_req=reserves["r_down_req"],
             p_minstab=trajectories.minstab_mw(wb, "FR", target_year),
@@ -167,6 +242,7 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
     nb_fac = {z: zfac(z) for z in neigh}
     nb_stack = {z: _append_flex(_scale_stack(s, k, g, cap_factors=nb_fac[z][2]), z, tyndp, target_year)
                 for z, s in ref["nb_stack"].items()}
+    nb_stack = {z: _wv(s, z) for z, s in nb_stack.items()}      # same water-value treatment (see above)
     # storage in PROJECTION (flex-gated; the machinery's real home per the backtest verdict — commit
     # 0f84fb6): measured PSP envelopes + the BESS build-out trajectory replace the battery share of #83's
     # crude `cap_flex_gw` block, which is SHRUNK by the BESS power added (no double count). No observed-
@@ -301,6 +377,19 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
             neigh.remove(z); zones.remove(z)
     nb_stack = {z: s[~s["tech"].isin(_EXCLUDE_DISPATCH)].reset_index(drop=True) for z, s in nb_stack.items()}
     nb_nl = {z: neighbour_netload(config, z, ref_year).set_index("timestamp_utc") for z in neigh}
+    # water value — the projection was MISSING this entirely: `run_backtest` expands the single
+    # `hydro_reservoir` block into the calibrated water-value tranches (backtest.py, `expand_stack`), but
+    # `_preload` never did, so every projected year dispatched reservoirs at ~1 €/MWh VOM under a hard
+    # ref-year energy budget — an all-or-nothing budget dual instead of a graded opportunity cost, i.e.
+    # hydro dumping into cheap hours and no water-value support in the mid-band. Expanded here on the
+    # REFERENCE year's curves (the same object the backtest calibrates); `project_year` then re-levels
+    # them to the target year, since a 2019 water value belongs to a €39/MWh world.
+    hydro_curves = {}
+    try:
+        from ..hydro.water_value import load_curves
+        hydro_curves = load_curves(config, ref_year, tuple(["FR"] + list(neigh)))
+    except (FileNotFoundError, KeyError, ValueError):
+        hydro_curves = {}
     for z in list(neigh):                          # empty net-load → degenerate LP time coord → drop it too
         if nb_nl[z].empty:
             neigh.remove(z); zones.remove(z); nb_stack.pop(z, None); nb_nl.pop(z, None)
@@ -336,6 +425,7 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
             "gas_rules": load_gas_rules(wb),
             "floors": {z: {t["scheme"]: t["floor"] for t in static.get(z, [])} for z in zones},
             "static": static, "growth": _load_growth(wb),
+            "hydro_curves": hydro_curves,
             "fr": fr, "fr_stack": fr_stack_base(config, latest_fleet_year(config)), "nb_stack": nb_stack,
             "nb_nl": nb_nl, "nb_res": nb_res, "ntc": flow_derived_ntc(config, ref_year),
             "weeks": pd.date_range(f"{ref_year}-01-01", f"{ref_year + 1}-01-01", freq="7D", tz="UTC")}

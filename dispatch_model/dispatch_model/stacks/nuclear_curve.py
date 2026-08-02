@@ -106,6 +106,20 @@ DEFAULT_CURVE = ((0.74, MUSTRUN_BID), (0.09, 0.0), (0.05, 10.0), (0.04, 30.0), (
 RAMP_FRAC = 0.05
 
 
+def default_curve() -> SupplyCurve:
+    """La courbe de repli (`DEFAULT_CURVE`) comme `SupplyCurve` — pour les années SANS observation.
+
+    `load_curve` renvoie `None` en projection (pas de prix observés), et l'appelant retombait alors sur
+    le coût combustible pour TOUS les réacteurs : 100 % de la flotte à 7 EUR/MWh, la dégénérescence même
+    que la courbe existe pour éviter (en backtest elle touchait ~88 % de la flotte et épinglait le prix
+    FR à 7 sur un tiers de l'année). La forme moyenne mesurée 2019-2024 est une donnée, pas un défaut
+    arbitraire : c'est la seule information disponible pour une année future, et elle est stable en
+    parts d'utilisation là où les niveaux de prix ne le sont pas.
+    """
+    return curve_from_shares("FR", pd.DataFrame(), MUSTRUN_BID, SCARCITY_BID, DEFAULT_CURVE,
+                             tech="nuclear", bid_from="mean")
+
+
 def calibrate(price: pd.Series, output: pd.Series, available_mw) -> SupplyCurve:
     """Courbe d'offre nucléaire FR depuis (prix spot observé, production, capacité **disponible**).
 

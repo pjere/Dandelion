@@ -789,3 +789,51 @@ specs in projection (`project_year` passes `flex={'FR': …}` only, leaving ~10 
 one-price disease across the border, invisible to a backtest-based gate); and the REMIT data-quality
 problem underneath the denominator choice (output exceeds REMIT-implied availability in 32 % of 2024
 hours because partial derating is reported as full outage).
+
+## Projection: the two opportunity-cost defects, fixed (2026-08-02)
+
+The FR median investigation found the same disease twice more, both **projection-only and total**, and
+invisible to the multi-year gate (which runs the backtest system).
+
+**1. Nuclear had no curve at all in projection.** `nuclear_curve.load_curve` returns `None` for a future
+year (it calibrates on observed prices), and the caller fell back to the fuel cost for the WHOLE fleet —
+**100 % of FR nuclear bidding 7 €/MWh**, versus the ~88 % that made the backtest median collapse.
+Measured directly: the 2040 projection median was **exactly 7.0**. Fix: `nuclear_curve.default_curve()`
+supplies the measured 2019-24 mean shape (`DEFAULT_CURVE`, already in the module for this purpose), and
+the free-mass re-map prices the offered band along it. Projection reactors at exactly 7.0: **82 % → 48 %**,
+laddering to 7 / 10 / 30 / 80, capacity-weighted mean bid 13.2 → 25.5. Justification for using a
+measured shape where a measured level would be illegitimate: **utilisation shares transfer across years,
+price levels do not** — the same distinction the λ backcast established (ratio-to-gas-SRMC swung
+0.25–0.55; the annual-budget dual was ~0 with q_boundary ≈ 1.00 every year).
+
+**2. Hydro was never tranche-expanded in projection.** `run_backtest` expands the single
+`hydro_reservoir` block into calibrated water-value tranches; `_preload` never did — so every projected
+year dispatched reservoirs at ~1 €/MWh VOM under a hard reference-year energy budget: an all-or-nothing
+budget dual instead of a graded opportunity cost. This is worse than the "frozen 2019 water values"
+framing it was found under. Fix: expand on the reference year's curves (shape) and **re-level to the
+target year** from the exogenous marginal-thermal SRMC ratio (2019→2024 = 2.20, →2040 = 2.42,
+→2046 = 2.54) — scenario-available, reading no observed price and no LP dual, and exact under a uniform
+price shift because the Bellman is homogeneous of degree 1 in prices. Only the **arbitraged** tranches
+shift: reserved flow (−14) and scarcity (201) are physical anchors that `shift_hydro_bids` holds fixed.
+Ordering constraint, learned by crashing the LP: the expansion **must precede `build_flex_spec`**, which
+indexes stack ROWS.
+
+**2040 A/B (13 weeks, flex on, SMC level):**
+
+| FR | original | +nuclear curve | +hydro | | CH mean | 169.0 → **163.4** |
+|----|----------|----------------|--------|-|---------|-------------------|
+| median | **7.0** | 37.4 | **52.0** | | ES median | 97.8 → 101.0 |
+| mean | 40.7 | 52.6 | **58.2** | | DE/BE/NL | ±1 |
+| negatives | 504 | 436 | 443 | | | |
+
+Nuclear withholding instead of dumping accounts for median 7 → 37 (and negatives 504 → 436, the dumping
+stopping); the water value adds the mid-band support on top (37 → 52). CH *falls* 5.6 — correct on
+inspection: the old code dumped water at 1 €/MWh until the weekly cap bit and then left CH spiking at
+its 180 cap, whereas graded tranches spread the same energy across hours, so there are fewer artificial
+scarcity hours. No tail is destroyed in any zone.
+
+**Honest limits.** There is **no observed-price gate in projection**, so unlike the backtest these two
+changes are argued from mechanism and measured only as A/B deltas — the multi-year gate cannot see them.
+And the neighbour zones still receive no flex specs in projection (`project_year` passes
+`flex={'FR': …}` only), leaving ~10 GW of the identical one-price nuclear defect across the border: the
+last known instance of this family.
