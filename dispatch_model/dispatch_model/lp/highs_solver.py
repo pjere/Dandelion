@@ -345,70 +345,37 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
 
             # ---- F2b rigidity families. Each is opt-in on its spec key, so an F2a-shaped spec (no key)
             #      builds byte-identical to the block above; the toy F2a tests are unaffected. ----
-            # ---- rolling-window STATE (F2b reformulation) -------------------------------------------
-            # C2a and C3 both need the trailing 8-hour deep-mod sum. Writing that sum out per hour makes
-            # consecutive rows share 7 of their 8 terms — near-parallel rows, and a vertex with enormous
-            # degeneracy: dual simplex pivots among equivalent bases without improving the objective. It is
-            # latent while `d` is slack, and it bites hard once high RES forces deep modulation in half the
-            # hours (measured on projected 2024: the nuclear commitment floor exceeds residual demand in
-            # 4384 of 8759 hours; single windows then burned 85–121 CPU-minutes and ignored every time limit).
-            # Carrying the window as a state variable instead removes the overlap at source:
-            #     V_t = Σ_{k=1..8} d_{t−k},   V_t = V_{t−1} + d_{t−1} − d_{t−9}
-            # C2a becomes `d_t + V_t ≤ B8` (2 nonzeros, was 8) and C3 uses `β·V_t` (4 nonzeros, was up to 11).
-            # The seam collapses too: the eight `d_hist` terms that used to be scattered across the first
-            # eight rows of BOTH families — the exact C3×seam interaction the bisection isolated as
-            # *structural* — become one fixed initial value V_0. Mathematically identical: same feasible set
-            # projected on d, so prices move only by degeneracy tie-breaking.
-            need_v = ("d_max_8h" in fz) or ("r_up" in fz and np.any(
-                np.broadcast_to(np.asarray(fz.get("xenon_beta", 0.0), float), (mu,))))
-            vb = None
-            if need_v:
-                B8v = (np.asarray(fz["d_max_8h"], float) * capf if "d_max_8h" in fz
-                       else np.full(mu, _INF))
-                # Seam history: a window can arrive having spent more than its (possibly
-                # maneuverability-tightened) budget allows. The explicit form clamped its row bounds at 0;
-                # the state form must instead scale the history VECTOR, because V_0 and the terms the
-                # recursion later subtracts have to stay mutually consistent — clamping V_0 alone drives
-                # V_1 = V_0 + d_0 − hist[7] below its zero floor and makes the LP infeasible (caught by
-                # test_f5_seam_budget_clamp_stays_feasible_when_history_exceeds_budget). Scaling preserves
-                # the semantics — the budget is spent, so no deep-mod until it rolls out of the window —
-                # while keeping every partial sum ≤ B8 by construction.
-                if has_state:
-                    hs = np.asarray(d_hist[:, :8], float)
-                    tot = hs.sum(axis=1)
-                    scale = np.where(tot > B8v, B8v / np.maximum(tot, 1e-9), 1.0)
-                    hist8 = hs * scale[:, None]
-                else:
-                    hist8 = np.zeros((mu, 8))
-                v0 = hist8.sum(axis=1)
-                vlo = np.zeros((mu, n)); vup = np.full((mu, n), _INF)
-                vlo[:, 0] = v0; vup[:, 0] = v0                       # V_0 fixed
-                vb = add_block(np.zeros(mu * n), vlo.ravel(), vup.ravel())
-                # recursion rows, t = 1..n−1 (equalities): V_t − V_{t−1} − d_{t−1} + d_{t−9} = −hist term
-                base = xrow
-                for j in range(mu):
-                    tt = np.arange(1, n); r = base + j * (n - 1) + (tt - 1)
-                    rows.append(r); cols.append(vb + j * n + tt); vals.append(np.ones(tt.size))
-                    rows.append(r); cols.append(vb + j * n + (tt - 1)); vals.append(-np.ones(tt.size))
-                    rows.append(r); cols.append(db + j * n + (tt - 1)); vals.append(-np.ones(tt.size))
-                    tt9 = np.arange(9, n)                            # d_{t−9} in-window for t ≥ 9
-                    if tt9.size:
-                        rows.append(base + j * (n - 1) + (tt9 - 1))
-                        cols.append(db + j * n + (tt9 - 9)); vals.append(np.ones(tt9.size))
-                    rhs = np.zeros(n - 1)
-                    if has_state:                                    # t ≤ 8 ⇒ d_{t−9} is pre-window history
-                        for t in range(1, min(9, n)):
-                            rhs[t - 1] = -float(hist8[j, 8 - t])     # the SAME scaled vector as V_0
-                    row_lo.append(rhs); row_up.append(rhs.copy())    # equality
-                xrow += mu * (n - 1)
-            if "d_max_8h" in fz:                       # C2a: d_t + V_t ≤ D_max8h·cap (rolling 8 h)
+            # C2a and C3 both write out the trailing 8-hour deep-mod sum per hour, so consecutive rows
+            # share 7 of their 8 terms. That overlap was once replaced by a state variable
+            # (V_t = Σ_{k=1..8} d_{t−k} with a recursion), cutting C2a to 2 nonzeros and C3 to 4, on the
+            # theory that the near-parallel rows were stalling dual simplex. REVERTED, on measurement:
+            #   * the stall it targeted was never degeneracy — it was a NaN cost on the unpriced FR flex
+            #     block, which makes every solver termination test false (commit 236aa7f);
+            #   * A/B'd over the same 11 projection windows, the state form ran 398.2 s against 258.5 s
+            #     for the explicit sums — 54 % SLOWER. Fewer nonzeros did not pay for ~17k extra columns
+            #     and 167 extra equality rows per reactor;
+            #   * and it was not price-neutral (max |Δ| 15.4 €/MWh, FR moving in 264 of 1848 hours).
+            #     Degeneracy tie-breaking can do that at an identical objective, so it is not proof of an
+            #     error — but the explicit form is what every FLEX calibration and the multi-year gate
+            #     were validated against, so it is the one that keeps the burden of proof.
+            # `scratchpad/statevar_ab.py` reruns the comparison.
+            if "d_max_8h" in fz:                       # C2a: Σ_{k=0..7} d_{t−k} ≤ D_max8h·cap (rolling 8 h)
                 B8 = np.asarray(fz["d_max_8h"], float) * capf                        # (mu,) MWh / 8h window
                 base = xrow
                 for j in range(mu):
-                    tt = np.arange(n); r = base + j * n + tt
-                    rows.append(r); cols.append(db + j * n + tt); vals.append(np.ones(n))
-                    rows.append(r); cols.append(vb + j * n + tt); vals.append(np.ones(n))
-                    row_lo.append(np.full(n, -_INF)); row_up.append(np.full(n, B8[j]))
+                    for k in range(8):                                              # d_{t−k}, k=0..7, t−k≥0
+                        tt = np.arange(k, n)
+                        rows.append(base + j * n + tt); cols.append(db + j * n + (tt - k))
+                        vals.append(np.ones(tt.size))
+                    up = np.full(n, B8[j])
+                    if has_state:                          # pre-window d_{-1..-(7-t)} also occupy the 8h window
+                        for t in range(min(7, n)):         # ending at t (t=0..6) → charge them against the budget
+                            up[t] -= float(d_hist[j, :7 - t].sum())
+                        # clamp ≥0: if a maneuverability drop across the seam left the pre-window deep-mod above
+                        # the (now tighter) budget, the reactor simply can't deep-mod until it rolls out of the
+                        # 8h window — a spent budget, not an infeasible LP.
+                        np.maximum(up, 0.0, out=up)
+                    row_lo.append(np.full(n, -_INF)); row_up.append(up)
                 xrow += mu * n
             if "d_max_day" in fz:                      # C2b: Σ_{t∈day} d ≤ D_max_day·cap (calendar day)
                 Bday = np.asarray(fz["d_max_day"], float) * capf
@@ -428,12 +395,16 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                     rows.append(r); cols.append(gbase + fidx[j] * n + tt); vals.append(np.ones(tt.size))       # +p_t
                     rows.append(r); cols.append(gbase + fidx[j] * n + (tt - 1)); vals.append(-np.ones(tt.size))
                     rows.append(r); cols.append(ub + j * n + tt); vals.append(np.full(tt.size, -r_up[j]))       # -Rup*u
-                    if beta[j] != 0.0:                     # xénon: the trailing 8h deep-mod IS the state V_t
-                        rows.append(r); cols.append(vb + j * n + tt)
-                        vals.append(np.full(tt.size, beta[j]))
-                    # RHS is 0 for every t: the pre-window history that used to be written into rows 1..7
-                    # now lives in V_0 and propagates through the recursion.
-                    row_lo.append(np.full(n - 1, -_INF)); row_up.append(np.zeros(n - 1))
+                    if beta[j] != 0.0:                                             # xénon: recent deep-mod caps ramp
+                        for k in range(1, 9):
+                            tt2 = np.arange(max(1, k), n)                          # row t (≥1) uses d_{t−k} when t−k≥0
+                            rows.append(base + j * (n - 1) + (tt2 - 1))
+                            cols.append(db + j * n + (tt2 - k)); vals.append(np.full(tt2.size, beta[j]))
+                    up = np.zeros(n - 1)
+                    if has_state and beta[j] != 0.0:       # rows t=1..7 also see pre-window d_{t−k} (k>t) → RHS
+                        for t in range(1, min(8, n)):
+                            up[t - 1] = -beta[j] * float(d_hist[j, :8 - t].sum())
+                    row_lo.append(np.full(n - 1, -_INF)); row_up.append(up)
                 xrow += mu * (n - 1)
             if "rho_recommit" in fz:                   # C5 min-down proxy: u_t − u_{t−1} ≤ avail_t·ρ_recommit
                 rho = np.broadcast_to(np.asarray(fz["rho_recommit"], float), (mu,)).astype(float)

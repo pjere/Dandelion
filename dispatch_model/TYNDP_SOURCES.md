@@ -1,0 +1,290 @@
+# Provenance of the `dispatch_tyndp` anchors
+
+Every figure written into the `dispatch_tyndp` workbook tab that did **not** come from the project's own
+data lake is recorded here, with its source document, the exact table it was read from, and — where a
+figure is a sum or a conversion rather than a direct quote — the arithmetic that produced it.
+
+Written after the 2024 projection backcast measured what the missing anchors cost. A zone whose anchors
+all start after the reference year has `_interp(2019)` clamped flat to the first anchor, so its factor
+collapses to ~1.0 and the variable is **frozen at its 2019 level for every projected year** — visually
+identical, in the output, to a deliberate "no change" scenario. Measured against observed 2024:
+
+| zone | negatives obs → proj | mean error | cause |
+|---|---|---|---|
+| CH | 292 → 0 | +20.3 €/MWh | `cap_solar_gw`/`cap_wind_gw` clamped |
+| NL | 458 → 0 | +16.4 €/MWh | no RES/demand/flex rows at all → flat CAGR |
+| IT_NORTH | 0 → 0 | −4.8 €/MWh | `cap_solar_gw`/`cap_wind_gw`/`cap_gas_gw`/`cap_coal_gw` clamped |
+
+`tyndp.report_coverage()` now prints these gaps on every projection run, so the class of defect cannot
+recur silently.
+
+---
+
+## Conventions
+
+* **Capacity is nameplate at 31 December of the stated year**, matching how `tyndp_factors` uses it
+  (a ratio against the reference-year stack, which is itself an end-of-year nameplate figure).
+* `cap_wind_gw` is **onshore + offshore combined**, matching `_RES_VARS` in `tyndp.py`.
+* Solar capacity is quoted DC (kWp) by every statistical office below. The reference-year stack is also
+  built from DC nameplate, so the RATIO is unaffected — but do not mix these figures with AC ratings.
+* A figure marked **[direct]** is quoted verbatim from the source. **[sum]** is an arithmetic total of
+  quoted components, shown below it. **[derived]** applies a stated conversion; the inputs are quoted.
+
+---
+
+## CH — Switzerland
+
+### `cap_solar_gw`, 2019 = **2.498** [direct]
+
+> Bundesamt für Energie (BFE) / Swissolar, *Markterhebung Sonnenenergie 2019*, §4.3 "Gesamthaft
+> installierte Leistung in kW per Ende Jahr", row "Photovoltaik Total", column 2019:
+> **2'498'050 kWp** (of which 2'492'010 kWp grid-connected, row "davon im Netzverbund").
+
+Survey conducted by Swissolar **on behalf of the BFE** ("Die Erhebung wurde im Auftrag des Bundesamtes
+für Energie durchgeführt", §1). It feeds the Schweizerische Gesamtenergiestatistik.
+
+<https://pubdb.bfe.admin.ch/de/publication/download/10140>
+
+**Why this could not be measured in-house:** ENTSO-E's Swiss installed-capacity submission contains only
+Hydro (Pumped Storage / Run-of-river / Reservoir) and Nuclear — there is no Solar or Wind row for any
+year, in any of 2019–2026. The generation-based proxy is invalid here: p99.9 of CH solar generation in
+2019 is **297 MW** against a ~2.5 GW fleet, because Swiss PV is overwhelmingly behind the meter and
+absent from the metered feed. Using the proxy would have understated the fleet ~8× and inverted the
+error rather than corrected it.
+
+### `cap_wind_gw`, 2019 = **0.075** [direct, weaker source]
+
+Swiss wind at end-2019 was ~75 MW across ~40 turbines. **This is the one figure below not carried by a
+primary government table**: the BFE's wind page gives only "almost 40 large wind energy facilities …
+around 140 GWh" and no MW total, and the *Schweizerische Statistik der erneuerbaren Energien* advance
+extract reports wind in TJ of production (614 TJ in 2024), not installed MW.
+
+Impact of the residual uncertainty is small: wind is 2.9 % of CH's 2019 wind+solar total, so a ±20 %
+error here moves the `res` factor by under 0.6 %. **Replace with the full BFE renewables statistics
+(Anhang B, published September 2025) or `opendata.swiss` "Windenergieanlagen" aggregated by
+commissioning year** when convenient.
+
+<https://www.bfe.admin.ch/bfe/en/home/supply/renewable-energy/wind-energy.html>
+
+### Consequence
+
+`res` factor 2024/2019 goes from a clamped **1.0** to **(interp 2024) / (2.498 + 0.075)**. Note this
+also exposes a question for you: the tab's CH `cap_solar_gw` 2025 anchor is 5.0 GW, but Swiss PV passed
+that before 2024 on the BFE's own series — **the CH solar trajectory looks stale and understated**.
+
+---
+
+## IT_NORTH — Italian "Nord" bidding zone
+
+The Nord market zone comprises Valle d'Aosta, Piemonte, Liguria, Lombardia, Trentino-Alto Adige, Veneto,
+Friuli-Venezia Giulia and Emilia-Romagna. Both figures are therefore regional sums, not national totals.
+
+### `cap_solar_gw`, 2019 = **9.2625** [sum]
+
+> GSE, *Solare Fotovoltaico — Rapporto Statistico 2019*, p.21, table "Numerosità e potenza per provincia
+> degli impianti fotovoltaici nel 2018 e 2019", column "2019 / MW", regional subtotal rows:
+
+| region | MW |
+|---|---|
+| Piemonte | 1 642.5 |
+| Valle d'Aosta | 24.6 |
+| Lombardia | 2 398.8 |
+| Trentino-Alto Adige | 442.7 |
+| Veneto | 1 995.8 |
+| Friuli Venezia Giulia | 545.2 |
+| Liguria | 112.8 |
+| Emilia-Romagna | 2 100.1 |
+| **sum** | **9 262.5 MW** |
+
+National total for context: 20 865 MW over 880 090 plants at 31/12/2019.
+
+<https://www.gse.it/documenti_site/Documenti%20GSE/Rapporti%20statistici/Solare%20Fotovoltaico%20-%20Rapporto%20Statistico%202019.pdf>
+
+### `cap_wind_gw`, 2019 = **0.129** [derived]
+
+> GSE, *Rapporto Statistico FER 2019*, §3.3.6 "Distribuzione regionale della potenza installata degli
+> impianti eolici a fine 2019", p.59. National total stated on the map: **10 715 MW**. Regional shares
+> for the Nord zone: Piemonte 0.2 %, Liguria 0.5 %, Emilia-Romagna 0.4 %, Veneto 0.1 %. Lombardia,
+> Valle d'Aosta, Trentino-Alto Adige and Friuli-Venezia Giulia are blank (no installed wind).
+
+0.2 + 0.5 + 0.4 + 0.1 = **1.2 %** × 10 715 MW = **128.6 MW**.
+
+Corroborated by the report's own text on the same page: the northern **and** central regions together
+hold "solo il 3,4 % della potenza complessiva nazionale". Both GSE tables are "elaborazioni GSE su dati
+Terna" and sit in the Programma Statistico Nazionale (statistical work TER-00001, owned by Terna).
+
+<https://www.gse.it/documenti_site/Documenti%20GSE/Rapporti%20statistici/Rapporto%20Statistico%20GSE%20-%20FER%202019.pdf>
+
+### ⚠ This baseline exposes a problem in the existing IT_NORTH trajectory
+
+With wind 2019 = 0.129 GW, the tab's `cap_wind_gw` 2025 anchor of **3.0 GW implies 23× growth in six
+years** in a bidding zone that had essentially no wind and no significant pipeline. Italian wind is
+concentrated in the South and Islands (Puglia 24.0 %, Sicilia 17.7 %, Campania 16.2 %). The 3.0 GW
+figure looks like a **national** number mistakenly entered against the Nord zone. Left unchanged here —
+it is a scenario value and yours to set — but it should be checked before any long-horizon run.
+
+---
+
+## NL — Netherlands
+
+NL is a different case from CH/IT: its 2019 data is **fully measured and already in the lake**
+(ENTSO-E installed capacity: Solar 7 226 MW, Wind Offshore 957 MW, Wind Onshore 3 527 MW), and
+cross-validates against CBS. What is missing is the *forward* trajectory — the tab has no NL rows at all
+except `cap_nuclear_gw` — so no baseline can help: the factor is `None` regardless and the projection
+silently falls back to a flat +4.5 %/yr CAGR.
+
+### 2019 cross-validation [direct]
+
+> CBS (Centraal Bureau voor de Statistiek), *Hernieuwbare energie in Nederland 2019*: solar **6 870 MW**
+> cumulative at end-2019 (2 350 MW added in the year); wind **4.5 GW** total.
+
+Lake (ENTSO-E) gives 7 226 MW solar and 4 484 MW wind. The solar gap is the usual DC/AC and
+registration-date difference; the two agree to ~5 %, so **the measured lake figure is sound and
+`gen_tyndp_baseline.py` will fill the 2019 row automatically once future anchors exist.**
+
+<https://longreads.cbs.nl/hernieuwbare-energie-in-nederland-2019/zonne-energie/>
+
+### Forward anchors — SOURCED COMPONENTS, NOT YET WRITTEN
+
+These are the official figures found; they are recorded here rather than written into the tab because
+each requires a judgement that is yours (see "Open decisions" below).
+
+**Offshore wind** — Nationaal Plan Energiesysteem (Ministerie van Klimaat en Groene Groei / EZK,
+1 December 2023), cabinet targets [direct]:
+
+| year | GW offshore |
+|---|---|
+| 2031 | 21 |
+| 2040 | 50 |
+| 2050 | 70 |
+
+<https://www.rijksoverheid.nl/documenten/2023/12/01/nationaal-plan-energiesysteem>
+
+**Offshore wind, nearer term** — PBL, *Klimaat- en Energieverkenning 2025*: "almost 5 GW" on the North
+Sea now, **10 GW expected in 2030** on the basispad.
+
+**Onshore wind + solar** — Klimaatakkoord / RES target of **35 TWh** of large-scale onshore solar and
+wind by 2030; KEV 2025 projects 34–44 TWh, calling the 35 TWh goal very likely met.
+
+**Electricity demand** — PBL, *Klimaat- en Energieverkenning 2025*, Bijlage 2, Tabel 24
+"Elektriciteitsbalans in petajoule", row "Totaal verbruik" [direct, PJ → TWh at 1 PJ = 0.277778 TWh]:
+
+| year | PJ | TWh |
+|---|---|---|
+| 2020 | 430 | 119.4 |
+| 2023 | 416 | 115.6 |
+| 2024 | 425 | 118.1 |
+| 2030 | 548 (band 509–574) | **152.2** (141.4–159.4) |
+
+Same table, 2030 generation split: wind 237 PJ (65.8 TWh), solar 95.4 PJ (26.5 TWh).
+
+<https://www.pbl.nl/system/files/document/2025-09/pbl-2025-klimaat-en-energieverkenning-2025-5692.pdf>
+
+**Electricity demand, 2050** — NPE indicative **direct** electricity demand ≈ **273 TWh** for 2050.
+Note this is a different accounting basis from the KEV's "totaal verbruik" and the two should not be
+interpolated between without checking the definitions match.
+
+### Open decisions before NL is written into the tab
+
+1. **`cap_solar_gw` has no published GW trajectory** in either source. KEV 2025 gives solar *generation*
+   (95.4 PJ = 26.5 TWh in 2030), not capacity. Converting needs a yield assumption — which we can
+   measure from our own lake (2019 NL solar generation ÷ 7 226 MW) rather than assume, but that is a
+   derivation and I will not write a derived capacity trajectory into a scenario tab without your
+   sign-off on the method.
+2. **`cap_wind_gw` mixes bases.** The 21 / 50 / 70 GW figures are offshore-only cabinet *targets*; the
+   KEV 10 GW-by-2030 is a *projection* of what policy will actually deliver. Targets and projections
+   should not be mixed within one trajectory, and onshore must be added on a consistent basis.
+3. **`demand_twh` basis.** KEV "totaal verbruik" (152.2 TWh in 2030) vs NPE "direct electricity demand"
+   (273 TWh in 2050) are not the same quantity.
+4. **`cap_flex_gw` has no source at all** in these documents — and it is read as an *absolute* level, so
+   an omission means NL simply gets no adequacy block.
+
+### The same gap applies to DK, PL_CZ and AT_SI
+
+The coverage report shows `cap_flex_gw`, `cap_solar_gw`, `cap_wind_gw` and `demand_twh` all **missing**
+for DK, PL_CZ and AT_SI as well. They were not researched here because they were not in scope, but they
+are on the identical flat-CAGR fallback as NL and will carry the same bias.
+
+---
+
+## `cap_hydro_gw` — the definition, and why it still stays clamped
+
+### The definition
+
+**`cap_hydro_gw` means reservoir + run-of-river, EXCLUDING pumped storage.**
+
+This is not a preference. `tyndp._CAP_VAR` already encodes it — `hydro_reservoir` and `hydro_ror` map to
+`cap_hydro_gw` while `hydro_psp` maps to its own `cap_psp_gw` — and the dispatch forces it: PSP is not in
+the hydro merit order at all. `flexibility.storage` sizes the storage LP from the zone's measured
+`hydro_psp` stack capacity and dispatches it as storage. A PSP-inclusive factor would scale a stack that
+does not contain the PSP it is counting.
+
+### The sheet does not follow it, and not uniformly
+
+Measured against 2019 ENTSO-E installed capacity:
+
+| zone | res+ror | +psp | 2025 anchor | entered on |
+|---|---|---|---|---|
+| FR | 19.23 | 24.26 | 26.0 | **PSP-inclusive** — deviates |
+| CH | 6.05 | 12.69 | 15.0 | **PSP-inclusive** — deviates |
+| DE_LU | 5.32 | 14.74 | 5.0 | res+ror — correct |
+| ES | 20.30 | 25.95 | 20.0 | res+ror — correct |
+| IT_NORTH | 0.00 | 0.00 | 13.0 | undeterminable — no capacity rows at all |
+
+That split is why the first attempt was abandoned: it applied one tech set to every zone, so it was right
+for half and wrong for half — PSP-inclusive gave DE 0.34, PSP-exclusive gave FR 1.41.
+
+### Why the mixed definition is nevertheless not the blocker
+
+`tyndp_factors` consumes a **ratio within a zone**, so a constant definitional offset cancels, provided
+the reference-year baseline is measured on the same basis as that zone's own anchors.
+`gen_tyndp_baseline.py` now detects that basis per zone (`hydro_basis()`), which resolves the
+inconsistency without editing a single scenario value.
+
+### RESOLVED — the sheet is now on one definition
+
+`scripts/fix_tyndp_hydro_basis.py` restated the two deviating zones onto res+ror and moved their pumped
+storage into `cap_psp_gw`. PSP levels are measured, with the projected-year level chosen by the workbook
+owner:
+
+| zone | PSP 2019 (measured) | PSP for projected years | why |
+|---|---|---|---|
+| FR | 5.023 GW | **5.050 GW** (2022) | France builds no new PSP; measured flat 2019–2026 |
+| CH | 6.641 GW | **6.681 GW** (2022) | Swiss PSP is *not* static — Nant de Drance added ~0.9 GW in 2022, so the 2019 figure would understate every projected year |
+
+Anchors after restatement:
+
+| zone | `cap_hydro_gw` was | now (res+ror) | `cap_psp_gw` added |
+|---|---|---|---|
+| FR | 26 / 26 / 27 / 27 | 20.95 / 20.95 / 21.95 / 21.95 | 5.05 |
+| CH | 15 / 15 / 16 / 16 | 8.319 / 8.319 / 9.319 / 9.319 | 6.681 |
+
+All four zones with capacity data now detect **res+ror**, and `gen_tyndp_baseline.py` writes their 2019
+baselines. `cap_hydro_gw` is unclamped for FR, DE_LU, CH and ES.
+
+### Accepted error source: the anchor-vs-measured level gap
+
+The scenario anchors and ENTSO-E's measured stock disagree on the *level*, and the ratio carries that
+disagreement into the first projected years as apparent growth:
+
+| zone | measured 2019 | first anchor | span 2025→2050 | **level gap** | hydro factor 2024/2019 |
+|---|---|---|---|---|---|
+| FR | 19.234 | 20.95 | +4.8 % | **+8.9 %** | 1.074 |
+| CH | 6.053 | 8.319 | +12.0 % | **+37.4 %** | 1.312 |
+| DE_LU | 5.317 | 5 | 0.0 % | **−6.0 %** | 0.950 |
+| ES | 20.302 | 20 | 0.0 % | **−1.5 %** | 0.988 |
+
+The gap exceeds the trajectory in every zone, so a material part of each factor is level mismatch rather
+than build-out. **This was put to the workbook owner and accepted explicitly**, so the baselines are
+written and the gap is printed on every run of `gen_tyndp_baseline.py` rather than silently swallowed.
+
+CH is the worst case by far (+37.4 %), and the cause is on the measurement side, not the scenario side:
+ENTSO-E reports only 6.05 GW of Swiss reservoir + run-of-river, which badly under-counts Swiss small
+hydro. The residual fix is therefore to reconcile the anchor levels with a better capacity source, not to
+change the anchors.
+
+### IT_NORTH remains clamped, correctly
+
+No installed-capacity rows exist for IT_NORTH at all, so its 13 GW anchor cannot be checked against
+anything and `hydro_basis()` refuses to guess. Its anchors are perfectly flat, so the clamped factor of
+1.0 is exactly right regardless.

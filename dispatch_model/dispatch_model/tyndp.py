@@ -53,6 +53,72 @@ def flex_capacity_mw(tyndp: dict, zone: str, year: int) -> float:
     return float(v) * 1000.0 if v else 0.0
 
 
+def coverage(tyndp: dict, zone: str, ref_year: int) -> dict[str, str]:
+    """Classify every projection-relevant variable for `zone` as ok / clamped / missing.
+
+    Written because the 2024 backcast found this failing SILENTLY and expensively. A zone whose anchors
+    all start after `ref_year` gets `_interp(ref_year)` clamped flat to the first anchor, so the factor
+    collapses to ~1.0 and the variable is FROZEN at its reference-year level for every projected year — it
+    looks like a deliberate "no change" scenario and is indistinguishable from one in the output. A zone
+    absent from the tab falls back to a flat CAGR, which is a design choice but an invisible one.
+
+    Measured cost of that silence (2024 projected from 2019, vs observed):
+
+        CH   `cap_solar_gw`/`cap_wind_gw` anchored 2025+, no 2019 row -> res factor exactly 1.0
+        NL   no RES/demand/flex rows at all                          -> CAGR +4.5 %/yr, no flex block
+        IT   same as CH
+
+        negatives  CH 292 -> 0     NL 458 -> 0     BE 404 -> 0
+        mean err   CH +20.3        NL +16.4        (the whole low tail vanishes: NL p5 75 vs ~0 observed)
+
+    `clamped` is the dangerous class: `missing` at least routes through a documented fallback, whereas a
+    clamped variable silently asserts "no structural change" for 30 years. Neither can be fixed by
+    measurement — CH/IT have no 2019 RES capacity at source (ENTSO-E omits Swiss solar/wind, and a
+    generation proxy reads 297 MW against a ~2 GW fleet because Swiss PV is behind the meter), and NL
+    needs scenario anchors. So the fix is to make them impossible to miss.
+    """
+    z = tyndp.get(zone) or {}
+    out: dict[str, str] = {}
+    for var in ("demand_twh", "cap_flex_gw", *_RES_VARS, *sorted(set(_CAP_VAR.values()))):
+        s = z.get(var)
+        if not s:
+            out[var] = "missing"
+        elif min(s) > ref_year:
+            out[var] = f"clamped (anchors start {min(s)}, no {ref_year} baseline)"
+        else:
+            out[var] = "ok"
+    return out
+
+
+#: variables whose ABSENCE is worth reporting. The rest (oil, biomass, lignite, psp) are absent from the
+#: tab for nearly every zone by design and route through the documented CAGR fallback, so listing them
+#: buries the signal. `clamped` is reported for EVERY variable regardless — it is never intentional.
+_CORE_VARS = ("demand_twh", "cap_solar_gw", "cap_wind_gw", "cap_flex_gw")
+
+
+def report_coverage(tyndp: dict, zones, ref_year: int) -> list[str]:
+    """Human-readable lines for every zone/variable NOT on a sound footing. Empty list = full coverage.
+
+    `cap_flex_gw` is exempt from `clamped`: it is read as an absolute level, not a ratio, so a late first
+    anchor is correct rather than degenerate. `missing` is reported only for `_CORE_VARS`.
+    """
+    lines = []
+    for z in zones:
+        cov = coverage(tyndp, z, ref_year)
+        bad = {}
+        for v, s in cov.items():
+            if s == "ok":
+                continue
+            if s.startswith("clamped"):
+                if v != "cap_flex_gw":
+                    bad[v] = s
+            elif v in _CORE_VARS:
+                bad[v] = s
+        if bad:
+            lines.append(f"  {z}: " + ", ".join(f"{v}={s}" for v, s in sorted(bad.items())))
+    return lines
+
+
 def tyndp_factors(tyndp: dict, zone: str, target_year: int, ref_year: int) -> dict | None:
     """Multipliers (target ÷ ref) for `zone` from TYNDP: {"demand": f, "res": f, "cap": {tech: f}}.
     Returns None if the zone has no TYNDP row (→ projection uses the CAGR fallback). Per-variable, a

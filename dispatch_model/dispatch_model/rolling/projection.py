@@ -32,7 +32,8 @@ from ..lp.highs_solver import solve_budget
 from ..res_schemes import load_res_schemes, solve_with_triggers
 from ..rules import rules_at
 from ..scheme_evolution import scheme_shares, trigger_hours
-from ..tyndp import flex_capacity_mw, load_tyndp, tyndp_factors
+from ..stacks.costs import VOM
+from ..tyndp import flex_capacity_mw, load_tyndp, report_coverage, tyndp_factors
 from .assemble import _EXCLUDE_DISPATCH, NTC, flow_derived_ntc
 from .windows import fr_stack_base, fr_window, nb_window
 
@@ -147,13 +148,8 @@ def _scale_stack(stack: pd.DataFrame, k: int, g: dict, cap_factors: dict | None 
     return st
 
 
-#: €/MWh bid of the #83 adequacy block. NOT A MEASURED PARAMETER — it is the value this block has been
-#: specified at in its own docstring since the initial commit, and it has no source anywhere in the repo
-#: or the workbook. It is written here rather than left implicit because the block was silently UNPRICED
-#: until now (see `_append_flex`), and an explicit number that can be challenged beats a NaN that cannot.
-#: It needs a measured source: the block is battery + DR + H2-peaker, so its bid should come from the
-#: same revealed-behaviour route as every other bid in this model, not from a docstring.
-_FLEX_VOM_EUR_MWH = 180.0
+#: one-shot latch so a 20-year cross-over prints the TYNDP coverage report once, not 20 times
+_COVERAGE_REPORTED: list[int] = []
 
 
 def _append_flex(stack: pd.DataFrame, zone: str, tyndp: dict, year: int) -> pd.DataFrame:
@@ -161,31 +157,22 @@ def _append_flex(stack: pd.DataFrame, zone: str, tyndp: dict, year: int) -> pd.D
     TYNDP `cap_flex_gw` trajectory (#83). Priced at its VOM by `srmc`, it is the adequacy backstop
     that caps scarcity as firm thermal retires — no-op where TYNDP gives no flex for the zone.
 
-    The price goes in `opportunity_bid_eur_mwh`, NOT `srmc_eur_mwh`. Two reasons, both learned from the
-    NaN this function shipped since the initial commit:
-
-    * at this point the stack has no `srmc_eur_mwh` column at all (it is `unit_id, name, tech,
-      capacity_mw, efficiency, min_gen_frac, ramp_frac, vom`), so a value written under that key is
-      silently dropped by the `row.get(c, ...) for c in stack.columns` projection;
-    * SRMC is derived per window by `fr_window`/`nb_window` from fuel price and efficiency, and this
-      block has neither — so anything written here would be overwritten with NaN a moment later anyway.
-
-    `apply_bids` runs immediately after that derivation (`apply_water_value` in the window builders) and
-    overwrites SRMC wherever a bid exists. That is the channel the hydro tranches and the nuclear bid
-    remap already use for rows whose price is an opportunity cost rather than a fuel cost, and it is the
-    only one that survives the window build. The column is added when absent — without that, the same
-    projection drops the bid exactly as it dropped the SRMC.
+    The row MUST carry `vom`. `srmc()` reads the stack's `vom` COLUMN when one exists and only falls back
+    to the per-tech `VOM` table when it does not — and these stacks do have the column. So omitting `vom`
+    here bypassed `VOM["flex"]` (which has been 180 €/MWh in `stacks.costs` all along, with its own #83
+    rationale) and left the row at NaN, since `srmc()` starts from `out = vom.copy()` and `flex` is a
+    non-fuel tech that never gets a fuel term to overwrite it. Writing `srmc_eur_mwh` here would not
+    work: the column does not exist at this point (the stack is `unit_id, name, tech, capacity_mw,
+    efficiency, min_gen_frac, ramp_frac, vom`), so `row.get(c, ...) for c in stack.columns` drops it, and
+    the per-window `srmc()` would overwrite it anyway.
     """
-    from ..stacks.revealed import BID_COL
     mw = flex_capacity_mw(tyndp, zone, year) if tyndp else 0.0
     if mw < 50:
         return stack
     row = {"unit_id": f"{zone}_flex", "zone": zone, "tech": "flex", "capacity_mw": float(mw),
-           "efficiency": np.nan, "min_gen_frac": 0.0}
-    cols = list(stack.columns) + ([BID_COL] if BID_COL not in stack.columns else [])
-    new = pd.DataFrame([{c: row.get(c, np.nan) for c in cols}])
-    new.loc[0, BID_COL] = _FLEX_VOM_EUR_MWH
-    return pd.concat([stack.reindex(columns=cols), new], ignore_index=True)
+           "efficiency": np.nan, "min_gen_frac": 0.0, "vom": VOM["flex"]}
+    return pd.concat([stack, pd.DataFrame([{c: row.get(c, np.nan) for c in stack.columns}])],
+                     ignore_index=True)
 
 
 def project_year(config: Config, target_year: int, ref, n_weeks: int | None = None,
@@ -197,6 +184,21 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
     k = target_year - ref["ref_year"]
     # #76: per-zone demand/RES/capacity multipliers from TYNDP where available, else the flat CAGR fallback.
     tyndp = ref.get("tyndp") or {}
+    # Report the gaps EVERY run. The 2024 backcast measured what silence costs: CH and IT_NORTH have no
+    # 2019 RES anchor, so their factors clamp to exactly 1.0 and RES is frozen at reference-year level;
+    # NL has no RES/demand/flex rows at all and falls back to a flat CAGR. All three lost their entire
+    # negative-price tail (CH 292→0, NL 458→0 hours) and ran +16 to +20 €/MWh high, and nothing in the
+    # output distinguished that from a deliberate flat scenario. Printed once per projected year, not
+    # raised: a partially-filled tab is a legitimate work-in-progress state, an unnoticed one is not.
+    if tyndp and not _COVERAGE_REPORTED:
+        # de-duplicate: `zones` already contains the neighbours, so zones+neigh lists most of them twice
+        gaps = report_coverage(tyndp, list(dict.fromkeys(list(zones) + list(neigh))), ref["ref_year"])
+        if gaps:
+            print(f"  [projection] TYNDP coverage gaps vs ref {ref['ref_year']} "
+                  f"(clamped = frozen at reference level, missing = CAGR fallback):", flush=True)
+            for ln in gaps:
+                print(ln, flush=True)
+        _COVERAGE_REPORTED.append(1)
 
     def zfac(zone):
         tf = tyndp_factors(tyndp, zone, target_year, ref["ref_year"]) if tyndp else None
