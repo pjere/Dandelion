@@ -891,3 +891,51 @@ border. ES is unmoved — correctly, it has no German border.
 where that base differs from the policy baseline (BE's stack reads 4.64 GW against ENTSO-E's 5.94) the
 projected absolute lands below the policy number (1.62 vs 2.08 GW in 2040). The trajectory sets the
 SHAPE of decline exactly; the LEVEL inherits the stack's calibration. DE is exact because its ratio is 0.
+
+## Projection backcast: the layer fails, and the cause is a missing reference-year baseline (2026-08-02)
+
+Projection had never been scored against truth — the multi-year gate runs the backtest system. The
+backcast projects 2024 from the 2019 reference and compares three arms: **A** observed 2024,
+**B** the backtest with actual 2024 inputs (the dispatch's own error, already gated), **C** the
+projection. A projection is a distributional forecast, so everything is scored on the distribution.
+
+| zone | A obs mean | B backtest | C projection | proj err | disp err | **layer** |
+|------|-----------|-----------|-------------|---------|---------|-----------|
+| FR | 58.0 | 45.3 | 86.6 | +28.6 | −12.7 | **+41.3** |
+| BE | 70.3 | 69.8 | 96.6 | +26.3 | −0.5 | +26.8 |
+| ES | 63.0 | 60.5 | 84.7 | +21.7 | −2.5 | +24.2 |
+| NL | 77.3 | 78.5 | 95.6 | +18.3 | +1.2 | +17.1 |
+| CH | 76.0 | 87.3 | 102.2 | +26.2 | +11.3 | +14.9 |
+| IT_NORTH | 107.4 | 93.3 | 107.7 | +0.3 | −14.1 | +14.4 |
+| DE_LU | 78.5 | 77.4 | 83.9 | +5.3 | −1.1 | +6.5 |
+
+**Pooled |projection error| 18.1 €/MWh against |dispatch error| 6.2 — the projection layer contributes
+20.7, three times the dispatch it wraps.** And the distribution has no bottom: FR p5 = 52 against an
+observed 0, **zero** negative hours against 352 observed (backtest 428), zero boundary hours against
+1018. Scarcity is absent too (FR 0 vs 25, DE 0 vs 129).
+
+**Cause — the same defect class as the phantom German nuclear, one level up.** `tyndp_factors` computes
+`interp(target) / interp(reference_year)`, and `dispatch_tyndp` starts at **2025**, so `interp(2019)`
+extrapolates to the 2025 value and every factor is really *target ÷ 2025* — applied to a **2019** stack
+and weather shape. The whole 2019→2025 structural change is silently dropped. For a 2024 target the
+factors come out at **exactly 1.0**: the projection replays 2019 unchanged (residual demand mean
+43.7 GW, 1951 hours below 35 GW, versus 35.8 GW and **4765** hours in actual 2024 — less than half the
+surplus hours, so negatives cannot form).
+
+**This is not confined to the backcast year.** Every projected year realises
+`actual2019 × target/2025` of RES instead of `target`:
+
+| | FR solar | FR wind | DE solar | DE wind | ES solar | ES wind |
+|---|---|---|---|---|---|---|
+| 2019 actual (GW) | 8.2 | 13.6 | 45.4 | 59.3 | 6.8 | 23.0 |
+| table 2025 (GW) | 20.0 | 27.0 | 90.0 | 70.0 | 30.0 | 30.0 |
+| **realised share** | **41 %** | **50 %** | **50 %** | **85 %** | **23 %** | **77 %** |
+
+So every projection to date has run on roughly **half its intended solar** (Spain a quarter). The
+20-year cross-over, the storage projection A/B and the hydro A/B were all computed on that fleet — the
+cross-over's negative-hour growth (61 → 1691) therefore **understates** the phenomenon substantially.
+Deltas from A/Bs that toggle one mechanism (the DE-nuclear A/B) remain valid; absolute levels do not.
+
+**Fix**: add reference-year (2019) baseline rows to `dispatch_tyndp` for `demand_twh` and every `cap_*`
+variable, from actual 2019 data — exactly the 2019 row the nuclear generator already emits, generalised.
+Then the factor is target ÷ actual-2019 applied to the actual-2019 stack, which is dimensionally right.

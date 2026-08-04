@@ -22,6 +22,85 @@ import pandas as pd
 _EPS_FLOW = 1e-3          # €/MWh gross-flow penalty (matches multi_zone) → removes degenerate loop flows
 _EPS_TIE = 0.01          # €/MWh max SRMC tie-break perturbation (F6 dual quality); ≤ this bounds any price move
 _INF = highspy.kHighsInf
+#: trace every HiGHS run (wall time vs the limit actually set, and the model size). Off by default;
+#: enable with DISPATCH_TRACE_SOLVES=1 or by setting this flag. Answers the only question that matters
+#: when a bounded window overruns: is the solver honouring `time_limit`, or ignoring it?
+_TRACE_SOLVES = False
+#: DISPATCH_DUMP_LP=<dir> writes each flex-path model to <dir>/lp_<n>.mps before it is solved, keeping only
+#: the last two. The pathological window cannot be reproduced offline without its model, and dumping every
+#: window would cost tens of GB — but a ROLLING pair means that when a run stalls, the newest file on disk
+#: IS the stalling model, ready for offline experiments (reduction limits, rule masks) that take seconds
+#: instead of the ~10 min preload a live reproduction needs.
+_DUMP_KEEP = 2
+_dump_n = 0
+
+
+def _dump_model(h) -> None:
+    global _dump_n
+    import os
+    from pathlib import Path
+    d = os.environ.get("DISPATCH_DUMP_LP")
+    if not d:
+        return
+    p = Path(d); p.mkdir(parents=True, exist_ok=True)
+    _dump_n += 1
+    h.writeModel(str(p / f"lp_{_dump_n}.mps"))
+    old = p / f"lp_{_dump_n - _DUMP_KEEP}.mps"
+    if old.exists():
+        old.unlink()
+
+
+def _assert_finite(cost, col_lo, col_up, row_lo, row_up, mat,
+                   gen_cols, res_cols, ens_cols, dump_cols, n) -> None:
+    """Reject a model containing NaN before it reaches HiGHS, naming the block that produced it.
+
+    Learned the expensive way. One projection window carried 168 NaN entries in the cost vector — one
+    FR generation unit's whole week, a hydro tranche whose `srmc_eur_mwh` and `opportunity_bid_eur_mwh`
+    were BOTH NaN, so `apply_bids` (which only overwrites where the bid is present) left the NaN in
+    place. HiGHS accepts such a model and reports no error: it presolves it normally (1 s), then dual
+    simplex produces `nan` objectives from iteration ~19,000, never converges because every termination
+    test against a NaN is false, gives up, postsolves a non-optimal solution and RE-SOLVES the original
+    full-size model — which is the runaway. IPM fails the same way (kUnknown, NaN objective, duals of
+    order 1e9). The window therefore looked like an unbounded solver hang for three separate
+    investigations — degeneracy, then crossover, then presolve — and cost hours of CPU on containment
+    strategies for a solver that was never at fault. NaN in, garbage out; this makes it say so.
+
+    Bounds and matrix are checked too: an infinite BOUND is legitimate (`_INF` is how free columns and
+    one-sided rows are expressed) but a NaN bound or a non-finite coefficient never is.
+    """
+    def where(i: int) -> str:
+        for z, (gbase, m, units, _tech) in gen_cols.items():
+            if gbase <= i < gbase + m * n:
+                j = (i - gbase) // n
+                return f"zone {z} generation unit #{j} ({units[j]!r}), hour {(i - gbase) % n}"
+        for z, (rbase, ntr) in res_cols.items():
+            if rbase <= i < rbase + ntr * n:
+                return f"zone {z} RES tranche #{(i - rbase) // n}, hour {(i - rbase) % n}"
+        for z, e in ens_cols.items():
+            if e <= i < e + n:
+                return f"zone {z} ENS, hour {i - e}"
+        for z, d in dump_cols.items():
+            if d <= i < d + n:
+                return f"zone {z} DUMP, hour {i - d}"
+        return f"column {i} (border flow / flex / storage block)"
+
+    for name, a, allow_inf in (("cost", cost, False), ("col_lower", col_lo, False),
+                               ("col_upper", col_up, True), ("row_lower", row_lo, True),
+                               ("row_upper", row_up, True), ("matrix", mat, False)):
+        a = np.asarray(a, float)
+        bad = np.isnan(a) if allow_inf else ~np.isfinite(a)
+        if not bad.any():
+            continue
+        ix = np.flatnonzero(bad)
+        loc = where(int(ix[0])) if name in ("cost", "col_lower", "col_upper") else f"index {ix[0]}"
+        raise ValueError(
+            f"LP build produced {ix.size} non-finite {name} entries — first at {loc}. "
+            f"A NaN here is a data defect upstream (most often a stack row with neither "
+            f"`srmc_eur_mwh` nor `{BID_COL_NAME}` set); HiGHS would accept it and stall instead of "
+            f"failing, so it is rejected here.")
+
+
+BID_COL_NAME = "opportunity_bid_eur_mwh"   # named here to keep the guard import-free (see stacks.revealed)
 
 
 def _as_time_array(v, n: int) -> np.ndarray:
@@ -266,23 +345,70 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
 
             # ---- F2b rigidity families. Each is opt-in on its spec key, so an F2a-shaped spec (no key)
             #      builds byte-identical to the block above; the toy F2a tests are unaffected. ----
-            if "d_max_8h" in fz:                       # C2a: Σ_{k=0..7} d_{t−k} ≤ D_max8h·cap (rolling 8 h)
+            # ---- rolling-window STATE (F2b reformulation) -------------------------------------------
+            # C2a and C3 both need the trailing 8-hour deep-mod sum. Writing that sum out per hour makes
+            # consecutive rows share 7 of their 8 terms — near-parallel rows, and a vertex with enormous
+            # degeneracy: dual simplex pivots among equivalent bases without improving the objective. It is
+            # latent while `d` is slack, and it bites hard once high RES forces deep modulation in half the
+            # hours (measured on projected 2024: the nuclear commitment floor exceeds residual demand in
+            # 4384 of 8759 hours; single windows then burned 85–121 CPU-minutes and ignored every time limit).
+            # Carrying the window as a state variable instead removes the overlap at source:
+            #     V_t = Σ_{k=1..8} d_{t−k},   V_t = V_{t−1} + d_{t−1} − d_{t−9}
+            # C2a becomes `d_t + V_t ≤ B8` (2 nonzeros, was 8) and C3 uses `β·V_t` (4 nonzeros, was up to 11).
+            # The seam collapses too: the eight `d_hist` terms that used to be scattered across the first
+            # eight rows of BOTH families — the exact C3×seam interaction the bisection isolated as
+            # *structural* — become one fixed initial value V_0. Mathematically identical: same feasible set
+            # projected on d, so prices move only by degeneracy tie-breaking.
+            need_v = ("d_max_8h" in fz) or ("r_up" in fz and np.any(
+                np.broadcast_to(np.asarray(fz.get("xenon_beta", 0.0), float), (mu,))))
+            vb = None
+            if need_v:
+                B8v = (np.asarray(fz["d_max_8h"], float) * capf if "d_max_8h" in fz
+                       else np.full(mu, _INF))
+                # Seam history: a window can arrive having spent more than its (possibly
+                # maneuverability-tightened) budget allows. The explicit form clamped its row bounds at 0;
+                # the state form must instead scale the history VECTOR, because V_0 and the terms the
+                # recursion later subtracts have to stay mutually consistent — clamping V_0 alone drives
+                # V_1 = V_0 + d_0 − hist[7] below its zero floor and makes the LP infeasible (caught by
+                # test_f5_seam_budget_clamp_stays_feasible_when_history_exceeds_budget). Scaling preserves
+                # the semantics — the budget is spent, so no deep-mod until it rolls out of the window —
+                # while keeping every partial sum ≤ B8 by construction.
+                if has_state:
+                    hs = np.asarray(d_hist[:, :8], float)
+                    tot = hs.sum(axis=1)
+                    scale = np.where(tot > B8v, B8v / np.maximum(tot, 1e-9), 1.0)
+                    hist8 = hs * scale[:, None]
+                else:
+                    hist8 = np.zeros((mu, 8))
+                v0 = hist8.sum(axis=1)
+                vlo = np.zeros((mu, n)); vup = np.full((mu, n), _INF)
+                vlo[:, 0] = v0; vup[:, 0] = v0                       # V_0 fixed
+                vb = add_block(np.zeros(mu * n), vlo.ravel(), vup.ravel())
+                # recursion rows, t = 1..n−1 (equalities): V_t − V_{t−1} − d_{t−1} + d_{t−9} = −hist term
+                base = xrow
+                for j in range(mu):
+                    tt = np.arange(1, n); r = base + j * (n - 1) + (tt - 1)
+                    rows.append(r); cols.append(vb + j * n + tt); vals.append(np.ones(tt.size))
+                    rows.append(r); cols.append(vb + j * n + (tt - 1)); vals.append(-np.ones(tt.size))
+                    rows.append(r); cols.append(db + j * n + (tt - 1)); vals.append(-np.ones(tt.size))
+                    tt9 = np.arange(9, n)                            # d_{t−9} in-window for t ≥ 9
+                    if tt9.size:
+                        rows.append(base + j * (n - 1) + (tt9 - 1))
+                        cols.append(db + j * n + (tt9 - 9)); vals.append(np.ones(tt9.size))
+                    rhs = np.zeros(n - 1)
+                    if has_state:                                    # t ≤ 8 ⇒ d_{t−9} is pre-window history
+                        for t in range(1, min(9, n)):
+                            rhs[t - 1] = -float(hist8[j, 8 - t])     # the SAME scaled vector as V_0
+                    row_lo.append(rhs); row_up.append(rhs.copy())    # equality
+                xrow += mu * (n - 1)
+            if "d_max_8h" in fz:                       # C2a: d_t + V_t ≤ D_max8h·cap (rolling 8 h)
                 B8 = np.asarray(fz["d_max_8h"], float) * capf                        # (mu,) MWh / 8h window
                 base = xrow
                 for j in range(mu):
-                    for k in range(8):                                              # d_{t−k}, k=0..7, t−k≥0
-                        tt = np.arange(k, n)
-                        rows.append(base + j * n + tt); cols.append(db + j * n + (tt - k))
-                        vals.append(np.ones(tt.size))
-                    up = np.full(n, B8[j])
-                    if has_state:                          # pre-window d_{-1..-(7-t)} also occupy the 8h window
-                        for t in range(min(7, n)):         # ending at t (t=0..6) → charge them against the budget
-                            up[t] -= float(d_hist[j, :7 - t].sum())
-                        # clamp ≥0: if a maneuverability drop across the seam left the pre-window deep-mod above
-                        # the (now tighter) budget, the reactor simply can't deep-mod until it rolls out of the
-                        # 8h window — a spent budget, not an infeasible LP.
-                        np.maximum(up, 0.0, out=up)
-                    row_lo.append(np.full(n, -_INF)); row_up.append(up)
+                    tt = np.arange(n); r = base + j * n + tt
+                    rows.append(r); cols.append(db + j * n + tt); vals.append(np.ones(n))
+                    rows.append(r); cols.append(vb + j * n + tt); vals.append(np.ones(n))
+                    row_lo.append(np.full(n, -_INF)); row_up.append(np.full(n, B8[j]))
                 xrow += mu * n
             if "d_max_day" in fz:                      # C2b: Σ_{t∈day} d ≤ D_max_day·cap (calendar day)
                 Bday = np.asarray(fz["d_max_day"], float) * capf
@@ -302,16 +428,12 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                     rows.append(r); cols.append(gbase + fidx[j] * n + tt); vals.append(np.ones(tt.size))       # +p_t
                     rows.append(r); cols.append(gbase + fidx[j] * n + (tt - 1)); vals.append(-np.ones(tt.size))
                     rows.append(r); cols.append(ub + j * n + tt); vals.append(np.full(tt.size, -r_up[j]))       # -Rup*u
-                    if beta[j] != 0.0:                                             # xénon: recent deep-mod caps ramp
-                        for k in range(1, 9):
-                            tt2 = np.arange(max(1, k), n)                          # row t (≥1) uses d_{t−k} when t−k≥0
-                            rows.append(base + j * (n - 1) + (tt2 - 1))
-                            cols.append(db + j * n + (tt2 - k)); vals.append(np.full(tt2.size, beta[j]))
-                    up = np.zeros(n - 1)
-                    if has_state and beta[j] != 0.0:       # rows t=1..7 also see pre-window d_{t−k} (k>t) → RHS
-                        for t in range(1, min(8, n)):
-                            up[t - 1] = -beta[j] * float(d_hist[j, :8 - t].sum())
-                    row_lo.append(np.full(n - 1, -_INF)); row_up.append(up)
+                    if beta[j] != 0.0:                     # xénon: the trailing 8h deep-mod IS the state V_t
+                        rows.append(r); cols.append(vb + j * n + tt)
+                        vals.append(np.full(tt.size, beta[j]))
+                    # RHS is 0 for every t: the pre-window history that used to be written into rows 1..7
+                    # now lives in V_0 and propagates through the recursion.
+                    row_lo.append(np.full(n - 1, -_INF)); row_up.append(np.zeros(n - 1))
                 xrow += mu * (n - 1)
             if "rho_recommit" in fz:                   # C5 min-down proxy: u_t − u_{t−1} ≤ avail_t·ρ_recommit
                 rho = np.broadcast_to(np.asarray(fz["rho_recommit"], float), (mu,)).astype(float)
@@ -450,6 +572,8 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
     nrow = xrow
 
     R = np.concatenate(rows); C = np.concatenate(cols); V = np.concatenate(vals)
+    _assert_finite(np.concatenate(col_cost), np.concatenate(col_lo), np.concatenate(col_up),
+                   row_lower, row_upper, V, gen_cols, res_cols, ens_cols, dump_cols, n)
     return {
         "n": n, "zones": zones, "ncol": ncol, "nrow": nrow,
         "col_cost": np.concatenate(col_cost), "col_lo": np.concatenate(col_lo), "col_up": np.concatenate(col_up),
@@ -496,8 +620,21 @@ def _get_highs():
 
 
 def _solve_and_read(h, spec, price_sign, diagnose: bool = False):
-    if h.run() != highspy.HighsStatus.kOk or h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
+    import os
+    import time as _t
+    _t0 = _t.monotonic()
+    _status = h.run()
+    if _TRACE_SOLVES or os.environ.get("DISPATCH_TRACE_SOLVES"):
+        try:
+            _lim = h.getOptionValue("time_limit")
+            _lim = _lim[1] if isinstance(_lim, tuple) else _lim
+        except Exception:                                   # noqa: BLE001
+            _lim = "?"
+        print(f"      · solve {_t.monotonic() - _t0:7.1f}s  limit={_lim}  "
+              f"ncol={spec['ncol']} nrow={spec['nrow']}  status={h.getModelStatus()}", flush=True)
+    if _status != highspy.HighsStatus.kOk or h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
         raise RuntimeError(f"highs LP not optimal: {h.getModelStatus()}")
+    _tread = _t.monotonic()
     sol = h.getSolution()
     rd = np.asarray(sol.row_dual, float)
     cv = np.asarray(sol.col_value, float)
@@ -532,12 +669,46 @@ def _solve_and_read(h, spec, price_sign, diagnose: bool = False):
                               "ch": cv[gc:gc + ns * n].reshape(ns, n),
                               "soc": cv[eb:eb + ns * n].reshape(ns, n)}
                           for z, (gd, gc, eb, ns) in spec["storage_cols"].items()}
+    if _TRACE_SOLVES or os.environ.get("DISPATCH_TRACE_SOLVES"):
+        print(f"      · read  {_t.monotonic() - _tread:7.1f}s", flush=True)
     if diagnose:                       # lecture seule de la solution primale (cf. lp.diagnostics)
         from .diagnostics import binding_flows, debug_hour, marginal_report
         out["diag"] = marginal_report(spec, cv, prices)
         out["diag_flows"] = binding_flows(spec, cv, {})
         out["debug"] = lambda zone, hour: debug_hour(spec, cv, prices, zone, hour)   # F6 price decomposition
     return out
+
+
+# ---- per-window solve budget -------------------------------------------------------------------
+# Bounds the WALL time a caller may spend on one window across every solve it triggers (the §51 fixed
+# point re-solves, plus the seam→cold fallback). Unset = unbounded, i.e. the historical behaviour, so
+# the backtest and the golden flag-off path are untouched unless a caller opts in.
+_DEADLINE: float | None = None
+_MIN_SOLVE_S = 5.0
+
+
+def _budget_left() -> float:
+    import time as _t
+    return 1e9 if _DEADLINE is None else max(0.0, _DEADLINE - _t.monotonic())
+
+
+class solve_budget:
+    """Context manager: `with solve_budget(300): ...` caps the enclosed solves at 300 s in total."""
+
+    def __init__(self, seconds: float | None):
+        self.seconds = seconds
+
+    def __enter__(self):
+        import time as _t
+        global _DEADLINE
+        self._prev = _DEADLINE
+        _DEADLINE = None if self.seconds is None else _t.monotonic() + float(self.seconds)
+        return self
+
+    def __exit__(self, *exc):
+        global _DEADLINE
+        _DEADLINE = self._prev
+        return False
 
 
 def solve_multizone_highs(times, zones_data: dict, borders: list, ntc: dict,
@@ -550,7 +721,11 @@ def solve_multizone_highs(times, zones_data: dict, borders: list, ntc: dict,
 
     `price_sign` maps the HiGHS row dual to the market price; -1.0 reproduces linopy's sign (validated).
     `flex` opts into the plant-operating-rigidity rows (see ``_build``); None keeps the pure LP."""
+    import os as _os, time as _tt
+    _tb = _tt.monotonic()
     spec = _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tranches, flex, storage)
+    if _TRACE_SOLVES or _os.environ.get("DISPATCH_TRACE_SOLVES"):
+        print(f"      · build {_tt.monotonic() - _tb:7.1f}s", flush=True)
     model = highspy.HighsModel()
     lp = model.lp_
     lp.num_col_ = spec["ncol"]; lp.num_row_ = spec["nrow"]
@@ -578,22 +753,53 @@ def solve_multizone_highs(times, zones_data: dict, borders: list, ntc: dict,
     # caller's cold retry solves those same windows in seconds. Burning 180+600 s on a doomed seam attempt
     # only costs wall time; 90 s = 2× the slowest healthy seam solve observed (48 s under CPU contention),
     # so a healthy window cannot silently lose its seam link to the bound.
+    # A per-solve bound does NOT bound the WINDOW: the caller runs the §51 fixed point (up to `max_iter`
+    # solves) and then a seam→cold fallback, so the per-window worst case multiplies out to ~40 min —
+    # and crossover is known to overrun `time_limit`, so the true cost is worse (measured: one 2024
+    # projection window burned 85 CPU-minutes). Once the RES baseline was fixed the projection actually
+    # solves a high-RES system, which makes this degenerate window class the dominant cost rather than
+    # the ~9 % tail it was. `solve_budget()` lets the caller cap the whole window; every bound below is
+    # clipped to what remains of it, so a window costs at most its budget however many solves it takes.
+    left = _budget_left()
     is_seam = any("u_init" in z for z in flex.values())
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
+    # PRESOLVE STAYS ON — turning it off was tried and REFUTED. The hang is inside presolve (traced: a
+    # `build` line with no matching `solve` line, i.e. the process sits in `h.run()` having produced no
+    # simplex iteration, which is also why 90 s / 180 s / 300 s ceilings all failed to contain the same
+    # window — 85, 121, 114 CPU-minutes — since `time_limit` is checked at simplex iterations, not inside
+    # presolve). But `presolve="off"` under a budget was measured on the same projection and made every
+    # window unsolvable: 35 consecutive windows hit the 180 s limit at kTimeLimit and were dropped, where
+    # presolve-on solves the healthy ones in 0.4-11 s. Presolve is worth >20x on this model and is load
+    # bearing; the cost of removing it is 52 dead windows to bound one. The pathology is presumed to be a
+    # data-dependent reduction cascade on deep-surplus windows (mass fixing at bounds forces rows, which
+    # fixes more columns), not a size effect — every window has identical dimensions. Containment belongs
+    # in `presolve_reduction_limit` (available, default -1 = unlimited), which caps the cascade instead of
+    # forbidding the phase; the limit is not set here because it has not been measured yet.
     h.setOptionValue("presolve", "on")
-    h.setOptionValue("time_limit", 90.0 if is_seam else 180.0)
+    h.setOptionValue("time_limit", min(90.0 if is_seam else 180.0, left))
     h.passModel(model)
+    _dump_model(h)
     try:
         return _solve_and_read(h, spec, price_sign, diagnose)
     except RuntimeError:
         if is_seam:
             raise                                   # let the caller's cold retry handle it (fast, proven)
+        if _DEADLINE is not None:
+            # Under a budget the IPM rescue is NOT attempted. HiGHS's crossover phase overruns
+            # `time_limit` and cannot be preempted from Python once entered — measured twice on the same
+            # 2024 window, 85 and 121 CPU-minutes against a 300 s ceiling — so clipping its limit does not
+            # bound anything. A caller that asked for a bounded window gets a fast failure instead, and
+            # drops the window (counted) exactly as the backtest drops its pathological ones.
+            raise
+        left = _budget_left()
+        if left <= _MIN_SOLVE_S:                    # budget spent — fail fast so the caller can move on
+            raise
         h = highspy.Highs()                         # fresh again: discard the stalled simplex state entirely
         h.setOptionValue("output_flag", False)
         h.setOptionValue("presolve", "on")
         h.setOptionValue("solver", "ipm")
         h.setOptionValue("run_crossover", "on")
-        h.setOptionValue("time_limit", 600.0)
+        h.setOptionValue("time_limit", min(600.0, left))
         h.passModel(model)
         return _solve_and_read(h, spec, price_sign, diagnose)

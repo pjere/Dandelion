@@ -226,6 +226,33 @@ fleet as a peaking backstop. Margins recover to **+11 – +26 %** and 2040 winte
 **€80 – €174** (tight zones clear at the ~€180 flex ceiling, not VoLL; high-RES zones — DE-LU, FR — show
 negatives). The flex trajectory is starter data in the tab, editable from the TYNDP storage/DR/peaker scenario.
 
+> **The block was never actually priced, from the initial commit until the `_assert_finite` guard exposed
+> it.** `_append_flex` built its row without `srmc_eur_mwh`, and the row is projected through
+> `{c: row.get(c, np.nan) for c in stack.columns}` — where that column does not yet exist (the stack is
+> `unit_id, name, tech, capacity_mw, efficiency, min_gen_frac, ramp_frac, vom`; SRMC is derived per window
+> from fuel and efficiency, which this block has neither of). The result was a **NaN cost** on 1260 MW of
+> FR capacity in every projection window. Measured consequence: the column sat at its lower bound and
+> never entered the basis (`unit102 primal max 0.0`), so the fleet was *absent from dispatch* while being
+> present in the capacity accounting.
+>
+> So the two claims above are not on the same footing. The **margin** recovery is a capacity statistic and
+> stands. The **price** claim — "tight zones clear at the ~€180 flex ceiling, not VoLL" — describes a
+> mechanism that could not have operated, because the block never cleared. Those 2040 figures need
+> re-deriving now that the price is applied.
+>
+> The NaN was also not benign for the solver. HiGHS accepts a NaN cost without error, then dual simplex
+> produces NaN objectives, never converges (every termination test against NaN is false — which is why
+> `time_limit` appeared not to bind), postsolves a non-optimal solution and re-solves the original
+> full-size model. That is the "projection stall" chased across three wrong diagnoses (degeneracy,
+> crossover, presolve). Prices in the windows that *did* solve are unaffected: the duals are clean, and
+> the pipeline reads duals, not the objective.
+>
+> The price now goes in `opportunity_bid_eur_mwh` — the channel `apply_bids` applies *after* the per-window
+> SRMC derivation, the same one the hydro tranches and the nuclear bid remap use — and the column is added
+> when absent. **€180 has no measured source** in the repo or the workbook; it is asserted only by the
+> original docstring. The block is battery + DR + H2-peaker, so its bid belongs on the same
+> revealed-behaviour footing as every other bid in this model.
+
 ### Three honest gaps in projection realism (historical framing — see the two above for current state)
 
 1. **Weather shape is held fixed at the reference year** (2019) rather than re-drawn from weathergen. The

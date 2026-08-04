@@ -28,6 +28,7 @@ from ..io.entsoe_hist import load_generation_hist
 from ..io.fr_history import load_fr_netload
 from ..markup import apply_markup
 from ..neighbours.blocks import build_neighbour_stack, constituents, neighbour_netload
+from ..lp.highs_solver import solve_budget
 from ..res_schemes import load_res_schemes, solve_with_triggers
 from ..rules import rules_at
 from ..scheme_evolution import scheme_shares, trigger_hours
@@ -38,6 +39,11 @@ from .windows import fr_stack_base, fr_window, nb_window
 # default structural CAGRs (editable — dispatch_projection tab). RES build-out dominates the negative-price
 # story; demand creeps up with electrification; coal/lignite phase down.
 _GROWTH = {"demand": 0.008, "res": 0.045, "coal": -0.08, "lignite": -0.08}
+
+#: wall-clock ceiling for ONE weekly window, across every solve it triggers (§51 fixed point + the
+#: seam→cold fallback). 300 s is ~30x a healthy window (measured 3-17 s) so it can only bind on the
+#: degenerate class, and it caps a 52-week year at ~4 h even if every window were pathological.
+_WINDOW_BUDGET_S = 300.0
 
 
 def _load_growth(wb) -> dict:
@@ -141,16 +147,45 @@ def _scale_stack(stack: pd.DataFrame, k: int, g: dict, cap_factors: dict | None 
     return st
 
 
+#: €/MWh bid of the #83 adequacy block. NOT A MEASURED PARAMETER — it is the value this block has been
+#: specified at in its own docstring since the initial commit, and it has no source anywhere in the repo
+#: or the workbook. It is written here rather than left implicit because the block was silently UNPRICED
+#: until now (see `_append_flex`), and an explicit number that can be challenged beats a NaN that cannot.
+#: It needs a measured source: the block is battery + DR + H2-peaker, so its bid should come from the
+#: same revealed-behaviour route as every other bid in this model, not from a docstring.
+_FLEX_VOM_EUR_MWH = 180.0
+
+
 def _append_flex(stack: pd.DataFrame, zone: str, tyndp: dict, year: int) -> pd.DataFrame:
     """Append the zone's 2040-flexibility fleet (battery + DR + H2-peaker) as one dispatchable block from the
-    TYNDP `cap_flex_gw` trajectory (#83). Priced at its VOM (~€180) by `srmc`, it is the adequacy backstop
-    that caps scarcity as firm thermal retires — no-op where TYNDP gives no flex for the zone."""
+    TYNDP `cap_flex_gw` trajectory (#83). Priced at its VOM by `srmc`, it is the adequacy backstop
+    that caps scarcity as firm thermal retires — no-op where TYNDP gives no flex for the zone.
+
+    The price goes in `opportunity_bid_eur_mwh`, NOT `srmc_eur_mwh`. Two reasons, both learned from the
+    NaN this function shipped since the initial commit:
+
+    * at this point the stack has no `srmc_eur_mwh` column at all (it is `unit_id, name, tech,
+      capacity_mw, efficiency, min_gen_frac, ramp_frac, vom`), so a value written under that key is
+      silently dropped by the `row.get(c, ...) for c in stack.columns` projection;
+    * SRMC is derived per window by `fr_window`/`nb_window` from fuel price and efficiency, and this
+      block has neither — so anything written here would be overwritten with NaN a moment later anyway.
+
+    `apply_bids` runs immediately after that derivation (`apply_water_value` in the window builders) and
+    overwrites SRMC wherever a bid exists. That is the channel the hydro tranches and the nuclear bid
+    remap already use for rows whose price is an opportunity cost rather than a fuel cost, and it is the
+    only one that survives the window build. The column is added when absent — without that, the same
+    projection drops the bid exactly as it dropped the SRMC.
+    """
+    from ..stacks.revealed import BID_COL
     mw = flex_capacity_mw(tyndp, zone, year) if tyndp else 0.0
     if mw < 50:
         return stack
     row = {"unit_id": f"{zone}_flex", "zone": zone, "tech": "flex", "capacity_mw": float(mw),
            "efficiency": np.nan, "min_gen_frac": 0.0}
-    return pd.concat([stack, pd.DataFrame([{c: row.get(c, np.nan) for c in stack.columns}])], ignore_index=True)
+    cols = list(stack.columns) + ([BID_COL] if BID_COL not in stack.columns else [])
+    new = pd.DataFrame([{c: row.get(c, np.nan) for c in cols}])
+    new.loc[0, BID_COL] = _FLEX_VOM_EUR_MWH
+    return pd.concat([stack.reindex(columns=cols), new], ignore_index=True)
 
 
 def project_year(config: Config, target_year: int, ref, n_weeks: int | None = None,
@@ -301,6 +336,7 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         schemes["FR"] = apply_oa_ladder(schemes["FR"], load_oa_ladder(wb, target_year))  # vintage via scheme_shares
 
     price_chunks = []
+    _dropped: list[str] = []            # windows the solve budget could not clear (reported below)
     prev_flex_state = None; prev_w1 = None                     # F5: FR tail state across adjacent window seams
     for w0, w1 in zip(ref["weeks"][:-1], ref["weeks"][1:]):
         T = fr.loc[(fr.index >= w0) & (fr.index < w1)].index
@@ -322,17 +358,25 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
             seam = {**cold, **prev_flex_state} if (prev_flex_state is not None and prev_w1 == w0) else cold
 
         # seam-linked first, cold fallback if it over-constrains the window (see run_backtest for the rationale)
+        # Bounded by a per-WINDOW budget: a per-solve limit does not bound the window, because the §51 fixed
+        # point re-solves and the seam→cold fallback both multiply it — and crossover overruns its own limit.
+        # Measured before this guard: one high-RES 2024 window burned 85 CPU-minutes. A window that cannot be
+        # solved inside the budget is dropped and counted, exactly as run_backtest drops its pathological
+        # windows, instead of stalling the whole horizon.
         out = None
-        for sp in ([seam, cold] if seam is not cold else [seam]):
-            try:
-                out = solve_with_triggers(T, zd, borders, {b: ref["ntc"][b] for b in borders}, schemes,
-                                          res_bid=res_bid, price_floor=price_floor,
-                                          flex=({**{z: s for z, s in nb_flex.items() if z in zd},
-                                                 "FR": sp} if sp is not None else None),
-                                          fired_floor=fired_floor, storage=storage_proj)
-                break
-            except RuntimeError:
-                out = None
+        with solve_budget(_WINDOW_BUDGET_S):
+            for sp in ([seam, cold] if seam is not cold else [seam]):
+                try:
+                    out = solve_with_triggers(T, zd, borders, {b: ref["ntc"][b] for b in borders}, schemes,
+                                              res_bid=res_bid, price_floor=price_floor,
+                                              flex=({**{z: s for z, s in nb_flex.items() if z in zd},
+                                                     "FR": sp} if sp is not None else None),
+                                              fired_floor=fired_floor, storage=storage_proj)
+                    break
+                except RuntimeError:
+                    out = None
+        if out is None:
+            _dropped.append(str(w0.date()))
         if out is None:
             prev_flex_state = None; continue
         price_chunks.append(out["prices"])
@@ -343,6 +387,8 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
             break
     if not price_chunks:
         raise RuntimeError(f"projection {target_year}: every weekly LP window failed to solve")
+    if _dropped:
+        print(f"  [projection] {len(_dropped)} window(s) dropped on the {_WINDOW_BUDGET_S:.0f}s budget: {_dropped}", flush=True)
     smc = pd.concat(price_chunks).sort_index()
     # step-vii price layer: lift SMC → spot with the fitted markup (skipped if no model on disk). Drivers
     # are the *projected* demand/RES against firm capacity — the same structural signals the wedge was fit

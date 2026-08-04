@@ -23,7 +23,10 @@ from dispatch_model.stacks.fr_stack import build_fr_stack        # noqa: E402
 
 # 2019 is the projection's REFERENCE year: `tyndp_factors` computes target/reference, so without a
 # reference-year row the ratio is undefined and the tech escapes scaling entirely.
-YEARS = (2019, 2025, 2030, 2040, 2050)
+# anchors at the CLOSURE years too, not just round decades: the sheet is linearly interpolated, so
+# a fleet that shuts in 2023 would otherwise bleed away smoothly to the next anchor (measured: DE
+# nuclear read 1.4 GW in 2024, factor 0.17, against an actual zero from April 2023).
+YEARS = (2019, 2023, 2025, 2028, 2030, 2032, 2035, 2040, 2045, 2050)
 ZONES = ("FR", "BE", "CH", "ES", "DE_LU", "NL")
 
 cfg = load_config("config.yaml")
