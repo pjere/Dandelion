@@ -24,7 +24,8 @@ from ..io.fr_history import load_fr_netload
 from ..neighbours.blocks import build_neighbour_stack, constituents, neighbour_netload
 from ..res_schemes import load_res_schemes, solve_with_triggers
 from ..rules import rules_at
-from .assemble import _EXCLUDE_DISPATCH, NTC, flow_derived_ntc
+from .assemble import (_EXCLUDE_DISPATCH, MEASURED_MUSTRUN_ZONES, NTC, flow_derived_ntc,
+                       modelled_zones)
 from .windows import fr_stack_base, fr_window, nb_window
 
 
@@ -79,7 +80,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
 
     `write_lake=False` skips persisting prices/metrics — REQUIRED for calibration sweeps (F7), which must
     never overwrite the golden `backtest_prices` artifact with partial or experimental runs."""
-    zones = [z for z in config.all_zones if z != "GB"]
+    zones = modelled_zones(config)
     neigh = [z for z in zones if z != "FR"]
     wb = config.resolve(config.section("assumptions")["workbook"])
     cm = CommodityModel.from_workbook(wb)
@@ -88,7 +89,10 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     # empty observed store this resolves exactly to the old `_month_prices` path (byte-identical).
     resolver = PriceResolver(cm)
     gas_rules = load_gas_rules(wb)          # hub basis + Iberian gas-for-power cap (RDL 10/2022)
-    res_schemes = load_res_schemes(wb)                          # RES subsidy bid tranches per zone (§51)
+    # year-indexed: a bid ladder is not a constant. ES printed NO negative hours before 2024, then
+    # -0.10 median in 2024 and -1.00 in 2025 — one static block cannot serve all three (see
+    # `load_res_schemes`). Zones with undated rows are unaffected.
+    res_schemes = load_res_schemes(wb, year)                    # RES subsidy bid tranches per zone (§51)
 
     from ..flexibility import enabled as _flex_enabled
     flex_on = _flex_enabled(config) if flexibility is None else bool(flexibility)
@@ -235,8 +239,14 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         # measured must-run floors (flex-gated): p10 of observed generation per tech-month replaces the
         # chp×heat_factor heuristic, which forced ~10 GW of phantom German gas on surplus hours — the
         # dominant share of DE's long bias (see blocks.observed_mustrun_floors).
+        # ES joins DE_LU here. It had the SAME defect and was excluded only by the `measured_chp_mw`
+        # gate, which selects zones by whether a CHP entry exists rather than by whether the flat
+        # `min_gen_frac` overstates the fleet's real floor. Measured on ES 2024: 26.9 GW of gas at a flat
+        # 0.15 min_gen_frac forces 4033 MW to run, against an observed p10 of 2440 MW (1779 MW in April)
+        # — ~1.6 GW of phantom forced supply on exactly the surplus hours where Spanish prices are set.
         from ..neighbours.blocks import measured_chp_mw, observed_mustrun_floors, participation_caps
-        nb_mustrun = {z: observed_mustrun_floors(config, z, year) for z in neigh if measured_chp_mw(z)}
+        nb_mustrun = {z: observed_mustrun_floors(config, z, year) for z in neigh
+                      if measured_chp_mw(z) or z in MEASURED_MUSTRUN_ZONES}
         # revealed thermal participation (flex-gated): nameplate × 0.95 offers phantom capacity — the
         # market fleet saturates at the annual p99.9 of observed generation (validated as a true
         # ceiling on >150/>200 €/MWh hours: DE gas 0.51 of nameplate, ES 0.50, NL 0.60, BE 0.66;

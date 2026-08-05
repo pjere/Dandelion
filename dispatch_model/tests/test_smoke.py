@@ -17,10 +17,16 @@ def _have_db(cfg):
 def test_config_and_zones():
     cfg = _cfg()
     assert cfg.seed > 0
-    # 7 physical footprint zones + 5 virtual neighbour clusters: NL / DK / PL_CZ / AT_SI (DE-LU's export
+    # 8 physical footprint zones + 5 virtual neighbour clusters: NL / DK / PL_CZ / AT_SI (DE-LU's export
     # headroom + Alpine borders) and IT_SOUTH (IT-North's export-south demand). See neighbours/blocks.py.
+    # PT is the 8th physical zone: Spain was modelled as an island whose only outlet was the Pyrenees,
+    # and measured on 2024 its balance residual is +4.1 GW in the hours priced under 5 EUR/MWh — four
+    # times what crosses to France — so the LP had to drive ES negative to shed it (1329 negative hours
+    # against 247 observed). Same defect as IT-North before IT_SOUTH (#142). ES and PT clear at an
+    # identical price in 93.8 % of 2024 hours (MIBEL), which the 4.2 GW border reproduces on its own.
     clusters = {"NL", "DK", "PL_CZ", "AT_SI", "IT_SOUTH"}
-    assert len(cfg.zones) == 12 and clusters <= set(cfg.zones) and "DE_REST" not in cfg.zones
+    assert len(cfg.zones) == 13 and clusters <= set(cfg.zones) and "DE_REST" not in cfg.zones
+    assert "PT" in cfg.zones and ("ES", "PT") in [tuple(b) for b in cfg.borders]
     assert cfg.unit_resolved_zone == "FR"
     assert cfg.section("zones")["FR"]["unit_resolved"] is True
     # every border connects two declared zones

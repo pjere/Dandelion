@@ -31,10 +31,12 @@ from ..neighbours.blocks import build_neighbour_stack, constituents, neighbour_n
 from ..lp.highs_solver import solve_budget
 from ..res_schemes import load_res_schemes, solve_with_triggers
 from ..rules import rules_at
+from ..hydro.water_value import season_of as wv_season_of
 from ..scheme_evolution import scheme_shares, trigger_hours
 from ..stacks.costs import VOM
 from ..tyndp import flex_capacity_mw, load_tyndp, report_coverage, tyndp_factors
-from .assemble import _EXCLUDE_DISPATCH, NTC, flow_derived_ntc
+from .assemble import (_EXCLUDE_DISPATCH, MEASURED_MUSTRUN_ZONES, NTC, flow_derived_ntc,
+                       modelled_zones)
 from .windows import fr_stack_base, fr_window, nb_window
 
 # default structural CAGRs (editable — dispatch_projection tab). RES build-out dominates the negative-price
@@ -148,6 +150,18 @@ def _scale_stack(stack: pd.DataFrame, k: int, g: dict, cap_factors: dict | None 
     return st
 
 
+#: years tried, in order, for the hydro water-value curve SHAPE when the reference year cannot resolve
+#: one (see `_preload`). Recent years carry the wide price distributions that populate the middle price
+#: classes; the reference year is always the last fallback so behaviour is unchanged where it resolves.
+_HYDRO_SHAPE_YEARS = (2024, 2023, 2025)
+#: years tried, in order, for the MEASURED must-run floor. A p10-of-observed floor is only a FORCED
+#: minimum in a year with enough out-of-the-money hours to push the plant down to it — see the note at
+#: the `nb_mustrun` build. Recent high-RES years reveal it; a year where the plant simply ran does not.
+_MUSTRUN_REVEAL_YEARS = (2024, 2025)
+#: zones whose RES registry is genuinely plant-level, so the year-evolved `scheme_shares` ladder is
+#: meaningful. Everything else uses the static `dispatch_res_schemes` tab — see the comment at the
+#: `schemes = {...}` assignment, and the matching policy in `run_backtest`.
+_REGISTRY_EVOLVED = ("DE_LU", "FR")
 #: one-shot latch so a 20-year cross-over prints the TYNDP coverage report once, not 20 times
 _COVERAGE_REPORTED: list[int] = []
 
@@ -330,9 +344,35 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
 
     # year-varying RES subsidy tranches (roll-off + new build + §51 trigger schedule). The registry read
     # is hoisted into `_preload` (`res_registry`) so it is not re-read from the lake once per year.
+    #
+    # ONLY the zones with a genuine plant-level registry get the evolved ladder. This mirrors the policy
+    # `run_backtest` already applies and documents: DE_LU's registry is plant-level MaStR and its §51
+    # trigger semantics are genuinely German, whereas the other zones' registries are a degenerate
+    # cohort tier — 4 rows for BE/ES/IT_NORTH, none at all for NL — and `scheme_shares` would bolt a
+    # German trigger onto paid-regardless certificate schemes that have none. The projection was
+    # applying it EVERYWHERE, and the `or static` fallback only catches the empty case, not the
+    # degenerate one. Measured on the 2024 backcast, before this fix:
+    #
+    #   BE  registry yields ONE `green_certificate` tranche, and that name does not exist in the
+    #       workbook tab (which has gc_residential/gc_offshore/merchant), so `floors.get()` missed and
+    #       the whole Belgian ladder collapsed to a single rung at 0.0 -> ZERO negative hours projected
+    #       against 404 observed, mean +11.6 EUR/MWh.
+    #   CH  registry yields `kev` only, dropping the merchant rung -> floors [-50] instead of [-50, 0].
+    #   NL  registry is EMPTY, so the `or static` fallback already rescued it (floors -500/-20/-2).
+    #
+    # FR keeps the evolved ladder: 132k plant-level rows, and `apply_oa_ladder` below depends on the
+    # vintage split it produces.
     res_registry = ref.get("res_registry") or {}
-    schemes = {z: scheme_shares(z, target_year, floors.get(z, {}), reg=res_registry.get(z))
-               or ref["static"].get(z, []) for z in zones}
+    # Re-read the static tab AT THE TARGET YEAR, not the reference year: the ladder is year-indexed where
+    # the tab dates its rows (ES has no negative regime before 2024, -0.10 median in 2024, -1.00 in 2025),
+    # and `_preload` necessarily loaded it once for a whole horizon. Falls back to the preloaded block if
+    # the workbook cannot be re-read.
+    try:
+        _static_y = load_res_schemes(wb, target_year) or ref["static"]
+    except (ValueError, KeyError):
+        _static_y = ref["static"]
+    schemes = {z: ((scheme_shares(z, target_year, floors.get(z, {}), reg=res_registry.get(z))
+                    if z in _REGISTRY_EVOLVED else None) or _static_y.get(z, [])) for z in zones}
     if flex_spec is not None and "FR" in schemes:          # §6 (F4): FLEX owns the FR bid ladder. The OA
         from ..flexibility.trajectories import apply_oa_ladder, load_oa_ladder  # *volume* still decays by
         schemes["FR"] = apply_oa_ladder(schemes["FR"], load_oa_ladder(wb, target_year))  # vintage via scheme_shares
@@ -347,11 +387,22 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
             continue
         w0_t = w0 + pd.DateOffset(years=k)                     # commodity + market-rule year = the target
         prices = ref["resolver"].prices_at(w0_t)
+        # SEASONAL water value. The annual curve is a single object for the whole year, so summer water
+        # is priced at the annual average — measured on ES 2024, 28.4 EUR/MWh when the summer arbitraged
+        # water is actually worth 75.5. The projection therefore dumps Iberian hydro all summer, which is
+        # the leading candidate for its ES negative overshoot (2233 projected vs 247 observed, mean 47
+        # vs 63). Applied here per window because the stacks are expanded once per YEAR; the shift hits
+        # only the arbitraged tranches, leaving the reserved-flow and scarcity anchors alone.
+        _season = wv_season_of(w0_t.month)
+        _wvd = {z: d.get(_season) for z, d in (ref.get("wv_seasonal") or {}).items()}
         zd = {"FR": fr_window(fr, fr_stack,
-                              zone_prices(prices, "FR", basis, w0_t, ref.get("gas_rules")), T)}
+                              zone_prices(prices, "FR", basis, w0_t, ref.get("gas_rules")), T,
+                              wv_delta=_wvd.get("FR"))}
         for z in neigh:
             zd[z] = nb_window(z, nb_stack[z], nb_nl[z], ref["nb_res"][z],
-                              zone_prices(prices, z, basis, w0_t, ref.get("gas_rules")), T)
+                              zone_prices(prices, z, basis, w0_t, ref.get("gas_rules")), T,
+                              wv_delta=_wvd.get(z),
+                              mustrun_floors=(ref.get("nb_mustrun") or {}).get(z))
         borders = [b for b in NTC if b[0] in zd and b[1] in zd]
         res_bid, price_floor = rules_at(wb, w0_t, list(zd))
         cold = seam = None
@@ -430,7 +481,7 @@ def _zone_drivers_proj(zone, fr, nb_nl, fr_stack, nb_stack, idx) -> pd.DataFrame
 
 
 def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None) -> dict:
-    zones = [z for z in config.all_zones if z != "GB"]
+    zones = modelled_zones(config)
     neigh = [z for z in zones if z != "FR"]
     wb = config.resolve(config.section("assumptions")["workbook"])
     cm = CommodityModel.from_workbook(wb)
@@ -443,6 +494,36 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
             neigh.remove(z); zones.remove(z)
     nb_stack = {z: s[~s["tech"].isin(_EXCLUDE_DISPATCH)].reset_index(drop=True) for z, s in nb_stack.items()}
     nb_nl = {z: neighbour_netload(config, z, ref_year).set_index("timestamp_utc") for z in neigh}
+    # NL behind-the-meter PV — the projection was MISSING this, exactly as it was missing the water value
+    # below. `run_backtest` reconstructs it (backtest.py, `btm_solar`) because ~98 % of the Dutch solar
+    # fleet is invisible on BOTH sides of the ENTSO-E balance: not in generation (behind the meter) and
+    # not netted from the load series. Without it the real Dutch surplus does not exist in the inputs.
+    #
+    # Measured consequence on the 2024 backcast: NL projected 43 negative hours against 458 observed and
+    # a p5 of +53 EUR/MWh against ~0 observed, even AFTER the TYNDP capacity anchors were fixed — because
+    # the `res` factor was scaling a ~0.2 GW metered sliver instead of a ~29 GW fleet. And since BE's
+    # negative prices are largely imported from the Dutch floor (FLEX_CALIBRATION_2024 §"Mechanisms now
+    # demonstrably live"), the missing Dutch surplus propagated across the border.
+    #
+    # Reconstructed on the REFERENCE year, at that year's installed capacity, so `project_year`'s `res`
+    # factor then scales the FULL fleet rather than the metered remnant.
+    if "NL" in neigh:
+        try:
+            from ..flexibility.res_potential import btm_solar
+            from ..io.entsoe_hist import load_installed_capacity
+            _inst = float((load_installed_capacity(config, "NL", ref_year) or {}).get("solar", 0.0))
+            _gen = load_generation_hist(config, ref_year, zones=constituents("NL"))
+            _btm = btm_solar(_gen, _inst)
+            if not _btm.empty and float(_btm.sum()) > 0:
+                w = nb_nl["NL"]
+                add = _btm.reindex(w.index).fillna(0.0)
+                w["musttake_res_mw"] = w["musttake_res_mw"] + add
+                w["netload_mw"] = w["load_mw"] - w["musttake_res_mw"]
+                print(f"  [projection] NL BTM PV reconstructed on {ref_year}: "
+                      f"+{float(add.mean()):.0f} MW mean ({_inst / 1e3:.1f} GW installed)", flush=True)
+        except Exception as e:                                             # noqa: BLE001
+            print(f"  [projection] NL BTM reconstruction unavailable ({type(e).__name__}) — "
+                  f"NL surplus will be understated", flush=True)
     # water value — the projection was MISSING this entirely: `run_backtest` expands the single
     # `hydro_reservoir` block into the calibrated water-value tranches (backtest.py, `expand_stack`), but
     # `_preload` never did, so every projected year dispatched reservoirs at ~1 €/MWh VOM under a hard
@@ -451,9 +532,42 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
     # REFERENCE year's curves (the same object the backtest calibrates); `project_year` then re-levels
     # them to the target year, since a 2019 water value belongs to a €39/MWh world.
     hydro_curves = {}
+    wv_seasonal: dict = {}
     try:
-        from ..hydro.water_value import load_curves
-        hydro_curves = load_curves(config, ref_year, tuple(["FR"] + list(neigh)))
+        from ..hydro.water_value import load_curves, seasonal_level_deltas
+        _hz = tuple(["FR"] + list(neigh))
+        hydro_curves = load_curves(config, ref_year, _hz)
+        # CURVE SHAPE IS NOT A REFERENCE-YEAR PROPERTY. `empirical_shares` needs MIN_HOURS_PER_BIN of
+        # observations per price class; a reference year whose prices sat in a narrow band cannot
+        # populate the middle classes and the curve collapses to its two anchors. Measured on ES:
+        #
+        #   2019  [(0.244, -15), (0.756, 200)]                   <- 2 tranches, NO arbitraged band
+        #   2024  [(0.098, -15), (0.065, 0), (0.011, 10), ...]   <- 5 tranches, well formed
+        #
+        # A 24.4 % must-flow tranche bidding -15 EUR/MWh year-round is ~5 GW of Spanish reservoir dumped
+        # into every cheap hour of every projected year: 2253 negative hours against 247 observed, mean
+        # 47 vs 63. So the SHAPE is taken from the most recent year that actually resolves a curve, and
+        # the LEVEL continues to come from `_hydro_level_ratio` — the same shape/level split the seasonal
+        # deltas use. Per zone, because zones degenerate in different years.
+        _shape_yr = {}
+        for _y in (_HYDRO_SHAPE_YEARS + (ref_year,)):
+            _c = load_curves(config, _y, _hz)
+            for _z in _hz:
+                if _z not in _shape_yr and len(getattr(_c.get(_z), "tranches", ())) > 2:
+                    hydro_curves[_z] = _c[_z]; _shape_yr[_z] = _y
+        _moved = {z: y for z, y in _shape_yr.items() if y != ref_year}
+        if _moved:
+            print(f"  [projection] hydro curve SHAPE taken from a resolving year (ref {ref_year} "
+                  f"degenerate): {_moved}", flush=True)
+        # per-season water-value shift, on the same year each zone's shape came from
+        for _z, _y in _shape_yr.items():
+            _d = seasonal_level_deltas(config, _y, (_z,)).get(_z)
+            if _d:
+                wv_seasonal[_z] = _d
+        if wv_seasonal:
+            print("  [projection] seasonal water value (EUR/MWh vs the annual curve): "
+                  + ", ".join(f"{z} {d.get('summer', 0):+.0f} summer / {d.get('rest', 0):+.0f} rest"
+                              for z, d in sorted(wv_seasonal.items())), flush=True)
     except (FileNotFoundError, KeyError, ValueError):
         hydro_curves = {}
     for z in list(neigh):                          # empty net-load → degenerate LP time coord → drop it too
@@ -464,7 +578,37 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
         gg = load_generation_hist(config, ref_year, zones=constituents(z))
         r = gg[gg["tech"] == "hydro_reservoir"]
         nb_res[z] = r.groupby("timestamp_utc")["gen_mw"].sum() if not r.empty else pd.Series(dtype=float)
-    static = load_res_schemes(wb)
+    # MEASURED must-run floors (p10 of observed generation per tech-month). `run_backtest` has applied
+    # these since the DE fix; the projection never did, so the two arms disagreed on forced supply.
+    #
+    # NOT calibrated on the reference year. p10-of-observed only reveals a FORCED floor in a year where
+    # the plant is out of the money often enough to be pushed down to it; in a year where it is simply
+    # economic, the same statistic measures profitable running. Measured on ES gas, p10 by month:
+    #
+    #     2019   4569 … 9532 MW      (gas in the money all year; Spain had ZERO negative hours)
+    #     2024   1779 … 3450 MW      (RES surplus routinely pushes it to its real minimum)
+    #
+    # Taking 2019 would force MORE phantom gas into a 2024 projection than the flat 0.15 min_gen_frac
+    # (4033 MW) it is meant to correct — the opposite of the fix. Same shape/level split as the hydro
+    # curve above: the STRUCTURAL floor comes from a year that reveals it, the level from the scenario.
+    nb_mustrun: dict = {}
+    try:
+        from ..neighbours.blocks import measured_chp_mw, observed_mustrun_floors
+        _mz = [z for z in neigh if measured_chp_mw(z) or z in MEASURED_MUSTRUN_ZONES]
+        for z in _mz:
+            for _y in (*_MUSTRUN_REVEAL_YEARS, ref_year):
+                f = observed_mustrun_floors(config, z, _y)
+                if f:
+                    nb_mustrun[z] = f
+                    if _y != ref_year:
+                        print(f"  [projection] {z} must-run floor from {_y} (ref {ref_year} does not "
+                              f"reveal it): gas p10 "
+                              f"{min(v.get('gas', 0) for v in f.values()):.0f}-"
+                              f"{max(v.get('gas', 0) for v in f.values()):.0f} MW", flush=True)
+                    break
+    except (KeyError, ValueError):                       # no generation history → no floor, as before
+        nb_mustrun = {}
+    static = load_res_schemes(wb)          # ref-year block; project_year re-reads per target year
     from ..markup import load_model
     try:                                           # step-vii wedge; None → trajectories are raw SMC
         markup = load_model(config)
@@ -491,7 +635,7 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
             "gas_rules": load_gas_rules(wb),
             "floors": {z: {t["scheme"]: t["floor"] for t in static.get(z, [])} for z in zones},
             "static": static, "growth": _load_growth(wb),
-            "hydro_curves": hydro_curves,
+            "hydro_curves": hydro_curves, "wv_seasonal": wv_seasonal, "nb_mustrun": nb_mustrun,
             "fr": fr, "fr_stack": fr_stack_base(config, latest_fleet_year(config)), "nb_stack": nb_stack,
             "nb_nl": nb_nl, "nb_res": nb_res, "ntc": flow_derived_ntc(config, ref_year),
             "weeks": pd.date_range(f"{ref_year}-01-01", f"{ref_year + 1}-01-01", freq="7D", tz="UTC")}

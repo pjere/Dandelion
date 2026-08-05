@@ -35,8 +35,50 @@ NTC = {
     # IT-North ↔ the southern Italian bidding zones (internal NORD↔CNOR border). Gives IT-North its
     # export-south demand — the missing tightness that under-priced it ~15 % in 2024 (#142).
     ("IT_NORTH", "IT_SOUTH"): (5000, 3000),
+    # ES ↔ PT. Spain had the same defect as IT-North and worse: modelled as an island whose only outlet
+    # was the Pyrenees. Measured on 2024, Spain's balance residual (generation − Spanish demand − the
+    # French exchange) is +2.4 GW on average and +4.1 GW in the hours priced below 5 EUR/MWh — four times
+    # what crosses to France, which itself sits at 1.0 GW against a 2.8 GW NTC in those hours, i.e. the
+    # French border was not even binding. With nowhere to send the surplus the LP drove the Spanish price
+    # negative: 1329 negative hours in backtest against 247 observed, and the whole ES distribution ~16
+    # EUR/MWh low. Physical ES↔PT capacity is ~4.2 GW, larger than ES↔FR; `flow_derived_ntc` recomputes
+    # it per year from realised flow, so this default only binds in years lacking flow history.
+    ("ES", "PT"): (4200, 3500),
 }
 _EXCLUDE_DISPATCH = {"hydro_psp", "hydro_ror", "solar", "wind_onshore", "wind_offshore", "waste"}
+
+#: Zones configured but NOT given a balance in the LP — they enter only as border tranches.
+#:
+#: GB is here because it left ENTSO-E Transparency after Brexit (data moved to Elexon/BMRS), so it had no
+#: load or generation history to build a stack from; `DECISIONS.md` records the call to carry it as a
+#: border supply/demand curve instead. `pricemodeling.elexon` now sources GB properly, so this set is the
+#: single switch that promotes it: remove "GB" and it gains a balance everywhere at once.
+#:
+#: DO NOT flip it casually. Adding a zone changes the LP topology of every window, needs a GB stack and
+#: GB↔FR / GB↔BE NTCs, and GB prices are quoted in GBP — `elexon.series.ingest_prices` refuses to write
+#: without an FX series precisely so a currency mix cannot reach the lake unnoticed. Promoting GB
+#: therefore requires the multi-year gate to be re-run, not just this edit.
+BORDER_ONLY_ZONES = ("GB",)
+
+#: Zones given the MEASURED must-run floor (p10 of observed generation per tech-month) on top of the
+#: `measured_chp_mw` selection, which only picks zones that happen to have a CHP entry — a proxy for
+#: "this zone's flat `min_gen_frac` overstates its real floor", not the thing itself.
+#:
+#: ES was excluded by that proxy and has the defect anyway. Measured on 2024: 26.9 GW of Spanish gas at a
+#: flat 0.15 `min_gen_frac` forces 4033 MW to run, against an observed p10 of 2440 MW and 1779 MW in
+#: April. That ~1.6 GW of phantom forced supply lands on exactly the surplus hours that set the Spanish
+#: price — the same failure `observed_mustrun_floors` was written for on DE (12.1 GW heuristic floor vs
+#: 2.1-2.4 GW actually running, "the dominant share of DE's long bias").
+MEASURED_MUSTRUN_ZONES = ("ES",)
+
+
+def modelled_zones(config) -> list[str]:
+    """Zones that get their own balance row in the LP (i.e. everything but `BORDER_ONLY_ZONES`).
+
+    Replaces four separate hardcoded `[z for z in config.all_zones if z != "GB"]` comprehensions that had
+    drifted across backtest, projection, markup and blocks — one of them would eventually have been
+    missed when GB was promoted."""
+    return [z for z in config.all_zones if z not in BORDER_ONLY_ZONES]
 
 # Zones dont les frontières sont **ré-allouées vers leurs proportions physiques, à total inchangé**.
 #

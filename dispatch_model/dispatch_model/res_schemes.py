@@ -24,15 +24,50 @@ import numpy as np
 from .lp.multi_zone import solve_multizone
 
 
-def load_res_schemes(workbook) -> dict[str, list[dict]]:
-    """{zone: [{scheme, share, floor, trigger}]} from the `dispatch_res_schemes` tab (shares normalised)."""
+def load_res_schemes(workbook, year: int | None = None) -> dict[str, list[dict]]:
+    """{zone: [{scheme, share, floor, trigger}]} from the `dispatch_res_schemes` tab (shares normalised).
+
+    YEAR-INDEXED where the tab provides it. A row may carry an optional `year`; for a zone that has any
+    dated rows, the block chosen is the latest vintage ≤ `year` (and the earliest available if `year`
+    precedes them all). Zones with no dated rows keep their single undated block for every year, so this
+    is backward compatible.
+
+    Needed because a bid ladder is not a constant of nature. Measured on ES day-ahead prices, negative
+    hours simply did not exist before 2024 and then deepened fast:
+
+        year   n<0   %hrs    p50     p10      min   share in (-1,0)
+        2022     0      -      -       -        -                 -
+        2023     0      -      -       -        -                 -
+        2024   247    2.8  -0.10   -1.01    -2.00               89 %
+        2025   556    6.3  -1.00   -5.80   -15.00               52 %
+
+    The tab's single ES block was calibrated on 2025 (its own source note says so, and `merchant` -1
+    reproduces the 2025 median exactly). Applied to 2024 — a year whose market never printed below
+    -2.00 — it puts 100 % of Spanish RES below zero with 30 % of it bidding at -10, five times deeper
+    than anything observed. Every surplus hour then clears negative: the backtest printed 1329 negative
+    hours against 247 observed, and the excess (1082) matches almost exactly the 1657 observed hours
+    sitting in [0, 10) that a too-deep ladder drags below zero.
+
+    NB the fix is depth, not participation: Spanish RES does NOT curtail into negative prices — its
+    measured capacity factor RISES from 0.203 above EUR 40 to 0.350 in negative hours. It really does
+    bid below zero; it just bids barely below zero.
+    """
     from powersim_core.scenario import load_sheet
     try:
         df = load_sheet(workbook, "dispatch", "res_schemes")
     except (ValueError, KeyError):
         return {}
+    has_year = "year" in df.columns
     out: dict[str, list[dict]] = {}
     for zone, g in df.groupby("zone"):
+        if has_year:
+            dated = g[g["year"].notna()]
+            if not dated.empty:
+                yrs = sorted({int(y) for y in dated["year"]})
+                pick = max([y for y in yrs if year is None or y <= int(year)], default=yrs[0])
+                g = dated[dated["year"].astype(int) == pick]
+            else:
+                g = g[g["year"].isna()] if g["year"].isna().any() else g
         tot = g["volume_share"].sum() or 1.0
         out[str(zone)] = [{"scheme": str(r.scheme), "share": float(r.volume_share) / tot,
                            "floor": float(r.bid_floor_eur_mwh), "trigger": int(r.trigger_hours)}

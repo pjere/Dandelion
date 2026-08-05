@@ -21,6 +21,12 @@ zones:
   CH:      { name: "Switzerland",   unit_resolved: false, entsoe: "CH" }
   IT_NORTH: { name: "Italy North",  unit_resolved: false, entsoe: "IT_NORD" }
   ES:      { name: "Spain",         unit_resolved: false, entsoe: "ES" }
+  # Portugal. Spain is not an island: measured on 2024, its balance residual (generation minus Spanish
+  # demand minus the French exchange) is +2.4 GW on average and +4.1 GW in the hours priced under
+  # 5 EUR/MWh — four times what crosses the Pyrenees, while ES-FR itself only carries 1.0 GW of a
+  # 2.8 GW NTC in those hours. Without PT that surplus could not leave and the LP drove ES negative:
+  # 1329 negative hours in backtest against 247 observed. Same defect as #142 on the Italian side.
+  PT:      { name: "Portugal",      unit_resolved: false, entsoe: "PT" }
   # DE-LU's out-of-model neighbours as FOUR price-responsive clusters (was one DE_REST block). Splitting
   # keeps DE-LU's true ~10.2 GW of export headroom while letting each cluster hold its own tightness and
   # its own out-of-DE borders (NL↔BE, CH↔AT, IT-North↔AT/SI) — the aggregate could carry neither, which
@@ -44,6 +50,7 @@ borders:
   - [FR, CH]
   - [FR, IT_NORTH]
   - [FR, ES]
+  - [ES, PT]
   - [DE_LU, BE]
   - [DE_LU, CH]
   - [CH, IT_NORTH]

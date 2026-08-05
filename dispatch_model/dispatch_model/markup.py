@@ -90,7 +90,8 @@ def zone_drivers(config: Config, year: int) -> dict[str, pd.DataFrame]:
     from .neighbours.blocks import build_neighbour_stack, neighbour_netload
     from .rolling.windows import fr_stack_base
 
-    zones = [z for z in config.all_zones if z != "GB"]
+    from .rolling.assemble import modelled_zones
+    zones = modelled_zones(config)
     out: dict[str, pd.DataFrame] = {}
 
     frs = fr_stack_base(config, year)
@@ -146,7 +147,8 @@ def build_panel(config: Config, years: list[int], max_median_ratio: float = 1.8,
     from .rolling.backtest import _observed_prices
 
     frames = []
-    zones = [z for z in config.all_zones if z != "GB"]
+    from .rolling.assemble import modelled_zones
+    zones = modelled_zones(config)
     for y in years:
         model = _year_smc(config, y)
         obs = _observed_prices(config, y, zones)

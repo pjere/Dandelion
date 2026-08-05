@@ -19,7 +19,7 @@ from ..db import already_ingested, ensure_rte_table, log_ingest, upsert_df
 
 # my zone code -> entsoe-py area code
 ZONES = {"FR": "FR", "DE_LU": "DE_LU", "BE": "BE", "GB": "GB", "CH": "CH",
-         "IT_NORTH": "IT_NORD", "ES": "ES"}
+         "IT_NORTH": "IT_NORD", "ES": "ES", "PT": "PT"}
 
 # --- neighbour-cluster constituents (data-only; feed four virtual dispatch zones) ---------------
 # DE-LU's out-of-model neighbours. The 7-zone model gave DE-LU only ~8 GW of export headroom (FR 3 +
@@ -38,9 +38,16 @@ IT_SOUTH_ZONES = {"IT_CNOR": "IT_CNOR", "IT_CSUD": "IT_CSUD", "IT_SUD": "IT_SUD"
                   "IT_CALA": "IT_CALA", "IT_SICI": "IT_SICI", "IT_SARD": "IT_SARD"}
 ALL_ZONES = {**ZONES, **DE_REST_ZONES, **IT_SOUTH_ZONES}
 
-# coupling graph among the 7 zones (undirected; both directions fetched)
+# coupling graph among the modelled zones (undirected; both directions fetched). ES-PT closes the Iberian
+# side, for the same reason IT_SOUTH_ZONES closes the Italian one (#142): Spain is not an island either.
+# Measured on 2024, Spain's balance residual — generation minus its own demand minus the French flow — is
+# +2.4 GW on average and +4.1 GW in the hours whose price falls below 5 EUR/MWh, four times what crosses
+# the Pyrenees. With no Portuguese zone that surplus has nowhere to go and the LP has to drive the Spanish
+# price negative to shed it: 1329 negative hours in backtest against 247 observed, and the ES-FR border
+# is not even binding in those hours (1.0 GW against a 2.8 GW NTC).
 BORDERS = [("FR", "DE_LU"), ("FR", "BE"), ("FR", "GB"), ("FR", "CH"), ("FR", "IT_NORTH"),
-           ("FR", "ES"), ("DE_LU", "BE"), ("DE_LU", "CH"), ("CH", "IT_NORTH"), ("BE", "GB")]
+           ("FR", "ES"), ("DE_LU", "BE"), ("DE_LU", "CH"), ("CH", "IT_NORTH"), ("BE", "GB"),
+           ("ES", "PT")]
 # DE-LU ↔ its neighbour constituents: the missing headroom. (DE/AT were one bidding zone until Oct-2018,
 # so the DE_LU-AT border only carries flow from then on.)
 DE_REST_BORDERS = [("DE_LU", "NL"), ("DE_LU", "AT"), ("DE_LU", "DK_1"), ("DE_LU", "DK_2"),

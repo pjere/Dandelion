@@ -47,5 +47,8 @@ def test_flex_capacity_is_absolute_and_priced_as_peaking():
     assert flex_capacity_mw(t, "FR", 2025) == 2000.0
     assert abs(flex_capacity_mw(t, "FR", 2037.5) - 15000.0) < 1.0    # interpolated
     assert flex_capacity_mw(t, "DE_LU", 2040) == 0.0                 # absent → no flex (firm+DSR only)
-    # flex (battery/DR/H2-peaker) is priced as a peaking backstop (~€180), not baseload
-    assert VOM["flex"] > 100 and VOM["flex"] < 300
+    # flex (battery/DR/H2-peaker) is priced as a peaking backstop, not baseload. The level was raised
+    # 180 -> 300 by the workbook owner once the block actually started dispatching (until the NaN fix in
+    # commit 236aa7f it never entered the basis, so its price was inert). Asserted as a BAND, not the
+    # exact value: what the test protects is that flex sits above every thermal SRMC and below VoLL.
+    assert max(VOM[t] for t in ("ccgt", "ocgt", "coal", "lignite", "oil")) < VOM["flex"] <= 500

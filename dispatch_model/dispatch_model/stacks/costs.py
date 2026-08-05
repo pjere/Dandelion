@@ -23,8 +23,13 @@ VOM = {"nuclear": 9.0, "gas": 2.5, "ccgt": 2.5, "ocgt": 3.5, "coal": 3.5, "ligni
        "oil": 4.0, "biomass": 4.0, "hydro_reservoir": 1.0, "hydro_ror": 0.5, "hydro_psp": 1.0,
        "waste": 2.0, "solar": 0.0, "wind_onshore": 0.0, "wind_offshore": 0.0,
        # 2040 flexibility (battery + demand-response + H2-peaker) priced at its marginal cost — the peaking
-       # backstop that caps scarcity at ~€180 instead of VoLL as firm thermal retires (#83).
-       "flex": 180.0}
+       # backstop that caps scarcity instead of VoLL as firm thermal retires (#83). Raised 180 -> 300 by
+       # the workbook owner. Still a DEFAULT, not a revealed-behaviour measurement, and it is now
+       # load-bearing: until the NaN in `_append_flex` was fixed (commit 236aa7f) this block never
+       # dispatched at all, so this number sets the scarcity ceiling in every tight zone of every
+       # projected year for the first time. Being battery + DR + H2-peaker, it should eventually come
+       # through the same revealed route as every other bid in this model.
+       "flex": 300.0}
 NUCLEAR_FUEL_EUR_MWH = 7.0            # fuel + variable O&M proxy for nuclear (workbook-overridable)
 _OIL_MWHTH_PER_BBL = 1.7             # ~1.7 MWh_th per barrel
 _USD_PER_EUR = 1.08

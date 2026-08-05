@@ -253,7 +253,8 @@ def _year_reveals_fleet(config: Config, year: int) -> bool:
     which carry no price series of their own) from being mistaken for cheap-year zones and silently
     losing their clamp — absence of price data is a data limitation, not evidence about scarcity."""
     from ..rolling.backtest import _observed_prices        # lazy: backtest imports this module
-    zones = [z for z in config.all_zones if z != "GB"]
+    from ..rolling.assemble import modelled_zones
+    zones = modelled_zones(config)
     try:
         obs = _observed_prices(config, year, zones)
     except Exception:                                      # noqa: BLE001 — no price data → assume revealing

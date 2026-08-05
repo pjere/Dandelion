@@ -35,6 +35,7 @@ from dataclasses import replace
 from functools import lru_cache
 
 import numpy as np
+import pandas as pd
 
 from ..stacks import revealed
 from ..stacks.revealed import BID_COL, MIN_HOURS_PER_BIN, SupplyCurve, apply_bids
@@ -96,18 +97,124 @@ def expand_stack(stack, curves: dict[str, SupplyCurve], zone: str, tech: str = "
     return revealed.expand_stack(stack, curves.get(zone), zone, tech, vom=1.0)
 
 
+def _arbitraged_wbar(curve) -> float:
+    """Prix d'offre moyen pondéré des tranches ARBITRÉES (hors ancres débit réservé / rareté)."""
+    if curve is None or len(curve.tranches) <= 2:
+        return float("nan")
+    t = np.asarray(curve.tranches, float)
+    sh, bid = t[:, 0], t[:, 1]
+    mid = np.argsort(bid)[1:-1]
+    return float(np.average(bid[mid], weights=np.maximum(sh[mid], 1e-9)))
+
+
+def seasonal_level_deltas(config, year: int, zones: tuple[str, ...]) -> dict[str, dict[str, float]]:
+    """→ {zone: {'summer': Δ, 'rest': Δ}} — décalage de la valeur de l'eau par saison, en EUR/MWh.
+
+    Le décalage est la différence entre le prix moyen des tranches arbitrées calibrées SUR LA SAISON et
+    celui de la courbe annuelle : c'est exactement ce que la courbe annuelle unique efface. Appliqué par
+    `shift_hydro_bids` via le `wv_delta` des constructeurs de fenêtres, il ne touche que les tranches
+    arbitrées — le débit réservé et la rareté restent des ancres physiques.
+
+    Mesuré 2024 (EUR/MWh) : ES +47,1 été / −18,0 reste (annuel 28,4 alors que l'eau d'été en vaut 75,5),
+    IT_NORTH +29,6 / +7,8, CH −4,2 / +15,3, FR −5,4 / −6,5. La France est plate — la saisonnalité est
+    ibérique et méditerranéenne, pas générique, ce qui est le contrôle qu'on veut sur ce genre de
+    correction.
+
+    NB : ceci ne double PAS le niveau SDP (#136). `synthesis.solve_levels` omet les zones sans SDP
+    exploitable — mesuré, il ne rend que FR / CH / IT_NORTH, jamais ES — et ses écarts été-hiver valent
+    −2,7 à −4,8 EUR/MWh, deux ordres de grandeur sous ce qui manque ici.
+    """
+    ann = load_curves(config, year, zones, season=None)
+    out: dict[str, dict[str, float]] = {}
+    for season in ("summer", "rest"):
+        cur = load_curves(config, year, zones, season=season)
+        for z in zones:
+            a, s = _arbitraged_wbar(ann.get(z)), _arbitraged_wbar(cur.get(z))
+            if np.isfinite(a) and np.isfinite(s):
+                out.setdefault(z, {})[season] = round(s - a, 2)
+    return out
+
+
 @lru_cache(maxsize=8)
 def _curve_cache(key: tuple) -> dict:
     return {}
 
 
-def load_curves(config, year: int, zones: tuple[str, ...]) -> dict[str, SupplyCurve]:
+#: Mois de la saison d'irrigation ibérique. La valeur de l'eau est SAISONNIÈRE et la courbe annuelle
+#: unique l'ignorait complètement. Mesuré sur ES 2023-2025, production du parc de réservoir en % de la
+#: capacité installée, par classe de prix :
+#:
+#:      saison        px<10   10-30   30-50   50-80    >80
+#:      hiver DJFM     18.8    18.0    18.0    20.5    22.2     -> PLAT = débit imposé
+#:      épaule         13.9    15.9    16.1    14.3    15.7
+#:      été JJAS        3.6     4.8     6.8     6.9    11.3     -> x3 = arbitrage, eau rare
+#:
+#: L'hiver est domine par le debit imposé (production insensible au prix : crues, remplissage, lâchers
+#: réglementaires) ; l'ÉTÉ est au contraire fortement arbitré — l'eau restante est rare et chère, et ce
+#: qui part en irrigation part par le canal, pas par la turbine. La courbe annuelle unique impose une
+#: tranche de débit réservé de ~15 % TOUTE L'ANNÉE : elle sous-estime l'hiver (~19 %) et surtout
+#: SURESTIME L'ÉTÉ D'UN FACTEUR 4 (15 % contre 3,6 % mesurés), donc le modèle brade de l'hydraulique
+#: espagnole tout l'été. C'est la piste principale du sur-tirage négatif ES (2233 heures projetées
+#: contre 247 observées, moyenne 47 contre 63 EUR/MWh).
+IRRIGATION_MONTHS = (6, 7, 8, 9)
+
+
+def season_of(month: int) -> str:
+    """→ 'summer' pendant la saison d'irrigation, 'rest' sinon. Clé de calibration saisonnière."""
+    return "summer" if int(month) in IRRIGATION_MONTHS else "rest"
+
+
+def seasonal_delta(config, year: int, zones: tuple[str, ...]) -> dict[str, dict[str, float]]:
+    """→ {zone: {'summer': Δ€/MWh, 'rest': Δ€/MWh}} : décalage de la valeur de l'eau ARBITRÉE entre la
+    calibration saisonnière et la calibration annuelle.
+
+    Pourquoi un décalage de prix plutôt qu'une courbe saisonnière complète : les deux calibrations ne
+    produisent pas le même NOMBRE de tranches (ES 2024 : 5 hors été, 9 en été), donc échanger la courbe
+    par fenêtre changerait le nombre de lignes du stack — or les specs de flexibilité indexent ces
+    lignes. `shift_hydro_bids` (déjà branché sur `wv_delta` dans `fr_window`/`nb_window`) déplace les
+    prix d'offre sans toucher à la structure, ce qui porte l'essentiel de l'effet : en été l'eau
+    ibérique est rare et chère, et la courbe annuelle la brade.
+
+    Le décalage est la moyenne pondérée capacité des tranches ARBITRÉES seules — les ancres physiques
+    (débit réservé, rareté) sont exclues, comme dans `shift_hydro_bids`.
+    """
+    ann = load_curves(config, year, zones, season=None)
+    out: dict[str, dict[str, float]] = {}
+    for season in ("summer", "rest"):
+        cur = load_curves(config, year, zones, season=season)
+        for z in zones:
+            a, s = ann.get(z), cur.get(z)
+            if a is None or s is None:
+                continue
+            base, seas = _arbitrated_mean(a), _arbitrated_mean(s)
+            if base is None or seas is None:
+                continue
+            out.setdefault(z, {})[season] = round(seas - base, 3)
+    return out
+
+
+def _arbitrated_mean(curve: SupplyCurve) -> float | None:
+    """Moyenne pondérée capacité des tranches hors ancres (débit réservé le moins cher, rareté)."""
+    tr = list(curve.tranches)
+    if len(tr) <= 2:
+        return None
+    mid = sorted(tr, key=lambda t: t[1])[1:-1]
+    w = sum(sh for sh, _ in mid)
+    return sum(sh * b for sh, b in mid) / w if w > 0 else None
+
+
+def load_curves(config, year: int, zones: tuple[str, ...],
+                season: str | None = None) -> dict[str, SupplyCurve]:
     """Calibre (et mémorise) la courbe de chaque zone sur les prix et productions observés de `year`.
+
+    `season` ∈ {None, 'summer', 'rest'} : None calibre sur l'année entière (comportement historique) ;
+    sinon la calibration ne retient que les heures de la saison, ce qui donne à l'été sa vraie tranche
+    de débit réservé au lieu de la moyenne annuelle. Voir `IRRIGATION_MONTHS`.
 
     Imports différés : ce module est appelé depuis la construction des fenêtres du LP, et les lecteurs
     ENTSO-E/backtest importent eux-mêmes les stacks — un import direct fermerait le cycle.
     """
-    cache = _curve_cache((id(config), int(year), zones))
+    cache = _curve_cache((id(config), int(year), zones, season))
     if cache:
         return cache
     from ..io.entsoe_hist import load_generation_hist
@@ -134,6 +241,10 @@ def load_curves(config, year: int, zones: tuple[str, ...]) -> dict[str, SupplyCu
         if "hydro_reservoir" not in p.columns:
             continue
         idx = p.index.intersection(o.index)
+        if season is not None:                     # restreindre à la saison avant de calibrer
+            keep = [t for t in idx if season_of(t.month) == season]
+            # sous MIN_HOURS_PER_BIN par classe la courbe devient du bruit : garder l'annuelle
+            idx = pd.DatetimeIndex(keep) if len(keep) >= 24 * 30 else idx
         c = calibrate(z, o.reindex(idx), p["hydro_reservoir"].reindex(idx), cap)
         if c.capacity_mismatch:
             # la capacité déclarée est incohérente avec la production observée : la courbe a été écrêtée,
