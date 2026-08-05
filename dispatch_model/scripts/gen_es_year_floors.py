@@ -40,23 +40,37 @@ TRIGGER = {"recore": 0, "merchant": 0}
 
 # THE SHARE IS THE LEVER FOR THE COUNT; THE FLOOR ONLY SETS THE DEPTH. A negative hour occurs whenever
 # residual demand falls below the volume bidding under zero — how far under zero that volume bids decides
-# only how deep the print goes. Measured directly: re-running 2024 with the floors alone corrected from
-# -10/-1 to -1.01/-0.10 moved the modelled negative count by 19 hours out of ~1900 excess (2109 -> 2128).
-#
-# So the below-zero VOLUME is calibrated to the observed frequency of negatives: the price is negative
-# iff residual demand < that volume, hence volume = the net-load quantile at the observed negative share.
-#
-#     year   negatives   net-load quantile   => below-zero share of must-take RES
-#     2024       2.81 %          2 209 MW                        16.9 %
-#     2025       6.23 %          4 031 MW                        30.3 %
+# only how deep the print goes. Measured directly: correcting the floors alone from -10/-1 to -1.01/-0.10
+# moved the modelled 2024 count by 19 hours out of ~1900 excess (2109 -> 2128).
 #
 # `recore` is the subsidised tranche that will pay to generate to keep its regulated payment, so it
-# carries the below-zero volume; `merchant` bids 0.0 — a merchant plant does not pay to generate. The
-# tab had BOTH below zero, i.e. 100 % of Spanish RES bidding negative, so every surplus hour cleared
-# negative by construction. Note 2025's measured 30.3 % lands on the tab's existing 30 % recore share:
-# the share was right for the year it was calibrated on, and it is `merchant` that was misplaced.
+# carries the below-zero volume; `merchant` bids 0.0 — a merchant plant does not pay to generate. The tab
+# had BOTH below zero, i.e. 100 % of Spanish RES bidding negative, so every surplus hour cleared negative
+# by construction.
+#
+# The share is CALIBRATED, not derived. Two analytic derivations failed — a net-load quantile at the
+# observed negative frequency (gave 0.169 -> ZERO negatives, having ignored exports and the merit order)
+# and a cumulative-supply argument (implied ES can never go negative, contradicting the 2128 the model
+# printed at share 1.0). The boundary is set by forced injections — nuclear floor, the measured gas
+# floor, run-of-river, the hydro must-flow tranche at -15 — against demand plus exports, and it is finely
+# balanced. So it was swept instead (`scratchpad/es_share_calib.py`, one preload, full projected years):
+#
+#     share    0.169   0.35    0.55    0.80    1.00
+#     neg          0      3     131     719    2128        target 247 (observed ES 2024)
+#     <+5          -   1689    1689    1689       -        observed 1642  }  IDENTICAL across shares:
+#     mean         -   60.1    60.1    60.0       -        observed 63.0  }  a pure tail control
+#
+# Log-interpolating the (strongly convex) response between 0.55 and 0.80 gives ~0.64; 0.62 is taken and
+# confirmed by re-run. Because the mean, median and <+5 count are invariant to it, this parameter cannot
+# trade distribution accuracy for count accuracy — it only decides how many of the correctly-counted
+# surplus hours fall below zero.
+#
+# STRUCTURAL, not year-indexed: the share is the fraction of Spanish RES holding support that pays
+# regardless of price. What differs between years is how OFTEN surplus occurs and how DEEP it goes, and
+# the year-indexed floors already carry the depth. For 2022-23 the floors are 0.0, so nothing bids below
+# zero whatever the share — consistent with Spain printing no negative hours at all in those years.
 MERCHANT_FLOOR = 0.0
-BELOW_ZERO_SHARE = {2022: 0.0, 2023: 0.0, 2024: 0.169, 2025: 0.303}
+BELOW_ZERO_SHARE_ALL_YEARS = 0.62
 
 cfg = load_config("config.yaml")
 wb_path = cfg.resolve(cfg.section("assumptions")["workbook"])
@@ -68,7 +82,7 @@ for y in YEARS:
     if s is None or s.dropna().empty:
         continue
     s = s.dropna(); neg = s[s < 0]
-    share = BELOW_ZERO_SHARE[y]
+    share = BELOW_ZERO_SHARE_ALL_YEARS
     if neg.empty:                                     # no negative regime -> nothing bids below zero
         recore_floor, src = 0.0, f"measured {y}: no negative hours observed -> nothing bids below zero"
         print(f"{y:<6}{0:>6}{0.0:>7.2f}{'-':>8}{'-':>8}{share:>15.3f}{recore_floor:>15.2f}"
