@@ -16,13 +16,29 @@ mean treats halving as smaller than doubling — so a genuine fix can *raise* th
 0.32 → 0.99 did exactly that. `log_err` = mean |log ratio| is the honest scalar; the raw ratio is kept
 per row only because it reads naturally. Do not optimise on it.
 
-This is the gate that must be re-run after any change to the dispatch, and it is what proves a
-projection-side change did NOT move the backtest — the `layer` decomposition in
-`scripts/projection_backcast.py` consumes the SMC parquets this writes.
+RE-RUN THIS AFTER ANY DISPATCH CHANGE, not only to score it: `scripts/projection_backcast.py` reads its
+arm B from the SMC parquets written here, so a stale cache silently corrupts that harness's `layer`
+column. It has already happened — Spain's layer read -0.5 against pre-Portugal parquets when it was
+really -6.8.
 
-Reference (2026-08): pooled log_err 1.68, |mean error| 13.8 €/MWh, FR log_err 0.54, FR-2024 negatives
-428/352. NB PT is scored from this revision on — it has been a modelled zone since the Iberian work but
-the zone list was frozen at seven and omitted it, so pooled figures shift here. Compare like with like.
+Reference (2026-08, first run with Portugal, the ES must-run floor and PT scored). Pooled log_err 1.61,
+|mean error| 12.3 €/MWh, scarcity recall 33658/34917:
+
+    zone      b5_ratio  log_err  mean_err        year  b5_ratio  log_err  mean_err
+    ES            1.23     0.38     -3.12        2019      0.97     2.44     -1.17
+    PT            1.22     0.40      2.22        2022      1.93     2.78    -28.49
+    BE            1.62     0.66    -15.13        2024      3.98     0.72     -0.24
+    DE_LU         2.46     0.67    -21.46        2025      3.46     0.64     -7.22
+    NL            2.12     0.68     -1.42
+    FR            0.47     1.15    -19.36
+    CH            0.68     3.69     -4.13
+    IT_NORTH     10.94     4.99     -5.09
+
+Read that as: 2024/2025 are strong (log_err 0.72/0.64) and 2019/2022 carry the pooled figure, with 2022
+under-priced by 28.5 EUR/MWh — the largest single error in the model. ES and PT are now the BEST-scored
+zones, from work derived entirely on 2024 projection evidence, which is the out-of-sample check that
+matters. The two worst, IT_NORTH (over-printing boundary hours 11x) and CH, are long-standing and
+untouched.
 
 Run from dispatch_model/:  python -u -X utf8 -W ignore scripts/gate_multiyear.py [--reuse]
 """

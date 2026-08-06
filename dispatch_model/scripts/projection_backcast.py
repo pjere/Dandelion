@@ -20,23 +20,33 @@ the NL behind-the-meter gap and the Spanish must-run floor.
 A projection is a DISTRIBUTIONAL forecast, not an hourly one (arm C carries 2019 weather), so everything
 is scored on the price distribution — never hour by hour.
 
-Reference result (2026-08, after the Portugal / must-run / ES-ladder work). Pooled |projection err| 7.1,
-|dispatch err| 6.2, **|layer| 2.8** — down from 9.6 at the start of that session:
+⚠ ARM B GOES STALE. It is read from the multi-year gate's CACHE, so any change to the DISPATCH — a new
+zone, a must-run floor, an NTC — invalidates it until the gate is re-run. Comparing a fresh projection
+against a stale backtest silently corrupts the whole decomposition, and it has already happened: after
+Portugal and the ES must-run floor landed in the backtest, several backcasts were read off pre-Portugal
+parquets, and Spain's layer was reported as -0.5 when it was really -6.8 (its arm B moved 60.5 → 66.9
+once the changes were actually in it). RE-RUN `scripts/gate_multiyear.py` BEFORE trusting a layer number
+after any dispatch change.
+
+Reference result (2026-08, first VALID decomposition after Portugal + must-run + the ES ladder, with PT
+scored). Pooled |projection err| 6.3, |dispatch err| 6.0, |layer| 3.5:
 
     zone       observed  backtest  projection | proj err  disp err   layer
-    BE             70.3      69.8        76.8 |     6.5      -0.5     7.0
+    BE             70.3      70.4        78.8 |     8.5       0.1     8.4
     CH             76.0      87.3        89.4 |    13.4      11.3     2.1
-    DE_LU          78.5      77.4        80.2 |     1.7      -1.1     2.8
-    ES             63.0      60.5        60.1 |    -3.0      -2.5    -0.5
-    FR             58.0      45.3        49.8 |    -8.3     -12.7     4.4
+    DE_LU          78.5      77.5        80.2 |     1.7      -1.1     2.7
+    ES             63.0      66.9        60.1 |    -3.0       3.8    -6.8
+    FR             58.0      47.5        49.8 |    -8.3     -10.5     2.2
     IT_NORTH      107.4      93.3        93.3 |   -14.1     -14.1     0.0
-    NL             77.3      78.5        77.9 |     0.6       1.2    -0.7
+    NL             77.3      78.7        77.9 |     0.6       1.4    -0.8
+    PT             63.5      69.0        64.2 |     0.7       5.5    -4.8
 
-NB that table PREDATES PT being scored — it is now a modelled zone with its own observed prices, so the
-pooled figures below will shift when it enters. Compare like with like across runs.
+PT scores 0.7 EUR/MWh on its first appearance with no PT-specific calibration — a reasonable independent
+check that modelling it as a coupled zone was right rather than merely convenient. The open items are
+BE (+8.4, the largest layer) and ES (-6.8: the projection under-prices while the dispatch over-prices).
 
-Arm B is read from the multi-year gate's saved SMC parquet; without it the run still works and simply
-omits the decomposition (proj err is still reported against observed).
+Without arm B the run still works and simply omits the decomposition, reporting proj err against
+observed only.
 
 Run from dispatch_model/:  python -u -X utf8 -W ignore scripts/projection_backcast.py [target_year]
 """
