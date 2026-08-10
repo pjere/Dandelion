@@ -34,9 +34,10 @@ from ..rules import rules_at
 from ..hydro.water_value import season_of as wv_season_of
 from ..scheme_evolution import scheme_shares, trigger_hours
 from ..stacks.costs import VOM
-from ..tyndp import flex_capacity_mw, load_tyndp, report_coverage, tyndp_factors
+from ..tyndp import (flex_capacity_mw, load_ntc_newbuild, load_tyndp, ntc_delta_mw, report_coverage,
+                     tyndp_factors)
 from .assemble import (_EXCLUDE_DISPATCH, MEASURED_MUSTRUN_ZONES, NTC, flow_derived_ntc,
-                       modelled_zones)
+                       hourly_ntc, modelled_zones, slice_ntc)
 from .windows import fr_stack_base, fr_window, nb_window
 
 # default structural CAGRs (editable — dispatch_projection tab). RES build-out dominates the negative-price
@@ -187,6 +188,32 @@ def _append_flex(stack: pd.DataFrame, zone: str, tyndp: dict, year: int) -> pd.D
            "efficiency": np.nan, "min_gen_frac": 0.0, "vom": VOM["flex"]}
     return pd.concat([stack, pd.DataFrame([{c: row.get(c, np.nan) for c in stack.columns}])],
                      ignore_index=True)
+
+
+def _window_ntc(ref, border, T, target_year: int):
+    """(fwd, bwd) for one border, = the reference-year series + whatever was commissioned since.
+
+    The reference series carries the hourly structure (outages, flow-based domain shrinkage); a new link
+    adds its rating on top of that structure rather than rescaling it, which is why this is an ADDITION and
+    not a multiplication. Clipped at zero so a backwards projection past a commissioning year cannot drive
+    a border negative.
+
+    ONE CONSEQUENCE TO KNOW. Addition means an hour where the reference year had the border at 0 MW comes
+    out at the delta, not at 0 — a corridor that was shut in 2019 carries 2 GW in 2025 if two cables were
+    laid since. That is right when the reference-year zero is an outage of the EXISTING link, because
+    IFA2 and ElecLink are independent cables that do not care whether IFA is out; it is optimistic when the
+    zero is a whole-corridor event (a collapsed flow-based domain), where the new cable would likely be
+    constrained too. Multiplying instead would fix the second case and break the first — it would leave a
+    closed border closed forever regardless of what was built — so the addition is deliberate, not an
+    oversight. Measured on 2024, 13 of 16 published directions touch 0 MW at some point, so this is not a
+    rare corner.
+    """
+    fwd, bwd = slice_ntc(ref["ntc"], border, T)
+    d = ntc_delta_mw(ref.get("ntc_newbuild") or {}, border, target_year, int(ref["ref_year"]))
+    if not d:
+        return fwd, bwd
+    return (np.maximum(np.asarray(fwd, dtype=float) + d, 0.0),
+            np.maximum(np.asarray(bwd, dtype=float) + d, 0.0))
 
 
 def project_year(config: Config, target_year: int, ref, n_weeks: int | None = None,
@@ -420,7 +447,9 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         with solve_budget(_WINDOW_BUDGET_S):
             for sp in ([seam, cold] if seam is not cold else [seam]):
                 try:
-                    out = solve_with_triggers(T, zd, borders, {b: ref["ntc"][b] for b in borders}, schemes,
+                    out = solve_with_triggers(T, zd, borders,
+                                              {b: _window_ntc(ref, b, T, target_year) for b in borders},
+                                              schemes,
                                               res_bid=res_bid, price_floor=price_floor,
                                               flex=({**{z: s for z, s in nb_flex.items() if z in zd},
                                                      "FR": sp} if sp is not None else None),
@@ -637,7 +666,12 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
             "static": static, "growth": _load_growth(wb),
             "hydro_curves": hydro_curves, "wv_seasonal": wv_seasonal, "nb_mustrun": nb_mustrun,
             "fr": fr, "fr_stack": fr_stack_base(config, latest_fleet_year(config)), "nb_stack": nb_stack,
-            "nb_nl": nb_nl, "nb_res": nb_res, "ntc": flow_derived_ntc(config, ref_year),
+            "nb_nl": nb_nl, "nb_res": nb_res, # hourly published NTC on the REFERENCE year — the window index T is reference-year
+            # timestamps, so it slices directly (see assemble.hourly_ntc)
+            "ntc": hourly_ntc(config, ref_year, default=flow_derived_ntc(config, ref_year)),
+            # interconnector commissioning steps, applied as a delta on the reference-year series above
+            # (see `tyndp.ntc_delta_mw` for why a step delta and not an interpolated ratio)
+            "ntc_newbuild": load_ntc_newbuild(wb),
             "weeks": pd.date_range(f"{ref_year}-01-01", f"{ref_year + 1}-01-01", freq="7D", tz="UTC")}
 
 

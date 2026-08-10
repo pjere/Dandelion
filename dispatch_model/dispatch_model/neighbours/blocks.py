@@ -172,6 +172,10 @@ def build_neighbour_stack(config: Config, zone: str, year: int, n_subblocks: int
             mn = FLEX.get(tech, (0.0, 1.0))[0]
             rows.append({"unit_id": f"{zone}_{tech}", "zone": zone, "tech": tech,
                          "capacity_mw": cap, "efficiency": np.nan, "min_gen_frac": mn})
+    # NB: GB's distribution-connected fleet is deliberately NOT added here as a priced block. That was
+    # tried and rejected on measurement — priced at gas SRMC it withdraws in the 2022 crisis exactly when
+    # the system is tight, giving 687 VoLL hours. It is netted off demand in `neighbour_netload` instead;
+    # `io.gb_embedded` carries the full result.
     return pd.DataFrame(rows)
 
 
@@ -307,5 +311,11 @@ def neighbour_netload(config: Config, zone: str, year: int) -> pd.DataFrame:
     mt = (gen[gen["tech"].isin(_MUSTTAKE)].groupby("timestamp_utc")["gen_mw"].sum())
     df = pd.DataFrame({"load_mw": load}).join(mt.rename("musttake_res_mw"))
     df["musttake_res_mw"] = df["musttake_res_mw"].fillna(0.0)
+    # GB only: its load (Elexon ITSDO, transmission boundary) and its generation (FUELINST/AGWS,
+    # transmission-connected plant) are measured on DIFFERENT boundaries, so unlike every ENTSO-E zone
+    # they do not balance — 5851 MW short on 2024. `io.gb_embedded` nets the measured residual, which is
+    # Britain's distribution-connected fleet, off demand. Without it GB runs out of plant and hits VoLL.
+    from ..io.gb_embedded import apply_to_netload
+    df = apply_to_netload(config, zone, year, df)
     df["netload_mw"] = (df["load_mw"] - df["musttake_res_mw"])
     return df.dropna(subset=["load_mw"]).reset_index()

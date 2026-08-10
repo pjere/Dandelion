@@ -1,7 +1,8 @@
 # dispatch_model (step vi) — methodology note
 
-Multi-zone economic dispatch producing **hourly zonal system marginal prices** for a 7-zone European
-footprint (FR unit-resolved; DE-LU/BE/CH/IT-North/ES aggregated; GB as a border curve). Consumes steps
+Multi-zone economic dispatch producing **hourly zonal system marginal prices** for a 13-zone European
+footprint (FR unit-resolved; every other zone aggregated, GB included since it was promoted from a border
+curve to a balance of its own on Elexon/BMRS data). Consumes steps
 (ii)–(v) + a commodity module. Its output is **system marginal cost (SMC)**; **step (vii)** applies a
 calibrated markup to map SMC → observed day-ahead spot.
 
@@ -50,8 +51,28 @@ arbitrage and coarse neighbour-hydro budgets are refinements.
   *suppressing* zonal negative-price events. Real time-varying NTCs (`rte_ntc`/ENTSO-E) restore spreads.
 - **Neighbour capacity** = p99.9 of observed generation (availability proxy); ENTSO-E installed capacity
   is the exact input (TODO). Undersizing *inflates* scarcity; DSR tranches cap it.
+- **Projected interconnection**: `dispatch_ntc_newbuild` carries one row per interconnector project with
+  its commissioning year, summed as a **step** (never interpolated) and applied as an MW **delta** on the
+  reference-year hourly NTC — an interconnector is a discrete asset like a reactor, not a smooth
+  trajectory. Two tiers are on by default (`built`, `reference`); TYNDP's assessed candidates are written
+  but off, since enabling them asserts every project under CBA gets built. Before this the grid was the
+  one input frozen at reference-year level while demand and generation evolved, which biased projections
+  toward too much congestion. See `TYNDP_SOURCES.md`.
 - **Backtest availability**: FR nuclear from rolling-max output; REMIT (task #41) is the ground-truth
-  upgrade. GB via a fixed border curve (no ENTSO-E data post-Brexit).
+  upgrade. GB is now a modelled zone on Elexon data (its old fixed border curve is gone), but ~2.8 GW of
+  its interconnection — NSL to Norway, Moyle/EWIC/Greenlink to Ireland — reaches zones the model does not
+  carry; measured on 2024 the two nearly cancel at +505 MW net, 1.8 % of GB demand.
+- **GB embedded generation** (`io/gb_embedded.py`): GB is the one zone whose load and generation come from
+  feeds measured on *different boundaries* — ITSDO is demand at the transmission boundary, already net of
+  distribution-connected plant, while FUELINST/AGWS meter transmission-connected plant only. The two
+  therefore do not balance (5851 MW short on 2024, a fifth of demand), where every ENTSO-E zone balances by
+  construction. The residual is measured hour by hour and netted off GB demand as a month × hour-of-day
+  median. It decomposes, by measurement, into an exact solar double-count (AGWS reports national solar,
+  which GB metering has already removed from ITSDO — regression coefficient −1.25, and corr(residual +
+  solar, solar) = −0.065) and a flat ~7.3 GW embedded firm block. Netting it off demand rather than adding
+  it as supply keeps it out of price formation, which is right for heat-led CHP and conservative for the
+  rest. Consequence: GB's own stack adequacy is no longer tested — acceptable because GB exists here to be
+  a correct neighbour for FR/BE/NL.
 - Static reserve margin (no reserve co-optimisation); no intra-zonal grid; no strategic bidding.
 
 ## Backtest — full-year 2019 (annual baseload = §8 acceptance)

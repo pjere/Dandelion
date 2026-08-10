@@ -288,3 +288,107 @@ change the anchors.
 No installed-capacity rows exist for IT_NORTH at all, so its 13 GW anchor cannot be checked against
 anything and `hydro_basis()` refuses to guess. Its anchors are perfectly flat, so the clamped factor of
 1.0 is exactly right regardless.
+
+---
+
+# Provenance of the `dispatch_ntc_newbuild` anchors
+
+A separate tab, and a separate *shape*, from everything above. `dispatch_tyndp` holds smooth quantities
+that `_interp` interpolates between anchor years; an interconnector is a discrete asset that commissions
+on a date, adds a fixed MW and is flat either side — the same shape as a reactor in
+`dispatch_nuclear_newbuild`. Interpolating it would invent capacity in every year nothing was built and
+smear one cable's rating across a decade, so the tab holds **one row per project** and
+`tyndp.ntc_delta_mw` sums them as a **step**, never interpolating.
+
+The tab records a **delta, not a level**. The projection starts from the reference year's hourly NTC
+series (`assemble.hourly_ntc`), which already embodies the grid as it then stood; what it needs is only
+what was commissioned since. That also sidesteps a baseline that **does not exist**: ENTSO-E publishes no
+current or starting grid per boundary and direction — ACER's opinion on the draft TYNDP 2024 explicitly
+*asks* them to begin publishing exactly that. Any ratio formulation would have had to invent it.
+
+Capacity applies **symmetrically** to both directions: new links are overwhelmingly HVDC with a single
+rating, and the asymmetry in `assemble.NTC` comes from network constraints around the border, not the wire.
+
+## Tier `built` — commissioned since the 2019 reference year
+
+These are not forecasts, and omitting them was a real error: the projection's reference year is 2019, so
+without them the 20-year crossover carried GB to 2045 on a 1580 MW link to France and no Viking at all.
+
+Every row is **validated in-house** against the step in maximum hourly flow across the border
+(`entsoe_flows`, MW forward/backward). `entsoe_flows` holds no 2020/2021 rows on these borders, so a
+commissioning year falling between two measured years is bracketed rather than pinned — but the **MW step
+is unambiguous in every case**, which is what the model consumes.
+
+| border | project | MW | year | measured step (max hourly flow) |
+|---|---|---|---|---|
+| DE_LU–BE | ALEGrO | 1000 | 2020 | 249/312 (2019) → **1164/1298** (2022) |
+| FR–GB | IFA2 | 1000 | 2021 | 2036 (2019) → **3071** (2022) |
+| FR–GB | ElecLink | 1000 | 2022 | 3071 (2022) → **4087** (2023) |
+| FR–IT_NORTH | Savoie-Piémont | 1200 | 2023 | FR→IT 3563 (2019) → **4554** (2024) |
+| DK–GB | Viking Link | 1400 | 2023 | 0/0 (2022) → **1408/1454** (2023) |
+
+Savoie-Piémont's date is RTE's: half capacity from November 2022, full capacity from August 2023, two
+600 MW HVDC bipoles. <https://www.rte-france.com/en/projects/savoie-piemont-190-km-of-european-solidarity-from-chambery-to-turin>
+
+**A trap avoided.** NL–GB reads 0 in `entsoe_flows` until 2024 and then 1091/1061. That is **not** a
+commissioning step — BritNed has run since 2011; ENTSO-E simply did not publish the Dutch side of the
+border before 2024. Encoding it as a 2024 newbuild would have invented a gigawatt. The same publication
+gap affects BE–NL, CH–AT_SI, IT_NORTH–AT_SI and IT_NORTH–IT_SOUTH, all of which read 0/0 in 2019.
+
+## Tier `reference` — committed / under construction
+
+### FR–ES, Bay of Biscay (Golfe de Gascogne) = **2200 MW**, 2028 [direct]
+
+INELFE (RTE 50 % / Red Eléctrica 50 %); two converter stations, Gatika near Bilbao and Cubnezais near
+Bordeaux, joined by ~400 km of underground and submarine cable. Testing from mid-2027, commissioning 2028.
+Backed by a €1.6 bn EIB facility signed 2025.
+
+Red Eléctrica and INELFE both state the link **doubles** France–Spain exchange capacity **to 5000 MW**.
+That is independently corroborated by the TYNDP 2024 reference grid, whose `ES00-FR00` row reads
+**5000/5000** — i.e. today's 2800 plus this project's 2200. Two unrelated sources agreeing on the
+post-project level is the strongest check available for a project not yet built.
+
+<https://www.inelfe.eu/en/projects/bay-biscay> ·
+<https://www.eib.org/en/press/all/2025-241-eib-supports-with-eur1-6-bn-the-strategic-bay-of-biscay-electricity-interconnection-between-spain-and-france>
+
+## Tier `tyndp_candidate` — assessed, NOT committed. Off by default.
+
+36 rows, 68.6 GW, summed per border and horizon from ENTSO-E's own file: *20231103 – Electricity and
+Hydrogen Reference Grid & Investment Candidates.xlsx*, sheet **"3. Elec Invest Candidates"**, column
+**"DIRECT CAPACITY INCREASE (MW)"**, over the 80 rows (of 257) whose FROM/TO nodes both map into a
+modelled zone. `SCENARIO` is `All` on every row. Horizons 2030 / 2035 / 2040.
+
+<https://2024-data.entsos-tyndp-scenarios.eu/files/scenarios-inputs/20231103-Electricity-and-Hydrogen-Reference-Grid-Investment-Candidates.xlsx.zip>
+
+These are the projects the TYNDP cost-benefit analysis exists to **decide on**, so enabling them asserts
+that every assessed project gets built. `tyndp.NTC_DEFAULT_SCENARIOS` therefore excludes them; passing
+them is a deliberate high-build scenario, not a default.
+
+They also sit **on top of** the 2030 reference grid, which already contains the committed projects above —
+so the two tiers add rather than double-count.
+
+### Candidates with nowhere to go
+
+Four candidate rows fall on boundaries the model carries no border for, and are reported by
+`gen_ntc_newbuild.py` on every run rather than silently dropped:
+
+| boundary | MW | year | why dropped |
+|---|---|---|---|
+| AT_SI–PL_CZ | 1000 / 500 | 2030 / 2040 | model has no AT–CZ border |
+| DE_LU–GB | 1400 | 2030 | NeuConnect; model has no DE–GB border |
+| DK–NL | 2000 | 2040 | model has no DK–NL border, though COBRA already flows there |
+
+The DK–NL entry is the notable one: `entsoe_flows` already carries `DK_1>NL` / `NL>DK_1` (COBRA, 700 MW,
+2019), so this is a border the model could add today from existing data.
+
+## Node mapping
+
+TYNDP bidding-zone codes → model zones, per `scripts/gen_ntc_newbuild.py` and `scratchpad/tyndp_ntc_map.py`.
+`ITN1` is Italy-North; `ITCN`/`ITCS`/`ITS1`/`ITCA`/`ITSA`/`ITSI`/`ITCO` fold into IT_SOUTH; `AT00`+`SI00`
+into AT_SI; `PL00`/`PL00E`/`PL00I`+`CZ00` into PL_CZ; `DKW1`+`DKE1` into DK. **Luxembourg matters**: the
+model folds LU into DE_LU, so `BE00-LUB1`, `BE00-LUG1` and `FR00-LUF1` are legs of BE–DE_LU and FR–DE_LU,
+while `DE00-LUG1` and `DE00-LUV1` are internal to DE_LU and must be dropped or they invent capacity.
+
+The direction convention — "Summary Direction 1" = first code → second code — is **confirmed, not
+assumed**: four model entries reproduce the TYNDP pair exactly and in the right order (FR–BE 4300/2800 vs
+`BE00-FR00` 2800/4300; ES–PT 4200/3500; BE–GB 1000/1000; CH–AT_SI 1200/1200).

@@ -260,6 +260,49 @@ def ingest_flows(engine, client, start: date, end: date, borders=None, force=Fal
     return total
 
 
+def ingest_ntc(engine, client, start: date, end: date, borders=None, force=False) -> int:
+    """Day-ahead FORECASTED transfer capacity per border/direction — the hourly NTC the market cleared
+    against, which the dispatch model has until now approximated with an annual scalar.
+
+    `rolling.assemble.flow_derived_ntc` takes p99.5 of realised flow for the whole year and scales it by
+    a per-zone coincidence factor, producing ONE number per direction. Measured on 2024, that cannot
+    represent these borders: capacity conditional on a favourable price spread ≥ 20 EUR/MWh spans
+
+        DE_LU>CH   p95 3416   p50 1792   p10  321      (10.6x)
+        FR>CH      p95 3560   p50 1818   p10  513       (6.9x)
+        CH>IT_NORTH p95 3879  p50 2389   p10  630       (6.2x)
+        FR>IT_NORTH p95 2993  p50 1592   p10  754       (4.0x)
+
+    A constant is therefore wrong at BOTH tails at once — it under-states the link in tight hours (every
+    revealed p95 above runs ~1.5x the model's NTC) and over-states it when the border is nearly shut.
+    The second is what couples IT_NORTH to a collapsing France: the model allows 1977 MW in every hour,
+    while in the 277 hours it prices Italy under +5 the real border carried 187 MW against a 69.5 EUR/MWh
+    spread — an arbitrage that large across an open wire is impossible, so the wire was not open.
+
+    This is a published quantity, so it should be read rather than inferred — the same reasoning that
+    sent CH's solar capacity to the BFE instead of a generation proxy. Verified against the live API:
+    FR->IT_NORD ranges 1344-3072 MW within three days, and CH->IT_NORD reaches ZERO.
+
+    NOT every border publishes it: the CORE region (FR-DE_LU and neighbours) clears flow-based rather
+    than NTC, and returns NoMatchingData. `_do` logs those as 'nodata' and the caller keeps its existing
+    `flow_derived_ntc` value for them, so this is additive — nothing regresses where the series is absent.
+    """
+    ensure_rte_table(engine, T_NTC)
+    total = 0
+    for a, b in (borders or BORDERS):
+        for x, y in ((a, b), (b, a)):
+            ax, ay = ALL_ZONES[x], ALL_ZONES[y]
+            for c0, c1 in _year_chunks(start, end):
+                def build(s, x=x, y=y):
+                    return [_long(s.index, f"{x}>{y}", "", "ntc_mw", s.values)]
+                total += _do(engine,
+                             lambda ax=ax, ay=ay, c0=c0, c1=c1:
+                                 client.query_net_transfer_capacity_dayahead(ax, ay, start=c0, end=c1),
+                             T_NTC, f"entsoe:ntc:{x}>{y}", f"{x}>{y}_{c0.date()}", force, build,
+                             expect_end=c1)
+    return total
+
+
 def ingest_all(settings, start: date, end: date, force: bool = False, do_prices=True,
                do_load=True, do_gen=True, do_flows=True) -> dict:
     """Orchestrate price/load/generation/flows ingestion for the 7 zones over [start, end]."""

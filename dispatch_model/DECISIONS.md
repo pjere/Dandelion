@@ -53,6 +53,42 @@ ENTSO-E Transparency (moved to Elexon/BMRS). **Decision:** model **GB as a borde
 being non-coupled anyway. Sourcing GB from BMRS is a possible later refinement. The other 6 zones are
 fully ingested.
 
+> **SUPERSEDED.** The "later refinement" was taken: `pricemodeling.elexon` sources GB generation, demand
+> and prices from BMRS, `pricemodeling.fx` converts BMRS's GBP to the lake's EUR via the ECB reference
+> series, and GB is now a modelled zone with a balance and four borders. The trigger was not GB itself but
+> the Netherlands: per-border NTCs left NL over-priced by €17.6/MWh because the model gave it two borders
+> where reality has five, and BritNed could not be added until GB existed. The import tranches this
+> decision created (`GB_IMP1`/`GB_IMP2`, 4000 MW on the FR stack) were removed in the same change — they
+> are exactly the FR-GB NTC, and keeping both would have doubled the Channel.
+
+
+### GB's two feeds are measured on different boundaries — and must be reconciled
+
+Promoting GB exposed a defect no ENTSO-E zone can have. Every other zone's load and generation come from
+the same TSO submission on the same boundary, so they balance by construction. GB's do not: Elexon's
+`demand/outturn` reports **ITSDO**, demand at the *transmission* boundary and therefore already net of
+distribution-connected plant, while FUELINST and AGWS meter *transmission-connected* plant. Measured on
+2024 the balance is short **5851 MW — a fifth of GB demand**.
+
+Left uncorrected this is not a cosmetic error: GB ran out of plant and hit VoLL in **612 hours against 36
+observed**, and because BritNed couples it directly to a tight Netherlands, NL was dragged to 15 000
+EUR/MWh in **97** of them, taking its mean error from −1.4 to **+29.0 EUR/MWh** — while Belgium and Germany
+sat at 126–300 EUR/MWh in the same hours. One defect, one zone, not a distribution-wide drift.
+
+**Decision:** reconstruct the residual hour by hour and net it off GB demand (`io/gb_embedded.py`), as a
+month × hour-of-day median. It decomposes by measurement into an exact **solar double-count** (AGWS reports
+national solar, which GB metering has already removed from ITSDO: regression coefficient −1.25, and
+corr(residual + solar, solar) = −0.065) plus a flat **~7.3 GW embedded firm block** — CHP, waste, small
+gas. Both are fixed by the same subtraction, since `(load + solar) − (residual + solar) ≡ load − residual`.
+
+Netted off **demand** rather than added as **supply**, deliberately: as must-take supply at zero it would
+manufacture negative prices GB does not have, whereas heat-led embedded CHP does not respond to price
+anyway. Two consequences are accepted and recorded: GB's own stack adequacy is no longer tested by the
+model, and the term absorbs Elexon's evolving feed coverage as well as Britain's embedded fleet (the
+residual is 8.4–29.7 % of demand depending on year, and 2025's low reading tracks an AGWS wind revision
+rather than a physical change). Both are acceptable because GB exists in this model to be a correct
+**neighbour** for FR/BE/NL, not to have its adequacy assessed.
+
 ## Phase 3 (neighbour modules) — backtest mode done
 
 `neighbours/blocks.py`: per foreign zone, `build_neighbour_stack` (aggregated tech blocks; thermal split
@@ -111,7 +147,8 @@ here used a documented proxy (nuclear from rolling-max actual output, thermal 0.
 gross-flow ε to kill loop flows). Each zone's price = its balance dual; spreads form endogenously. Per-
 zone hydro energy caps + water values carried through. Validated: NTC-binding → decoupled prices + spread
 + flow pinned at NTC (cheap→expensive); ample NTC → prices converge to one system marginal. Zone-agnostic
-(works for any {zone: stack, netload} set). GB enters as border tranches on FR/BE, not a balance.
+(works for any {zone: stack, netload} set). Every configured zone carries a balance, GB included since its
+promotion (see the superseded Phase-1 decision above).
 
 ## Phase 6 (hydro coordination) — reservoir done
 

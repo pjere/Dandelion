@@ -13,7 +13,7 @@ import pandas as pd
 import requests
 
 from ..db import ensure_rte_table
-from ..entsoe.series import T_GEN, T_LOAD, T_PRICE, _do, _long
+from ..entsoe.series import T_FLOW, T_GEN, T_LOAD, T_PRICE, _do, _long
 
 BASE = "https://data.elexon.co.uk/bmrs/api/v1"
 
@@ -27,12 +27,41 @@ FUEL2PSR = {
     "NUCLEAR": "Nuclear", "BIOMASS": "Biomass", "OIL": "Fossil Oil",
     "NPSHYD": "Hydro Run-of-river and poundage",     # non-pumped-storage hydro
     "PS": "Hydro Pumped Storage",
-    "WIND": "Wind Onshore",                          # FUELINST does not split on/offshore; AGWS does
     "OTHER": "Other",
+    # WIND is deliberately ABSENT. FUELINST reports one undifferentiated wind figure, and AGWS reports
+    # the same fleet split by PSR type — both would land on sub_key "Wind Onshore" and collide on the
+    # upsert key (ts_utc, series_key, sub_key). It happened to resolve correctly, AGWS being appended
+    # second and overwriting, but that is frame ordering rather than intent: reorder the build and the
+    # split silently becomes an unsplit total. AGWS is the only wind source.
 }
 #: AGWS reports wind and solar by true PSR type, so it supersedes FUELINST's undifferentiated WIND and
 #: supplies solar, which FUELINST omits entirely (GB solar is largely embedded/behind-the-meter).
 AGWS_PSR = {"Solar": "Solar", "Wind Onshore": "Wind Onshore", "Wind Offshore": "Wind Offshore"}
+
+#: FUELINST INT* code → the lake zone on the far side of that interconnector.
+#:
+#: Complete for reference; `ingest_flows` writes only `VIKING_ONLY` by default. Measured p99.5 of hourly
+#: flow over 2024, import / export MW, against nameplate:
+#:     INTFR   IFA       2008 / 1955   (2000)      INTNED  BritNed   1055 / 1047   (1000)
+#:     INTIFA2 IFA2       992 /  886   (1000)      INTVKL  Viking    1424 / 1097   (1400)
+#:     INTELEC ElecLink   999 /  705   (1000)      INTNSL  NSL       1399 / 1240   (1400)
+#:     INTNEM  Nemo      1019 / 1021   (1000)      INTIRL/INTEW/INTGRNL → Ireland
+INT_LINKS = {
+    "INTFR": "FR", "INTIFA2": "FR", "INTELEC": "FR",   # IFA + IFA2 + ElecLink
+    "INTNEM": "BE",                                     # Nemo Link
+    "INTNED": "NL",                                     # BritNed
+    "INTVKL": "DK_1",                                   # Viking Link (commissioned 2023-12-29)
+    "INTNSL": "NO_2", "INTIRL": "IE", "INTEW": "IE", "INTGRNL": "IE",   # zones not in the model
+}
+
+#: The GB borders ENTSO-E does NOT publish, and therefore the only ones Elexon may write.
+#:
+#: `entsoe_flows` already carries FR>GB, BE>GB and (from 2024) NL>GB, published from the continental side.
+#: Those share the upsert key (ts_utc, series_key, sub_key) with anything written here, so ingesting them
+#: from Elexon would silently REPLACE the ENTSO-E measurement with a different one — metered interconnector
+#: output rather than scheduled physical flow. Same border, different quantity, no warning. Viking Link is
+#: absent from ENTSO-E in every year, so it is the one GB border with nothing to overwrite.
+VIKING_ONLY = ("INTVKL",)
 
 
 def _get(path: str, params: dict, attempts: int = 5):
@@ -108,6 +137,49 @@ def ingest_generation(engine, start: date, end: date, force: bool = False) -> in
     return total
 
 
+def ingest_flows(engine, start: date, end: date, codes=VIKING_ONLY, force: bool = False) -> int:
+    """FUELINST INT* → `entsoe_flows`, as directed non-negative series (`DK_1>GB`, `GB>DK_1`).
+
+    Why this exists: promoting GB to a modelled zone needs an NTC per border, and `flow_derived_ntc`
+    derives those from realised flow, falling back to the static `NTC` default only where flow history is
+    missing. Viking Link has NO flow history in the lake from any source, so without this its static
+    default would bind in EVERY year — including 2019 and 2022, when the link did not physically exist.
+    The static default is therefore 0 and this supplies the real capacity for the years Viking has run,
+    which is the honest split: absent where absent, measured where measured.
+
+    FUELINST signs flow positive-into-GB. ENTSO-E's convention is one non-negative series per direction,
+    so the sign is split across two keys rather than stored as a signed quantity.
+
+    `codes` defaults to `VIKING_ONLY` — see that constant for why the other GB interconnectors are barred.
+    """
+    ensure_rte_table(engine, T_FLOW)
+    total = 0
+    for c0, c1 in _day_chunks(start, end, 7):
+        def build(raw, c0=c0):
+            if not raw:
+                return []
+            d = pd.DataFrame(raw)
+            d = d[d["fuelType"].isin(codes)]
+            if d.empty:
+                return []
+            d["zone"] = d["fuelType"].map(INT_LINKS)
+            h = _hourly(d, "startTime", "generation", "zone")
+            # several codes can share a zone (IFA/IFA2/ElecLink → FR); sum them into one border
+            h = h.groupby(["startTime", "zone"], as_index=False)["generation"].sum()
+            frames = []
+            for z, g in h.groupby("zone"):
+                v = g["generation"]
+                frames.append(_long(g["startTime"], f"{z}>GB", "", "flow_mw", v.clip(lower=0)))
+                frames.append(_long(g["startTime"], f"GB>{z}", "", "flow_mw", (-v).clip(lower=0)))
+            return frames
+
+        total += _do(engine, lambda c0=c0, c1=c1: _get(
+            "/datasets/FUELINST", {"publishDateTimeFrom": f"{c0}T00:00Z",
+                                   "publishDateTimeTo": f"{c1 + timedelta(days=1)}T00:00Z"}),
+            T_FLOW, "elexon_flow", f"GB:{c0}", force, build)
+    return total
+
+
 def ingest_load(engine, start: date, end: date, force: bool = False) -> int:
     """Demand outturn → `entsoe_load`, series_key GB.
 
@@ -147,7 +219,10 @@ def ingest_prices(engine, start: date, end: date, gbp_per_eur=None, force: bool 
                          "lake is EUR/MWh. Refusing to write mixed currencies.")
     ensure_rte_table(engine, T_PRICE)
     total = 0
-    for c0, c1 in _day_chunks(start, end, 14):
+    # 7-day chunks, NOT the 14 used for generation and demand: this endpoint alone rejects a longer
+    # window. Measured against the live service — 1/3/7 days return 200, 14 returns HTTP 400 — which is
+    # why a first pass landed only 49 price hours for 2024 while gen and load came back complete.
+    for c0, c1 in _day_chunks(start, end, 7):
         def build(raw, c0=c0):
             if not raw:
                 return []

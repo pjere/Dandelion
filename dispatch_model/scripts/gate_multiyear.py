@@ -21,24 +21,33 @@ arm B from the SMC parquets written here, so a stale cache silently corrupts tha
 column. It has already happened — Spain's layer read -0.5 against pre-Portugal parquets when it was
 really -6.8.
 
-Reference (2026-08, first run with Portugal, the ES must-run floor and PT scored). Pooled log_err 1.61,
-|mean error| 12.3 €/MWh, scarcity recall 33658/34917:
+Reference (2026-08, GB promoted to a modelled zone with its embedded generation netted off demand).
+Pooled log_err 1.54, |mean error| 11.2 €/MWh, scarcity recall 36418/34917:
 
     zone      b5_ratio  log_err  mean_err        year  b5_ratio  log_err  mean_err
-    ES            1.23     0.38     -3.12        2019      0.97     2.44     -1.17
-    PT            1.22     0.40      2.22        2022      1.93     2.78    -28.49
-    BE            1.62     0.66    -15.13        2024      3.98     0.72     -0.24
-    DE_LU         2.46     0.67    -21.46        2025      3.46     0.64     -7.22
-    NL            2.12     0.68     -1.42
-    FR            0.47     1.15    -19.36
-    CH            0.68     3.69     -4.13
-    IT_NORTH     10.94     4.99     -5.09
+    ES            1.35     0.35     -2.12        2019      1.48     2.14     -0.98
+    PT            1.34     0.37      4.35        2022      2.48     2.92    -16.79
+    FR            0.66     0.53     -4.34        2024      3.47     0.72      4.54
+    BE            2.15     0.58    -11.64        2025      3.19     0.56     -5.23
+    DE_LU         3.07     0.87    -23.90
+    NL            3.17     1.00      5.23
+    CH            0.42     3.61      7.26
+    IT_NORTH      9.26     4.91     -6.25
 
-Read that as: 2024/2025 are strong (log_err 0.72/0.64) and 2019/2022 carry the pooled figure, with 2022
-under-priced by 28.5 EUR/MWh — the largest single error in the model. ES and PT are now the BEST-scored
-zones, from work derived entirely on 2024 projection evidence, which is the out-of-sample check that
-matters. The two worst, IT_NORTH (over-printing boundary hours 11x) and CH, are long-standing and
-untouched.
+Previous reference, before GB was a zone: pooled log_err 1.61, |mean error| 12.3, scarcity 33658/34917.
+The gain is concentrated in FR (log_err 1.15 -> 0.53, mean error -19.4 -> -4.3) and 2022 (-28.5 -> -16.8),
+and both come from ONE fix: promoting GB removed the 4000 MW of phantom "GB import" tranches that had been
+sitting inside the FR stack at 52 and 110 EUR/MWh. Those tranches were exactly the FR-GB NTC, so France
+had been given 8 GW of Channel capacity where 4 GW exists, half of it at a price no British plant had to
+set. NL and DE_LU pay for it (NL mean error -1.4 -> +5.2) — GB is a modelled zone whose OWN prices are
+poor, and it exports that error to its neighbours.
+
+GB is deliberately NOT in ZONES: it is scored separately because its embedded-generation correction leaves
+it systematically cheap (2019: 1800 hours below +5 EUR/MWh against 9 observed). Adding it here would move
+the pooled figure for a reason that has nothing to do with the change being tested. See `io.gb_embedded`
+for that correction and for the priced-block variant that was tried and rejected.
+
+The two worst zones, IT_NORTH (over-printing boundary hours ~9x) and CH, are long-standing and untouched.
 
 Run from dispatch_model/:  python -u -X utf8 -W ignore scripts/gate_multiyear.py [--reuse]
 """

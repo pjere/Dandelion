@@ -142,3 +142,62 @@ def tyndp_factors(tyndp: dict, zone: str, target_year: int, ref_year: int) -> di
     res_tgt = sum(v for var in _RES_VARS if (v := _interp(z.get(var, {}), target_year)))
     out["res"] = (res_tgt / res_ref) if res_ref > 0 else None
     return out
+
+
+# --- interconnector commissioning steps (`dispatch_ntc_newbuild`) -------------------------------------
+#
+# Deliberately NOT modelled like the tab above. A capacity trajectory is a smooth quantity and `_interp`
+# is right for it; an interconnector is a discrete asset that commissions on a date, adds a fixed MW, and
+# is flat either side — the same shape as a reactor in `dispatch_nuclear_newbuild`. Interpolating it would
+# invent capacity in every year nothing was built and smear one cable's rating across a decade.
+#
+# The result is a DELTA, not a level, because the projection starts from a reference year's hourly NTC
+# series that already embodies the grid as it then stood; what it needs is only what was built since. That
+# also sidesteps a baseline that does not exist — ENTSO-E publishes no current/starting grid per boundary
+# (ACER's opinion on the draft TYNDP 2024 asks them to begin doing so), so any ratio formulation would have
+# had to invent one.
+
+#: Tiers trusted by default. `tyndp_candidate` is excluded: those are the projects the TYNDP CBA exists to
+#: decide on, so including them asserts every assessed project gets built. Pass it explicitly for a
+#: high-build scenario.
+NTC_DEFAULT_SCENARIOS = ("built", "reference")
+
+
+def load_ntc_newbuild(workbook, scenarios=NTC_DEFAULT_SCENARIOS) -> dict:
+    """{(zone_a, zone_b): [(commissioning_year, capacity_mw), ...]} from `dispatch_ntc_newbuild`.
+
+    Keyed by the same tuple orientation as `assemble.NTC`. {} if the tab is absent, so a workbook without
+    it behaves exactly as before this feature existed.
+    """
+    from powersim_core.scenario import load_sheet
+    try:
+        df = load_sheet(workbook, "dispatch", "ntc_newbuild")
+    except (ValueError, KeyError):
+        return {}
+    out: dict[tuple[str, str], list] = {}
+    keep = set(scenarios)
+    for r in df.itertuples():
+        if str(getattr(r, "scenario", "")) not in keep:
+            continue
+        a, _, b = str(r.border).partition("-")
+        if not b:
+            continue
+        out.setdefault((a, b), []).append((int(r.commissioning_year), float(r.capacity_mw)))
+    return out
+
+
+def ntc_delta_mw(traj: dict, border, target_year: int, ref_year: int) -> float:
+    """MW commissioned on `border` in (ref_year, target_year] — a STEP sum, never interpolated.
+
+    Symmetric: the returned MW applies to both directions. New links are overwhelmingly HVDC with a single
+    rating, and the asymmetry in `assemble.NTC` comes from network constraints around the border, not the
+    wire itself.
+
+    Negative target/ref ordering is handled: projecting BACKWARDS past a commissioning year returns a
+    negative delta, correctly removing a link that did not yet exist.
+    """
+    if not traj:
+        return 0.0
+    rows = traj.get(tuple(border)) or traj.get((border[1], border[0])) or []
+    lo, hi, sign = (ref_year, target_year, 1.0) if target_year >= ref_year else (target_year, ref_year, -1.0)
+    return sign * float(sum(mw for yr, mw in rows if lo < yr <= hi))

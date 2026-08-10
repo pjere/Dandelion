@@ -44,21 +44,44 @@ NTC = {
     # EUR/MWh low. Physical ES↔PT capacity is ~4.2 GW, larger than ES↔FR; `flow_derived_ntc` recomputes
     # it per year from realised flow, so this default only binds in years lacking flow history.
     ("ES", "PT"): (4200, 3500),
+    # GB's borders, added when GB was promoted out of `BORDER_ONLY_ZONES`. Values are the sum of the
+    # interconnectors on each border, and every one was MEASURED from Elexon FUELINST rather than quoted:
+    # p99.5 of hourly flow over 2024, import / export MW, against nameplate in brackets —
+    #     IFA 2008/1955 (2000) + IFA2 992/886 (1000) + ElecLink 999/705 (1000) → FR 4000
+    #     Nemo 1019/1021 (1000) → BE           BritNed 1055/1047 (1000) → NL
+    # Applied SYMMETRICALLY even though the measured export p99.5 on the French links is lower (2683 for
+    # the three combined, against 3994 importing): the export side is dispatch behaviour, not a limit. GB
+    # simply exports to France less often than it imports. That these are physically symmetric is visible
+    # in the links where both directions are exercised — Nemo 1019/1021, BritNed 1055/1047 — and in IFA's
+    # maximum export of 2070 MW, above its own nameplate.
+    ("FR", "GB"): (4000, 4000), ("BE", "GB"): (1000, 1000), ("NL", "GB"): (1000, 1000),
+    # Viking Link (GB↔DK_1). ZERO is deliberate and is not a missing number: the link commissioned
+    # 2023-12-29, so in the 2019 and 2022 gate years it did not exist. ENTSO-E publishes no Viking series
+    # at all, so unlike every other border here the static default would bind in EVERY year rather than
+    # only those lacking flow history — asserting 1400 MW would put a phantom 1.4 GW link into two gate
+    # years. `elexon.series.ingest_flows` supplies the realised flow from 2023 on, which `flow_derived_ntc`
+    # turns into the real capacity for the years the link has run (measured p99.5 1424/1097 MW on 2024).
+    ("DK", "GB"): (0, 0),
 }
 _EXCLUDE_DISPATCH = {"hydro_psp", "hydro_ror", "solar", "wind_onshore", "wind_offshore", "waste"}
 
 #: Zones configured but NOT given a balance in the LP — they enter only as border tranches.
 #:
-#: GB is here because it left ENTSO-E Transparency after Brexit (data moved to Elexon/BMRS), so it had no
-#: load or generation history to build a stack from; `DECISIONS.md` records the call to carry it as a
-#: border supply/demand curve instead. `pricemodeling.elexon` now sources GB properly, so this set is the
-#: single switch that promotes it: remove "GB" and it gains a balance everywhere at once.
+#: EMPTY since GB was promoted. GB was the only member: it left ENTSO-E Transparency after Brexit (data
+#: moved to Elexon/BMRS) and so had no load or generation history to build a stack from, and `DECISIONS.md`
+#: recorded the call to carry it as a border supply/demand curve instead. `pricemodeling.elexon` now
+#: sources GB generation, demand and prices, `pricemodeling.fx` converts BMRS's GBP to the lake's EUR, and
+#: the `NTC` table above carries GB's four borders — so the reason for the exception is gone.
 #:
-#: DO NOT flip it casually. Adding a zone changes the LP topology of every window, needs a GB stack and
-#: GB↔FR / GB↔BE NTCs, and GB prices are quoted in GBP — `elexon.series.ingest_prices` refuses to write
-#: without an FX series precisely so a currency mix cannot reach the lake unnoticed. Promoting GB
-#: therefore requires the multi-year gate to be re-run, not just this edit.
-BORDER_ONLY_ZONES = ("GB",)
+#: The mechanism stays because it is the right shape for the next zone that has borders but no balance, and
+#: because `modelled_zones` reads it. Adding a member changes the LP topology of every window, so a change
+#: here requires the multi-year gate to be re-run, not just the edit.
+#:
+#: What GB's promotion does NOT fix: NSL to Norway (1.4 GW) and Moyle/EWIC/Greenlink to Ireland (1.4 GW)
+#: connect GB to zones the model does not carry, so ~2.8 GW of its interconnection is still invisible.
+#: Measured on 2024 those two nearly cancel — Norway supplies +1095 MW mean, Ireland takes −590 MW, a net
+#: +505 MW or 1.8 % of GB demand — which is why the omission is tolerable, not why it is absent.
+BORDER_ONLY_ZONES: tuple[str, ...] = ()
 
 #: Zones given the MEASURED must-run floor (p10 of observed generation per tech-month) on top of the
 #: `measured_chp_mw` selection, which only picks zones that happen to have a CHP entry — a proxy for
@@ -70,6 +93,84 @@ BORDER_ONLY_ZONES = ("GB",)
 #: price — the same failure `observed_mustrun_floors` was written for on DE (12.1 GW heuristic floor vs
 #: 2.1-2.4 GW actually running, "the dominant share of DE's long bias").
 MEASURED_MUSTRUN_ZONES = ("ES",)
+
+
+def hourly_ntc(config, year: int, default: dict | None = None) -> dict:
+    """→ {(a, b): (fwd_series, bwd_series)} of PUBLISHED hourly day-ahead NTC, per border/direction.
+
+    `flow_derived_ntc` gives one scalar per direction for a whole year, and that cannot represent a border
+    that closes. Measured on 2024 against the published series (`entsoe_ntc`, ~1.0 M rows):
+
+        direction      model   real p50   real p10   min   hours at 0
+        DE_LU>CH        2738        950        800     0            1
+        BE>NL           1163        619        124     0          582
+        CH>IT_NORTH     2469       2748       1622     0          265
+        FR>IT_NORTH     1977       2622       1800     0           55
+
+    The model's constant sits ABOVE the real p10 on all 16 directions measured, and 13 of them reach
+    0 MW — the model allows full flow in every one of those hours. That is what couples IT_NORTH to a
+    collapsing France: 1977 MW permitted hourly, against 187 MW actually delivered in the 277 hours the
+    model prices Italy under +5 with a 69.5 EUR/MWh spread standing. An arbitrage that large across an
+    open wire is impossible, so the wire was shut.
+
+    Note the error runs BOTH ways — FR>IT_NORTH's real median (2622) is above the model's constant while
+    its p10 (1800) is below — which is what a constant does to a quantity varying 4-10x. So this should
+    loosen tight hours as well as tightening the closed ones.
+
+    The published value is used AS PUBLISHED, without the per-zone coincidence factor `flow_derived_ntc`
+    applies. That factor exists because summing per-border p99.5 overstates a zone's simultaneous export;
+    published day-ahead NTCs are computed by the TSOs against the network and the market clears all
+    borders together, so they should already be simultaneity-consistent. That is a judgement, not a
+    measurement — the multi-year gate is what tests it.
+
+    `default` (typically `flow_derived_ntc(...)`) fills any border/hour the publication does not cover.
+    The CORE flow-based region (FR-DE_LU and neighbours) publishes no NTC at all, so those borders keep
+    their derived scalar and nothing regresses where the series is absent.
+    """
+    import sqlite3
+    con = sqlite3.connect(config.resolve(config.section("data")["sqlite_path"]))
+    try:
+        df = pd.read_sql("SELECT ts_utc, series_key, value FROM entsoe_ntc "
+                         "WHERE ts_utc >= ? AND ts_utc < ?",
+                         con, params=(f"{year}-01-01", f"{year + 1}-01-01"))
+    except Exception:                                      # noqa: BLE001 — table absent → all defaults
+        return dict(default or {})
+    finally:
+        con.close()
+    out = dict(default or {})
+    if df.empty:
+        return out
+    df["ts"] = pd.to_datetime(df["ts_utc"], utc=True)
+    piv = df.pivot_table(index="ts", columns="series_key", values="value", aggfunc="mean")
+    piv = piv.resample("1h").mean()
+    for key in list(out) + [tuple(k.split(">")) for k in piv.columns if ">" in k]:
+        a, b = key
+        f, w = f"{a}>{b}", f"{b}>{a}"
+        if f not in piv.columns and w not in piv.columns:
+            continue
+        dflt = out.get((a, b)) or out.get((b, a)) or (0.0, 0.0)
+        d0 = float(dflt[0]) if not hasattr(dflt[0], "__len__") else float(np.mean(dflt[0]))
+        d1 = float(dflt[1]) if not hasattr(dflt[1], "__len__") else float(np.mean(dflt[1]))
+        fwd = piv[f].fillna(d0) if f in piv.columns else None
+        bwd = piv[w].fillna(d1) if w in piv.columns else None
+        out[(a, b)] = (fwd if fwd is not None else d0, bwd if bwd is not None else d1)
+    return out
+
+
+def slice_ntc(ntc: dict, border, index) -> tuple:
+    """(fwd, bwd) for one border over `index` — arrays where an hourly series exists, scalars otherwise.
+
+    `highs_solver._build` runs each through `_as_time_array`, so a scalar broadcasts and an array is used
+    as-is; no LP change is needed to carry hourly capacity."""
+    v = ntc.get(border) or ntc.get((border[1], border[0])) or (0.0, 0.0)
+    out = []
+    for x in v:
+        if hasattr(x, "reindex"):
+            s = x.reindex(index)
+            out.append(s.ffill().bfill().to_numpy(float) if s.notna().any() else 0.0)
+        else:
+            out.append(float(x))
+    return tuple(out)
 
 
 def modelled_zones(config) -> list[str]:
@@ -199,7 +300,7 @@ def regime_ntc(config: Config, year: int, base: dict) -> dict:
     year p20. Cap on regime hours = p95 of the observed flow on those hours (revealed capability: with
     prices decoupled and flows below cap, the binding constraint IS the capability). Fundamentals-only
     conditioning — projection-valid, no price leakage. Falls back to the static cap where the flow or
-    residual history is thin (GB has no load data post-Brexit)."""
+    residual history is thin — which no longer includes GB, now that Elexon supplies its load."""
     from ..io.entsoe_hist import load_demand_hist, load_generation_hist
     import sqlite3
     memo_key = (config.resolve(config.section("data")["sqlite_path"]), int(year))
@@ -284,13 +385,9 @@ def _fr_inputs(config, start, end, prices, nuc_avail_mult: float = 1.0) -> dict:
     T = h.index
     stack = build_fr_stack(config)
     stack = stack[~stack["tech"].isin(_EXCLUDE_DISPATCH)].reset_index(drop=True)   # ROR/PSP handled elsewhere
-    # GB is not on ENTSO-E (post-Brexit) → represent the GB interconnector as border import tranches
-    from .windows import GB_IMPORT_TRANCHES, price_gb_tranches  # lazy: windows imports from this module
-    gb = pd.DataFrame([{"unit_id": uid, "name": uid, "tech": "import", "capacity_mw": cap,
-                        "min_gen_frac": 0.0, "efficiency": np.nan, "ramp_frac": 1.0, "vom": 0.0}
-                       for uid, (cap, _) in GB_IMPORT_TRANCHES.items()])
-    stack = pd.concat([stack, gb], ignore_index=True)
-    stack = stack.assign(srmc_eur_mwh=price_gb_tranches(stack, srmc(stack, prices).to_numpy()))
+    # the GB border-import tranches that used to be appended here are gone: GB is a modelled zone with a
+    # real FR-GB border now, and keeping both would double its interconnector (see `windows.fr_stack_base`)
+    stack = stack.assign(srmc_eur_mwh=srmc(stack, prices).to_numpy())
     # availability: nuclear rolling-max-of-output proxy; thermal 0.95; reservoir at capacity (budget-limited)
     nuc_cap = stack.loc[stack["tech"] == "nuclear", "capacity_mw"].sum()
     nuc_frac = np.clip(pd.Series(h["gen_nuclear_mw"].to_numpy()).rolling(72, 1).max().to_numpy()
@@ -339,7 +436,7 @@ def assemble_window(config: Config, start, end, zones=None, price_mult=None,
     prices = _month_prices(cm, start)
     if price_mult:
         prices = {k: v * price_mult.get(k, 1.0) for k, v in prices.items()}
-    zones = zones or [z for z in config.all_zones if z != "GB"]        # GB = border curve (no ENTSO-E data)
+    zones = zones or modelled_zones(config)
 
     fr = _fr_inputs(config, start.date(), end.date(), prices, nuc_avail_mult=nuc_avail_mult)
     T = fr["times"]

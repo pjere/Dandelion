@@ -25,7 +25,7 @@ from ..neighbours.blocks import build_neighbour_stack, constituents, neighbour_n
 from ..res_schemes import load_res_schemes, solve_with_triggers
 from ..rules import rules_at
 from .assemble import (_EXCLUDE_DISPATCH, MEASURED_MUSTRUN_ZONES, NTC, flow_derived_ntc,
-                       modelled_zones)
+                       hourly_ntc, modelled_zones, slice_ntc)
 from .windows import fr_stack_base, fr_window, nb_window
 
 
@@ -275,7 +275,10 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
             from ..io.entsoe_hist import load_installed_capacity
             psp_mw["FR"] = float(load_installed_capacity(config, "FR", year).get("hydro_psp", 0.0))
             storage_lp = storage_spec(psp_mw, year)
-    ntc = flow_derived_ntc(config, year)                        # effective NTC from realized flows
+    # PUBLISHED hourly day-ahead NTC where it exists, the flow-derived scalar elsewhere. A constant
+    # cannot represent a border that closes: 13 of 16 measured directions reach 0 MW, and the old
+    # scalar sat above the real p10 on ALL of them (see assemble.hourly_ntc).
+    ntc = hourly_ntc(config, year, default=flow_derived_ntc(config, year))
     # regime-conditional caps: OPT-IN (`regime_ntc=True`), default OFF — REVERTED after the 2024
     # bisection. The measurement behind it is real (on surplus hours observed flows run at 0–60 % of
     # the p99.5 cap, at-cap 0–6 %, prices decoupled 34–100 %: the flow-based domain shrinks when RES is
@@ -345,7 +348,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
             from .assemble import regime_cap_arrays
             ntc_w = regime_cap_arrays(borders, ntc, rn, T)
         else:
-            ntc_w = {b: ntc[b] for b in borders}
+            ntc_w = {b: slice_ntc(ntc, b, T) for b in borders}
         out = None
         for sp in ([seam, cold] if seam is not cold else [seam]):
             try:

@@ -90,7 +90,10 @@ class NeighbourWeatherModel:
 
         temperature = _fr_hist_weather(config)
         load_coef, res_beta = {}, {}
-        zones = [z for z in config.all_zones if z not in ("FR", "GB")]
+        # GB used to be excluded alongside FR for want of ENTSO-E history; `pricemodeling.elexon` now
+        # supplies its load and generation, so it fits like any other neighbour. FR stays out because it
+        # is the reference whose weather drives every other zone's fit, not a zone being fitted.
+        zones = [z for z in config.all_zones if z != "FR"]
         for z in zones:
             ld = load_demand_hist(config, year, zones=constituents(z)).groupby("timestamp_utc")["load_mw"].sum()
             j = pd.DataFrame({"load": ld}).join(temperature, how="inner").dropna()

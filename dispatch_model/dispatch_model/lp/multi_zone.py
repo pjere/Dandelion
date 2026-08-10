@@ -11,8 +11,9 @@ and binding NTCs.
         0 ≤ fwd_k ≤ NTC_ab ,  0 ≤ bwd_k ≤ NTC_ba          (directed flows, k=(a,b))
         gmin ≤ gen ≤ gcap · availability ; 0 ≤ res ≤ res_pot ; ens,dump ≥ 0
 
-Directed non-negative flows + a tiny gross-flow cost ε remove degenerate loop flows. GB (no ENTSO-E data)
-is represented upstream as border supply tranches on the FR/BE stacks, not as a balance here.
+Directed non-negative flows + a tiny gross-flow cost ε remove degenerate loop flows. Every configured zone
+now carries a balance here, GB included — it was the one exception, sourced from Elexon instead of ENTSO-E
+and carried as border supply tranches on the FR stack until those were replaced by a real FR-GB border.
 """
 from __future__ import annotations
 

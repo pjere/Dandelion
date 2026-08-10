@@ -17,9 +17,12 @@ from ..neighbours.blocks import heat_factor, measured_chp_mw
 from ..stacks.fr_stack import build_fr_stack, srmc
 from .assemble import _EXCLUDE_DISPATCH
 
-# GB is not on ENTSO-E (post-Brexit) → the GB interconnector is two border supply tranches on the FR
-# stack: unit_id -> (capacity_mw, srmc_eur_mwh). Priced by unit_id (never by row position).
-GB_IMPORT_TRANCHES = {"GB_IMP1": (2500.0, 52.0), "GB_IMP2": (1500.0, 110.0)}
+# GB_IMPORT_TRANCHES lived here — 2500 MW at 52 EUR/MWh + 1500 MW at 110 EUR/MWh of "import" supply
+# appended to the FR stack, standing in for the Channel interconnectors while GB had no ENTSO-E data and
+# so no balance of its own. REMOVED when GB was promoted to a modelled zone: their 4000 MW is exactly the
+# FR-GB NTC now in `assemble.NTC`, so keeping both would let France draw 4000 MW of phantom British supply
+# at a fixed price AND 4000 MW of real flow across the border — 8 GW of import capacity where 4 exists,
+# half of it at a price no British plant had to set.
 
 # DSR / scarcity tranches as a fraction of window peak demand (spec §2: step the price below VoLL).
 # Also absorbs modest under-modelling of peakers/emergency imports so cold snaps don't hit VoLL.
@@ -27,17 +30,13 @@ _DSR = [(0.03, 300.0), (0.03, 1000.0), (0.05, 4000.0)]
 
 
 def fr_stack_base(config, year: int | None = None) -> pd.DataFrame:
-    """FR unit-level stack (dispatchables only) + the GB border-import tranches.
+    """FR unit-level stack, dispatchables only.
 
     `year` sélectionne le parc de l'année : unités réellement en service, et complément agrégé pour le
     parc diffus absent du reporting groupe par groupe (voir `io.fr_fleet`).
     """
     st = build_fr_stack(config, year=year)
-    st = st[~st["tech"].isin(_EXCLUDE_DISPATCH)].reset_index(drop=True)
-    gb = pd.DataFrame([{"unit_id": uid, "name": uid, "tech": "import", "capacity_mw": cap,
-                        "min_gen_frac": 0.0, "efficiency": np.nan, "ramp_frac": 1.0, "vom": 0.0}
-                       for uid, (cap, _) in GB_IMPORT_TRANCHES.items()])
-    return pd.concat([st, gb], ignore_index=True)
+    return st[~st["tech"].isin(_EXCLUDE_DISPATCH)].reset_index(drop=True)
 
 
 def dsr_tranches(zone: str, peak_mw: float) -> pd.DataFrame:
@@ -47,14 +46,6 @@ def dsr_tranches(zone: str, peak_mw: float) -> pd.DataFrame:
                          for i, (frac, price) in enumerate(_DSR)])
 
 
-def price_gb_tranches(stack: pd.DataFrame, srmc_values: np.ndarray) -> np.ndarray:
-    """Overwrite the GB import tranches' SRMC by unit_id — robust to any stack reordering."""
-    s = srmc_values.copy()
-    for uid, (_, price) in GB_IMPORT_TRANCHES.items():
-        s[(stack["unit_id"] == uid).to_numpy()] = price
-    return s
-
-
 def fr_window(fr, stack, prices, T, nuc_unavail_daily=None, wv_delta=None) -> dict:
     """FR zone dict for one window: SRMC, DSR tranches, nuclear availability (REMIT feed or the
     rolling-max-of-output proxy), and the window's actual reservoir energy as the hydro budget.
@@ -62,9 +53,8 @@ def fr_window(fr, stack, prices, T, nuc_unavail_daily=None, wv_delta=None) -> di
     `wv_delta` (opt-in, #136) recentre les prix d'offre hydrauliques sur le λ structurel de la SDP pour la
     semaine de la fenêtre — le niveau vient de Bellman, la dispersion reste empirique."""
     h = fr.loc[T]
-    s = price_gb_tranches(stack, srmc(stack, prices).to_numpy())
     # la valeur de l'eau ecrase le SRMC des tranches hydrauliques : leur cout d'opportunite, pas leur VOM
-    st = apply_water_value(stack.assign(srmc_eur_mwh=s))
+    st = apply_water_value(stack.assign(srmc_eur_mwh=srmc(stack, prices).to_numpy()))
     if wv_delta is not None:
         from ..hydro.synthesis import shift_hydro_bids
         st = shift_hydro_bids(st, float(wv_delta))

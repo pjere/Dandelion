@@ -55,6 +55,10 @@ borders:
   - [DE_LU, CH]
   - [CH, IT_NORTH]
   - [BE, GB]
+  # GB's remaining borders, added when it was promoted from a border tranche to a modelled zone.
+  # BritNed (NL) and Viking (DK); NSL to Norway and the Irish links have no zone to connect to.
+  - [NL, GB]
+  - [DK, GB]
   # DE-LU's neighbour clusters + their out-of-DE borders (see zones note above)
   - [DE_LU, NL]
   - [BE, NL]
