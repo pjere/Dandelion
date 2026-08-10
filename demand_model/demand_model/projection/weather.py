@@ -16,23 +16,6 @@ from ..config import Config
 from ..features.build import build_features
 from ..io.loaders import WEATHER_VARS
 
-_ENSEMBLE_DIMS = ("realization", "member", "draw", "ensemble")
-
-
-def open_cube(config: Config):
-    import xarray as xr
-    path = config.resolve(config.section("projection")["weathergen_output"])
-    if not path.exists():
-        raise FileNotFoundError(f"weathergen cube not found: {path} (run the weather generator first)")
-    return xr.open_dataset(path)
-
-
-def n_realizations(ds) -> int:
-    for d in _ENSEMBLE_DIMS:
-        if d in ds.dims:
-            return int(ds.sizes[d])
-    return 1
-
 
 def _tidy_weather(config: Config, realization: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Cube (one realization) -> tidy per-station weather frame + station metadata.

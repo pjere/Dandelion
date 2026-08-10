@@ -102,17 +102,6 @@ def derive(ds) -> pd.DataFrame:
     })
 
 
-def load_era5_points(config: Config, points: pd.DataFrame) -> pd.DataFrame:
-    """Tidy per-point ERA5 (timestamp_utc, point_id, wind100_ms, ghi_wm2). Triggers downloads."""
-    files = download_points(config, points)
-    frames = []
-    for pid, path in files.items():
-        df = derive(_open(path))
-        df["point_id"] = pid
-        frames.append(df)
-    return pd.concat(frames, ignore_index=True)
-
-
 # --------------------------------------------------------------------------- #
 #  DB ingest + reader — makes the ERA5 100 m wind / SSRD a first-class DB source
 #  (so every weather variable in the predictive model comes from the DB, like SYNOP).

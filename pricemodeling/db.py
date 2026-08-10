@@ -143,14 +143,6 @@ def upsert_df(
     return len(records)
 
 
-def write_table_replace(
-    engine: Engine, table_name: str, df: pd.DataFrame, chunksize: int | None = None
-) -> int:
-    """Recrée intégralement une table à partir d'un DataFrame (utilisé pour la table maître)."""
-    df.to_sql(table_name, engine, if_exists="replace", index=False, chunksize=chunksize)
-    return len(df)
-
-
 def log_ingest(
     engine: Engine, source: str, chunk_key: str, rows: int, status: str = "ok"
 ) -> None:
