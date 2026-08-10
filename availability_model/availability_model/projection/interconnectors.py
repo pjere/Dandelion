@@ -15,7 +15,6 @@ from powersim_core.rng import substream
 from ..config import Config
 
 _FORCED_MEAN_DAYS = 3.0                                             # mean forced interconnector outage
-_PLANNED_MEAN_DAYS = 10.0                                           # one planned maintenance block/year
 
 
 def interconnector_availability(config: Config, interconnectors: pd.DataFrame, draw: int = 0) -> pd.DataFrame:

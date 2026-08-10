@@ -87,7 +87,3 @@ class ResidualModel:
     @staticmethod
     def load(path: str | Path) -> ResidualModel:
         return ResidualModel(**load_params(Path(path).with_suffix(".json")))
-
-
-def _corr_from_chol(chol: np.ndarray) -> np.ndarray:
-    return chol @ chol.T

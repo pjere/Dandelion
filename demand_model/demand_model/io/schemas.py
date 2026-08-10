@@ -6,8 +6,6 @@ from pandera.pandas import Check, Column, DataFrameSchema
 
 from powersim_core.schemas import validate  # noqa: F401  (re-exported: single contract-check authority)
 
-_UTC = Check(lambda s: s.dt.tz is not None, error="timestamps must be tz-aware (UTC)")
-
 # A. Historical load (after perimeter correction: REALISED - pumping) --------
 LOAD_HIST = DataFrameSchema(
     {

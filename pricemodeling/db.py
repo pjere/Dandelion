@@ -31,10 +31,6 @@ from sqlalchemy.engine import Engine
 
 METADATA = MetaData()
 
-# Colonnes standard d'une série temporelle RTE normalisée.
-RTE_TS_COLUMNS = ["ts_utc", "ts_end_utc", "series_key", "sub_key", "label", "value"]
-RTE_TS_PK = ["ts_utc", "series_key", "sub_key"]
-
 # ----- Dimensions & tables fixes -------------------------------------------
 
 dim_station = Table(
