@@ -224,3 +224,57 @@ Supersedes the earlier "cap thermal at observed generation" idea.
 
 Intra-zonal grid, reserve co-optimisation, unit-commitment combinatorics, strategic bidding, FB market
 coupling (plain NTC used). The SMC→spot gap is step (vii)'s calibrated markup/spread layer.
+
+## Lazy rows — TRIED, MEASURED, REJECTED (2026-08)
+
+Deferring the rarely-binding FLEX row families and adding them back only where violated. Exact by
+construction: removing rows relaxes an LP, so a reduced solution violating none of the omitted rows is
+optimal for the full problem and the omitted rows' duals are genuinely zero. Built to the letter — pure
+per-family builders (kept, `_fam_*`), a round loop, a violation check, a round-cap fallback to the full
+build of the same spec variant, and a mandatory invariant asserting every omitted row is satisfied.
+
+**It works, and it is not worth it. Measured 1.16x.**
+
+    one arm per process, warm-then-measure, 6 backtest windows of 2024
+    full build   182.14 s   147 153 rows
+    lazy         156.65 s   106 953 rows   (-27.3 % rows, 16 % faster)
+
+The deferred set came from a dual census, not from expectation: over 10 backtest and 10 projection-2034
+windows, C2a binds on 0.016 %/0.243 % of its rows and rho on 0.190 %/0.010 %, against C1a at 16 %/43 %.
+C2a never added a single row in any window measured.
+
+**Why 27 % fewer rows buys only 16 %: presolve was already doing it.** This repo measured presolve as
+worth >20x on this model, and rows that never bind are exactly what presolve eliminates. The census
+selected C2a and rho *because* they never bind — i.e. precisely the rows presolve was always going to
+strip. The driver reimplements presolve's job in Python and pays extra rounds for it.
+
+**A BEWARE for anyone reaching for this again.** An earlier measurement showed 3.90x and was wrong: both
+arms ran in one process with the full build first, so it paid ~600 s of cache warming (`framecache`, the
+`lru_cache`s, `_REGIME_NTC_MEMO`) that the lazy arm inherited for free. Two cold runs of identical work
+measured 573 s and 455 s here — a 26 % spread — so ANY A/B on this codebase must run one arm per process
+and compare warm runs.
+
+### The finding that outlives it: the golden is not robust to solver perturbation
+
+Lazy rows are exact PER WINDOW — replayed against a fixed seam state, objectives matched to 0.0000 with
+zero violated rows across all 147 513 constraints. Across a SEQUENCE they are not, and the cause is not
+the lazy rows:
+
+* the LP has a large degenerate optimal face. Two solutions of one window differed in 2276 columns —
+  49 GWh of Spanish generation, 20 GWh across ES>PT — at an objective difference of 5.3e-16, every
+  block's cost-delta cancelling to zero;
+* `flexibility.tail_state` carries the window's PRIMAL into the next window's seam (u_init/p_init/
+  d_hist), so an arbitrary vertex choice becomes a genuinely different LP downstream. Measured: 5.3e-16
+  in window 1 became 2.9e-05 in window 2.
+
+So ANY perturbation moves the artifact: a HiGHS upgrade, a presolve change, a different platform. That is
+true of the tree today, independent of lazy rows.
+
+**A border tie-break was tried against this and REJECTED.** Extending the F6/F8 deterministic-perturbation
+technique to per-border flow costs (`_EPS_FLOW` + up to 1e-4, keyed per border and direction) left the
+divergence at 2.898e-05 unchanged, left the primal delta at ~4950 MW, spread the price difference from 14
+cells to 132, and shifted one window's objective by 179. The reason it cannot work: the degenerate
+direction is INTER-TEMPORAL, not inter-unit. Two flexible units swapping output between two hours cost
+exactly the same because SRMC does not vary by hour, and no per-unit or per-border perturbation — both
+constant in time — can separate that. Breaking it needs an hour-dependent cost perturbation, which
+distorts the intra-day merit order.
