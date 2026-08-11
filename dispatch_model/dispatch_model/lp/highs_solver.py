@@ -14,6 +14,7 @@ exactly; validated **byte-identical** against it (the golden 2019 backtest is un
 from __future__ import annotations
 
 import hashlib
+from typing import NamedTuple
 
 import highspy
 import numpy as np
@@ -126,6 +127,110 @@ def _tranches_for(zone, zones_data, res_bid, res_tranches, n):
         return [(float(t["share"]), _as_time_array(t["floor"], n), str(t["scheme"])) for t in trs], rp
     bid = float(res_bid[zone]) if isinstance(res_bid, dict) else float(res_bid)
     return [(1.0, np.full(n, bid), "res")], rp
+
+
+class _Rows(NamedTuple):
+    """One row family's contribution to the LP, as append-ordered fragments.
+
+    `rcv` are (row, col, val) triples in the exact order the pre-refactor `_build` appended them — the
+    COO arrays are compared element-wise by the refactor gate, so order is part of the contract, not an
+    implementation detail. `lo`/`up` are the row-bound fragments, likewise ordered. `n` is the row count,
+    which the caller uses to advance `xrow`.
+    """
+
+    rcv: list
+    lo: list
+    up: list
+    n: int
+
+
+def _emit(frag, tag, xrow, rows, cols, vals, row_lo, row_up, row_tags):
+    """Append a family's fragments to the shared build lists and return the advanced `xrow`."""
+    row_tags.append((tag, xrow, xrow + frag.n))
+    for r, c, v in frag.rcv:
+        rows.append(r); cols.append(c); vals.append(v)
+    row_lo.extend(frag.lo); row_up.extend(frag.up)
+    return xrow + frag.n
+
+
+# ---- deferrable row families ------------------------------------------------------------------------
+# Extracted so the lazy driver can rebuild a family against a solved primal without re-entering `_build`.
+# Each is a PURE function of (base row index, spec inputs): given the same arguments it returns the same
+# fragments, so building a family at row `b` during the initial build and again at row `b2` when adding it
+# back is the same arithmetic with a different offset. The families that can NEVER be deferred (p<=u, C1a,
+# C1b, C5-start, the F5 seam block, C7, storage SoC, energy caps) stay inline in `_build`: extracting them
+# would enlarge the diff on 450 lines of index arithmetic for no benefit.
+
+
+def _fam_c2a(base, mu, n, db, capf, fz, has_state, d_hist):
+    """C2a: rolling 8-hour deep-mod energy budget, Sum_{k=0..7} d_{t-k} <= d_max_8h * cap."""
+    B8 = np.asarray(fz["d_max_8h"], float) * capf                        # (mu,) MWh / 8h window
+    rcv, lo, up_l = [], [], []
+    for j in range(mu):
+        for k in range(8):                                              # d_{t-k}, k=0..7, t-k>=0
+            tt = np.arange(k, n)
+            rcv.append((base + j * n + tt, db + j * n + (tt - k), np.ones(tt.size)))
+        up = np.full(n, B8[j])
+        if has_state:                          # pre-window d_{-1..-(7-t)} also occupy the 8h window
+            for t in range(min(7, n)):         # ending at t (t=0..6) -> charge them against the budget
+                up[t] -= float(d_hist[j, :7 - t].sum())
+            # clamp >=0: if a maneuverability drop across the seam left the pre-window deep-mod above the
+            # (now tighter) budget, the reactor simply cannot deep-mod until it rolls out of the 8h
+            # window — a spent budget, not an infeasible LP.
+            np.maximum(up, 0.0, out=up)
+        lo.append(np.full(n, -_INF)); up_l.append(up)
+    return _Rows(rcv, lo, up_l, mu * n)
+
+
+def _fam_c2b(base, mu, n, db, capf, fz, day_idx):
+    """C2b: calendar-day deep-mod budget, Sum_{t in day} d <= d_max_day * cap."""
+    Bday = np.asarray(fz["d_max_day"], float) * capf
+    nd = int(day_idx.max()) + 1
+    rr = base + (np.arange(mu)[:, None] * nd + day_idx[None, :]).ravel()
+    rcv = [(rr, db + np.arange(mu * n), np.ones(mu * n))]
+    lo, up_l = [], []
+    for j in range(mu):
+        lo.append(np.full(nd, -_INF)); up_l.append(np.full(nd, Bday[j]))
+    return _Rows(rcv, lo, up_l, mu * nd)
+
+
+def _fam_c3(base, mu, n, db, ub, gbase, fidx, fz, has_state, d_hist):
+    """C3: xenon up-ramp, p_t - p_{t-1} - r_up*u_t + beta*Sum_{k=1..8} d_{t-k} <= 0."""
+    r_up = np.asarray(fz["r_up"], float)
+    beta = np.broadcast_to(np.asarray(fz.get("xenon_beta", 0.0), float), (mu,)).astype(float)
+    rcv, lo, up_l = [], [], []
+    for j in range(mu):
+        tt = np.arange(1, n); r = base + j * (n - 1) + (tt - 1)
+        rcv.append((r, gbase + fidx[j] * n + tt, np.ones(tt.size)))                      # +p_t
+        rcv.append((r, gbase + fidx[j] * n + (tt - 1), -np.ones(tt.size)))               # -p_{t-1}
+        rcv.append((r, ub + j * n + tt, np.full(tt.size, -r_up[j])))                     # -r_up*u_t
+        if beta[j] != 0.0:                                             # xenon: recent deep-mod caps ramp
+            for k in range(1, 9):
+                tt2 = np.arange(max(1, k), n)                          # row t (>=1) uses d_{t-k} when t-k>=0
+                rcv.append((base + j * (n - 1) + (tt2 - 1),
+                            db + j * n + (tt2 - k), np.full(tt2.size, beta[j])))
+        up = np.zeros(n - 1)
+        if has_state and beta[j] != 0.0:       # rows t=1..7 also see pre-window d_{t-k} (k>t) -> RHS
+            for t in range(1, min(8, n)):
+                up[t - 1] = -beta[j] * float(d_hist[j, :8 - t].sum())
+        lo.append(np.full(n - 1, -_INF)); up_l.append(up)
+    return _Rows(rcv, lo, up_l, mu * (n - 1))
+
+
+def _fam_rho(base, mu, n, ub, gc, umf, fz):
+    """C5 min-down proxy: u_t - u_{t-1} <= avail_t * rho_recommit."""
+    rho = np.broadcast_to(np.asarray(fz["rho_recommit"], float), (mu,)).astype(float)
+    rcv, lo, up_l = [], [], []
+    for j in range(mu):
+        tt = np.arange(1, n); r = base + j * (n - 1) + (tt - 1)
+        rcv.append((r, ub + j * n + tt, np.ones(tt.size)))
+        rcv.append((r, ub + j * n + (tt - 1), -np.ones(tt.size)))
+        # an outage RETURN raises the commitment floor by kappa*delta-avail in one hour — a *scheduled*
+        # recommissioning, not an economic recommit, so it must pass the ramp cap (else infeasible
+        # against the u_min floor at every REMIT return step).
+        up = gc[j, 1:] * rho[j] + umf[j] * np.clip(gc[j, 1:] - gc[j, :-1], 0.0, None)
+        lo.append(np.full(n - 1, -_INF)); up_l.append(up)
+    return _Rows(rcv, lo, up_l, mu * (n - 1))
 
 
 def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tranches, flex=None, storage=None):
@@ -365,70 +470,24 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             #     error — but the explicit form is what every FLEX calibration and the multi-year gate
             #     were validated against, so it is the one that keeps the burden of proof.
             # `scratchpad/statevar_ab.py` reruns the comparison.
-            if "d_max_8h" in fz:                       # C2a: Σ_{k=0..7} d_{t−k} ≤ D_max8h·cap (rolling 8 h)
-                B8 = np.asarray(fz["d_max_8h"], float) * capf                        # (mu,) MWh / 8h window
-                base = xrow
-                row_tags.append(("C2a 8h budget", base, base + mu * n))
-                for j in range(mu):
-                    for k in range(8):                                              # d_{t−k}, k=0..7, t−k≥0
-                        tt = np.arange(k, n)
-                        rows.append(base + j * n + tt); cols.append(db + j * n + (tt - k))
-                        vals.append(np.ones(tt.size))
-                    up = np.full(n, B8[j])
-                    if has_state:                          # pre-window d_{-1..-(7-t)} also occupy the 8h window
-                        for t in range(min(7, n)):         # ending at t (t=0..6) → charge them against the budget
-                            up[t] -= float(d_hist[j, :7 - t].sum())
-                        # clamp ≥0: if a maneuverability drop across the seam left the pre-window deep-mod above
-                        # the (now tighter) budget, the reactor simply can't deep-mod until it rolls out of the
-                        # 8h window — a spent budget, not an infeasible LP.
-                        np.maximum(up, 0.0, out=up)
-                    row_lo.append(np.full(n, -_INF)); row_up.append(up)
-                xrow += mu * n
-            if "d_max_day" in fz:                      # C2b: Σ_{t∈day} d ≤ D_max_day·cap (calendar day)
-                Bday = np.asarray(fz["d_max_day"], float) * capf
-                nd = int(day_idx.max()) + 1
-                base = xrow
-                row_tags.append(("C2b daily budget", base, base + mu * nd))
-                rr = base + (np.arange(mu)[:, None] * nd + day_idx[None, :]).ravel()
-                rows.append(rr); cols.append(db + np.arange(mu * n)); vals.append(np.ones(mu * n))
-                for j in range(mu):
-                    row_lo.append(np.full(nd, -_INF)); row_up.append(np.full(nd, Bday[j]))
-                xrow += mu * nd
-            if "r_up" in fz:                           # C3: p_t − p_{t−1} − R_up·u_t + β·Σ_{k=1..8} d_{t−k} ≤ 0
-                r_up = np.asarray(fz["r_up"], float)
-                beta = np.broadcast_to(np.asarray(fz.get("xenon_beta", 0.0), float), (mu,)).astype(float)
-                base = xrow
-                row_tags.append(("C3 xenon ramp", base, base + mu * (n - 1)))
-                for j in range(mu):
-                    tt = np.arange(1, n); r = base + j * (n - 1) + (tt - 1)
-                    rows.append(r); cols.append(gbase + fidx[j] * n + tt); vals.append(np.ones(tt.size))       # +p_t
-                    rows.append(r); cols.append(gbase + fidx[j] * n + (tt - 1)); vals.append(-np.ones(tt.size))
-                    rows.append(r); cols.append(ub + j * n + tt); vals.append(np.full(tt.size, -r_up[j]))       # -Rup*u
-                    if beta[j] != 0.0:                                             # xénon: recent deep-mod caps ramp
-                        for k in range(1, 9):
-                            tt2 = np.arange(max(1, k), n)                          # row t (≥1) uses d_{t−k} when t−k≥0
-                            rows.append(base + j * (n - 1) + (tt2 - 1))
-                            cols.append(db + j * n + (tt2 - k)); vals.append(np.full(tt2.size, beta[j]))
-                    up = np.zeros(n - 1)
-                    if has_state and beta[j] != 0.0:       # rows t=1..7 also see pre-window d_{t−k} (k>t) → RHS
-                        for t in range(1, min(8, n)):
-                            up[t - 1] = -beta[j] * float(d_hist[j, :8 - t].sum())
-                    row_lo.append(np.full(n - 1, -_INF)); row_up.append(up)
-                xrow += mu * (n - 1)
-            if "rho_recommit" in fz:                   # C5 min-down proxy: u_t − u_{t−1} ≤ avail_t·ρ_recommit
-                rho = np.broadcast_to(np.asarray(fz["rho_recommit"], float), (mu,)).astype(float)
-                base = xrow
-                row_tags.append(("C5 min-down", base, base + mu * (n - 1)))
-                for j in range(mu):
-                    tt = np.arange(1, n); r = base + j * (n - 1) + (tt - 1)
-                    rows.append(r); cols.append(ub + j * n + tt); vals.append(np.ones(tt.size))
-                    rows.append(r); cols.append(ub + j * n + (tt - 1)); vals.append(-np.ones(tt.size))
-                    # an outage RETURN raises the commitment floor by κ·Δavail in one hour — a *scheduled*
-                    # recommissioning, not an economic recommit, so it must pass the ramp cap (else infeasible
-                    # against the u_min floor at every REMIT return step).
-                    up = gc[j, 1:] * rho[j] + umf[j] * np.clip(gc[j, 1:] - gc[j, :-1], 0.0, None)
-                    row_lo.append(np.full(n - 1, -_INF)); row_up.append(up)
-                xrow += mu * (n - 1)
+            # The four DEFERRABLE families are built by module-level builders (see `_fam_*`), so the
+            # lazy driver can rebuild any of them against a solved primal without re-entering `_build`.
+            # Order, `xrow` numbering and append order are unchanged — proven by array equality against
+            # the pre-refactor build. Families that can never be deferred stay inline above/below.
+            if "d_max_8h" in fz:                       # C2a
+                xrow = _emit(_fam_c2a(xrow, mu, n, db, capf, fz, has_state,
+                                      d_hist if has_state else None),
+                             "C2a 8h budget", xrow, rows, cols, vals, row_lo, row_up, row_tags)
+            if "d_max_day" in fz:                      # C2b
+                xrow = _emit(_fam_c2b(xrow, mu, n, db, capf, fz, day_idx),
+                             "C2b daily budget", xrow, rows, cols, vals, row_lo, row_up, row_tags)
+            if "r_up" in fz:                           # C3
+                xrow = _emit(_fam_c3(xrow, mu, n, db, ub, gbase, fidx, fz, has_state,
+                                     d_hist if has_state else None),
+                             "C3 xenon ramp", xrow, rows, cols, vals, row_lo, row_up, row_tags)
+            if "rho_recommit" in fz:                   # C5 min-down proxy
+                xrow = _emit(_fam_rho(xrow, mu, n, ub, gc, umf, fz),
+                             "C5 min-down", xrow, rows, cols, vals, row_lo, row_up, row_tags)
 
             # ---- F5 seam rows at t=0: the intertemporal constraints that reference hour −1, closed against
             #      the previous window's fixed tail state (u_init/p_init/d_hist). The t=1..n−1 rows above are
