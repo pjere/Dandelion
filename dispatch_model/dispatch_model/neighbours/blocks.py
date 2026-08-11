@@ -77,7 +77,18 @@ def heat_factor(month: int) -> float:
     return _MONTHLY_HEAT.get(int(month), 0.5)
 
 
-@lru_cache(maxsize=8)
+#: UNBOUNDED, and the bound is what mattered. This is a pure function of `zone` returning a handful of
+#: floats, but it reads the reference registry (~170k rows) on a miss — and `rolling.windows.nb_window`
+#: calls it once per NEIGHBOUR ZONE per WINDOW for every zone without a measured must-run floor. At
+#: maxsize=8 against 9 such zones cycling in a fixed order, every access evicted the entry needed next:
+#: measured hit rate **0.0 %**, 54 misses in 54 calls over 6 windows, i.e. a full registry read every time.
+#: That single defect was **99.1 % of `nb_window`** and ~41 % of projection window wall-clock — larger than
+#: the entire warm-start/lazy-row programme's ceiling, for a cache size.
+#:
+#: The cache is bounded by the number of configured zones (~15 small tuples), so unbounded is the honest
+#: expression of "remember all of them"; any fixed number would silently re-introduce the cliff the next
+#: time a zone is added. GB's promotion took the count from 8 to 9 and tipped it over.
+@lru_cache(maxsize=None)
 def _measured_chp_mw(zone: str) -> tuple:
     """Measured CHP-electrical capacity per tech (MW) for `zone`, from the reference registry.
 
