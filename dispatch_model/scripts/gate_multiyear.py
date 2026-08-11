@@ -21,8 +21,9 @@ arm B from the SMC parquets written here, so a stale cache silently corrupts tha
 column. It has already happened — Spain's layer read -0.5 against pre-Portugal parquets when it was
 really -6.8.
 
-Reference (2026-08, GB promoted to a modelled zone with its embedded generation netted off demand).
-Pooled log_err 1.54, |mean error| 11.2 €/MWh, scarcity recall 36418/34917:
+Reference (2026-08, GB promoted to a modelled zone with its embedded generation netted off demand;
+RE-VERIFIED after the performance campaign, see below). Pooled log_err 1.54, |mean error| 11.2 €/MWh,
+scarcity recall 36418/34917:
 
     zone      b5_ratio  log_err  mean_err        year  b5_ratio  log_err  mean_err
     ES            1.35     0.35     -2.12        2019      1.48     2.14     -0.98
@@ -48,6 +49,23 @@ the pooled figure for a reason that has nothing to do with the change being test
 for that correction and for the priced-block variant that was tried and rejected.
 
 The two worst zones, IT_NORTH (over-printing boundary hours ~9x) and CH, are long-standing and untouched.
+
+RUN COST, and why the table above is a stronger statement than it looks. The performance campaign
+(`perf warm-start 1..6/n`) cut a fresh four-year run from ~10 000 s to 2358 s — 724/611/551/472 s for
+2019/2022/2024/2025 — via three cache and query defects (an `lru_cache` sized 8 against 9 callers with a
+measured 0 % hit rate; a zone filter applied in pandas after reading the whole year; unmemoised frame
+loaders). Every one of those was gated on byte-identity, and re-solving all four years from an EMPTY cache
+afterwards reproduced every figure above to two decimals. That is a stronger check than the frozen-parquet
+golden: four years, 13 zones, ~35 000 hours, produced end to end by the current code rather than compared
+against a stored artifact.
+
+WHAT THAT DOES NOT PROVE. The reproduction holds because nothing perturbed the solver. It is NOT evidence
+that the artifact is stable in general — `DECISIONS.md` records the measurement that it is not: the LP has
+a wide degenerate optimal face (2276 columns, 49 GWh of Spanish generation, moving at 5.3e-16 of
+objective), and `flexibility.tail_state` carries the PRIMAL across the window seam, so any change to
+vertex selection becomes a different LP downstream. A HiGHS upgrade, a presolve change or a platform move
+would shift these numbers without any modelling change. Diagnose such a shift with the objective
+discriminator before treating it as a regression.
 
 Run from dispatch_model/:  python -u -X utf8 -W ignore scripts/gate_multiyear.py [--reuse]
 """
