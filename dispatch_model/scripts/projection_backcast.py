@@ -28,22 +28,46 @@ parquets, and Spain's layer was reported as -0.5 when it was really -6.8 (its ar
 once the changes were actually in it). RE-RUN `scripts/gate_multiyear.py` BEFORE trusting a layer number
 after any dispatch change.
 
-Reference result (2026-08, first VALID decomposition after Portugal + must-run + the ES ladder, with PT
-scored). Pooled |projection err| 6.3, |dispatch err| 6.0, |layer| 3.5:
+Reference result (2026-08, after GB's promotion to a modelled zone and the performance campaign, with GB
+now scored). Pooled |projection err| 7.9, |dispatch err| 9.5, |layer| 6.8 — NOT comparable with the
+previous pooled row, which was taken over eight zones rather than nine:
 
     zone       observed  backtest  projection | proj err  disp err   layer
-    BE             70.3      70.4        78.8 |     8.5       0.1     8.4
-    CH             76.0      87.3        89.4 |    13.4      11.3     2.1
-    DE_LU          78.5      77.5        80.2 |     1.7      -1.1     2.7
-    ES             63.0      66.9        60.1 |    -3.0       3.8    -6.8
-    FR             58.0      47.5        49.8 |    -8.3     -10.5     2.2
-    IT_NORTH      107.4      93.3        93.3 |   -14.1     -14.1     0.0
-    NL             77.3      78.7        77.9 |     0.6       1.4    -0.8
-    PT             63.5      69.0        64.2 |     0.7       5.5    -4.8
+    BE             70.3      68.2        77.8 |     7.4      -2.1     9.6
+    CH             76.0      90.1        90.8 |    14.8      14.1     0.7
+    DE_LU          78.5      75.7        78.5 |    -0.0      -2.8     2.8
+    ES             63.0      68.2        64.2 |     1.1       5.1    -4.0
+    FR             58.0      63.1        61.4 |     3.4       5.1    -1.7
+    GB             84.5      70.9        60.2 |   -24.3     -13.6   -10.7
+    IT_NORTH      107.4      93.6        91.4 |   -16.0     -13.8    -2.2
+    NL             77.3     100.8        75.1 |    -2.2      23.5   -25.7
+    PT             63.5      69.0        65.3 |     1.8       5.6    -3.7
 
-PT scores 0.7 EUR/MWh on its first appearance with no PT-specific calibration — a reasonable independent
-check that modelling it as a coupled zone was right rather than merely convenient. The open items are
-BE (+8.4, the largest layer) and ES (-6.8: the projection under-prices while the dispatch over-prices).
+Previous reference, eight zones: pooled |proj err| 6.3, |disp err| 6.0, |layer| 3.5, with BE +8.4 and
+ES -6.8 the open items.
+
+FR IMPROVED MATERIALLY (proj err -8.3 -> +3.4, its backtest arm moving 47.5 -> 63.1): promoting GB removed
+the 4000 MW of phantom "GB import" tranches that had sat inside the FR stack, and this harness sees it as
+clearly as the multi-year gate does. ES also improved (layer -6.8 -> -4.0).
+
+GB IS NOW THE WORST ZONE, and both halves of its error have identified causes.
+  * the -13.6 DISPATCH error is `io.gb_embedded` netting ~5 GW of reconstructed embedded generation off
+    demand, which leaves GB structurally long and cheap. The gate scores it at 1800 hours below +5 EUR/MWh
+    in 2019 against 9 observed. That trade was taken deliberately (see `DECISIONS.md`) because the
+    alternative — pricing the block — re-opened a VoLL cascade into NL;
+  * the further -10.7 of LAYER is almost certainly the TYNDP gap. The coverage report prints
+    `GB: cap_solar_gw=missing, cap_wind_gw=missing, demand_twh=missing`, so GB falls back to the generic
+    CAGR: RES +4.5 %/yr against demand +0.8 %/yr, i.e. RES x1.25 vs demand x1.04 over 2019-2024. That
+    over-grows surplus in exactly the direction observed. It is the same defect class `TYNDP_SOURCES.md`
+    records as having cost NL 458 negative hours; GB acquired it when it was promoted without trajectories,
+    and filling those rows is the actionable item.
+
+NL's -25.7 LAYER IS AN ARTEFACT — do not read it as a projection defect. Its dispatch arm is +23.5
+(backtest 100.8 against 77.3 observed) while its projection arm is -2.2: the projection lands near-correct
+against a badly over-priced backtest. The two arms do not run the same NL topology — the backtest uses
+published hourly NTC where it exists (`assemble.hourly_ntc`), the projection the 2019 reference-year
+flow-derived scalars. A layer that large is measuring that difference between arms, not a layer effect,
+and it stays uninterpretable until the two agree on NL's borders.
 
 Without arm B the run still works and simply omits the decomposition, reporting proj err against
 observed only.
@@ -66,7 +90,15 @@ from dispatch_model.rolling.projection import _preload, project_year       # noq
 
 TARGET = int(sys.argv[1]) if len(sys.argv) > 1 else 2024
 REF_YEAR = 2019
-ZONES = ["FR", "DE_LU", "BE", "CH", "ES", "PT", "NL", "IT_NORTH"]
+#: GB joins the scored set now that it is a MODELLED zone rather than a border curve. It was excluded when
+#: it had no balance of its own, and that exclusion outlived its reason: GB now feeds FR, BE, NL and DK
+#: through four borders, so leaving it unscored means the decomposition cannot see whether GB is distorting
+#: its neighbours' layers — and the gate's own census says GB is systematically cheap (2019: 1800 hours
+#: below +5 EUR/MWh against 9 observed). BE, whose layer is the largest open item, sits on a GB border.
+#:
+#: Adding a zone MOVES THE POOLED FIGURES, so the reference table below is not comparable across this
+#: change on its pooled row; the per-zone rows are.
+ZONES = ["FR", "DE_LU", "BE", "GB", "CH", "ES", "PT", "NL", "IT_NORTH"]
 #: where the multi-year gate leaves arm B. Searched in order; missing → the run degrades to A vs C.
 BT_PATHS = (Path("scratchpad/gate_multiyear"), Path("output/gate_multiyear"))
 
