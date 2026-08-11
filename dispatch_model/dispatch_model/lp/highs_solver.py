@@ -323,25 +323,30 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             flex_cols[z] = (ub, db, sb, fidx)
             pcols = np.concatenate([gbase + ui * n + np.arange(n) for ui in fidx])   # p of flex units (j-major)
             ucols = ub + np.arange(mu * n); dcols = db + np.arange(mu * n)
+            row_tags.append(("p<=u", xrow, xrow + mu * n))
             rr = xrow + np.arange(mu * n)                                            # p − u ≤ 0
             rows.append(rr); cols.append(pcols); vals.append(np.ones(mu * n))
             rows.append(rr); cols.append(ucols); vals.append(-np.ones(mu * n))
             row_lo.append(np.full(mu * n, -_INF)); row_up.append(np.zeros(mu * n)); xrow += mu * n
+            row_tags.append(("C1a band", xrow, xrow + mu * n))
             rr = xrow + np.arange(mu * n)                                            # C1a: α_band·u − d − p ≤ 0
             rows.append(rr); cols.append(ucols); vals.append(ab_rep)
             rows.append(rr); cols.append(dcols); vals.append(-np.ones(mu * n))
             rows.append(rr); cols.append(pcols); vals.append(-np.ones(mu * n))
             row_lo.append(np.full(mu * n, -_INF)); row_up.append(np.zeros(mu * n)); xrow += mu * n
+            row_tags.append(("C1b deep band", xrow, xrow + mu * n))
             rr = xrow + np.arange(mu * n)                                            # C1b: d − (α_band−α_tech)·u ≤ 0
             rows.append(rr); cols.append(dcols); vals.append(np.ones(mu * n))
             rows.append(rr); cols.append(ucols); vals.append(-dband)
             row_lo.append(np.full(mu * n, -_INF)); row_up.append(np.zeros(mu * n)); xrow += mu * n
+            _tag_c5 = xrow
             for j in range(mu):                                                     # C5: su_t − u_t + u_{t-1} ≥ 0
                 rr = xrow + np.arange(n - 1)
                 rows.append(rr); cols.append(sb + j * n + np.arange(1, n)); vals.append(np.ones(n - 1))
                 rows.append(rr); cols.append(ub + j * n + np.arange(1, n)); vals.append(-np.ones(n - 1))
                 rows.append(rr); cols.append(ub + j * n + np.arange(0, n - 1)); vals.append(np.ones(n - 1))
                 xrow += n - 1
+            row_tags.append(("C5 start", _tag_c5, xrow))
             row_lo.append(np.zeros(mu * (n - 1))); row_up.append(np.full(mu * (n - 1), _INF))
 
             # ---- F2b rigidity families. Each is opt-in on its spec key, so an F2a-shaped spec (no key)
@@ -363,6 +368,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             if "d_max_8h" in fz:                       # C2a: Σ_{k=0..7} d_{t−k} ≤ D_max8h·cap (rolling 8 h)
                 B8 = np.asarray(fz["d_max_8h"], float) * capf                        # (mu,) MWh / 8h window
                 base = xrow
+                row_tags.append(("C2a 8h budget", base, base + mu * n))
                 for j in range(mu):
                     for k in range(8):                                              # d_{t−k}, k=0..7, t−k≥0
                         tt = np.arange(k, n)
@@ -382,6 +388,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                 Bday = np.asarray(fz["d_max_day"], float) * capf
                 nd = int(day_idx.max()) + 1
                 base = xrow
+                row_tags.append(("C2b daily budget", base, base + mu * nd))
                 rr = base + (np.arange(mu)[:, None] * nd + day_idx[None, :]).ravel()
                 rows.append(rr); cols.append(db + np.arange(mu * n)); vals.append(np.ones(mu * n))
                 for j in range(mu):
@@ -391,6 +398,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                 r_up = np.asarray(fz["r_up"], float)
                 beta = np.broadcast_to(np.asarray(fz.get("xenon_beta", 0.0), float), (mu,)).astype(float)
                 base = xrow
+                row_tags.append(("C3 xenon ramp", base, base + mu * (n - 1)))
                 for j in range(mu):
                     tt = np.arange(1, n); r = base + j * (n - 1) + (tt - 1)
                     rows.append(r); cols.append(gbase + fidx[j] * n + tt); vals.append(np.ones(tt.size))       # +p_t
@@ -410,6 +418,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             if "rho_recommit" in fz:                   # C5 min-down proxy: u_t − u_{t−1} ≤ avail_t·ρ_recommit
                 rho = np.broadcast_to(np.asarray(fz["rho_recommit"], float), (mu,)).astype(float)
                 base = xrow
+                row_tags.append(("C5 min-down", base, base + mu * (n - 1)))
                 for j in range(mu):
                     tt = np.arange(1, n); r = base + j * (n - 1) + (tt - 1)
                     rows.append(r); cols.append(ub + j * n + tt); vals.append(np.ones(tt.size))
@@ -478,6 +487,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             nucj = np.flatnonzero(nucm)
             ridx = np.asarray(fz.get("reserve_idx", []), int)
             if nucj.size and "p_minstab" in fz and float(fz["p_minstab"]) > 0:   # C7: Σ_{nuc} p ≥ P_minstab[zone]
+                row_tags.append(("C7 minstab", xrow, xrow + n))
                 rr = xrow + np.arange(n)
                 for j in nucj:
                     rows.append(rr); cols.append(gbase + fidx[j] * n + np.arange(n)); vals.append(np.ones(n))
@@ -488,6 +498,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                 row_lo.append(np.minimum(float(fz["p_minstab"]), 0.98 * avail_nuc))
                 row_up.append(np.full(n, _INF)); xrow += n
             if nucj.size and "r_up_req" in fz and float(fz["r_up_req"]) > 0:      # C6 up: Σ_nuc(u−p)+Σ_res(cap−p) ≥ R↑
+                row_tags.append(("C6 reserve up", xrow, xrow + n))
                 rr = xrow + np.arange(n); off = np.zeros(n)
                 for j in nucj:
                     rows.append(rr); cols.append(ub + j * n + np.arange(n)); vals.append(np.ones(n))
@@ -500,6 +511,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                 # footroom = headroom above the *technical minimum* α_tech·u (what the unit could still be
                 # commanded down to), NOT above the deep-mod-adjusted floor — measuring against α_band·u−d
                 # would let the LP raise d to fabricate footroom, incentivising deeper modulation (backwards).
+                row_tags.append(("C6 reserve down", xrow, xrow + n))
                 rr = xrow + np.arange(n)
                 for j in nucj:
                     rows.append(rr); cols.append(gbase + fidx[j] * n + np.arange(n)); vals.append(np.ones(n))
@@ -538,6 +550,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
                 rows.append(zrow[z] + np.arange(n)); cols.append(gc + k * n + np.arange(n))
                 vals.append(-np.ones(n))
                 # SoC: e_t − e_{t−1} − η_ch·gc_t + gd_t/η_dis = 0  (t ≥ 1); t=0 vs the 0.5·e_max start
+                row_tags.append(("storage SoC", xrow, xrow + n))
                 rr = xrow + np.arange(n)
                 rows.append(rr); cols.append(eb + k * n + np.arange(n)); vals.append(np.ones(n))
                 rows.append(rr[1:]); cols.append(eb + k * n + np.arange(n - 1)); vals.append(-np.ones(n - 1))
@@ -559,6 +572,7 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             rows.append(np.full(cc.size, xrow)); cols.append(cc); vals.append(np.ones(cc.size))
             row_lo.append([-_INF]); row_up.append([float(mwh)])
             ecap_rows[f"{z}:{t_name}"] = xrow
+            row_tags.append(("energy cap", xrow, xrow + 1))
             xrow += 1
 
     # balance RHS (equality: lower = upper = demand)
