@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from ..config import Config
+from ..framecache import FrameCache, db_key
 from ..io.entsoe_hist import load_demand_hist, load_generation_hist, load_installed_capacity
 from ..stacks.costs import EFF_RANGE
 from ..stacks.fr_stack import FLEX
@@ -144,8 +145,22 @@ def must_run_frac(config: Config, zone: str, tech: str) -> float:
     return _MUST_RUN_DEFAULT.get(tech, 0.0)
 
 
+#: Memoised: `_preload` rebuilds the same (zone, year) stack ~1.5x over, because `water_value.load_curves`
+#: needs each zone's reservoir capacity once per shape-year and again per season. Copy-on-return — callers
+#: DO reshape what they get (`_neighbour_inputs` filters, `nb_window` assigns, `apply_measured_mustrun`
+#: copies-then-mutates), and handing out the cached object would let one caller's edit reach another.
+_STACK_CACHE = FrameCache(maxsize=48)
+
+
 def build_neighbour_stack(config: Config, zone: str, year: int, n_subblocks: int = 3,
                           cap_quantile: float = 0.999) -> pd.DataFrame:
+    key = (db_key(config), "stack", str(zone), int(year), int(n_subblocks), float(cap_quantile))
+    return _STACK_CACHE.get_or_build(key, lambda: _build_neighbour_stack(
+        config, zone, year, n_subblocks=n_subblocks, cap_quantile=cap_quantile))
+
+
+def _build_neighbour_stack(config: Config, zone: str, year: int, n_subblocks: int = 3,
+                           cap_quantile: float = 0.999) -> pd.DataFrame:
     """→ aggregated dispatchable stack for `zone` (block-level), capacity from observed generation.
 
     Capacity ≈ available capacity, proxied by a near-max quantile of observed output (p99.9): peakers

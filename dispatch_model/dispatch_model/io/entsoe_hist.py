@@ -11,6 +11,7 @@ import sqlite3
 import pandas as pd
 
 from ..config import Config
+from ..framecache import FrameCache, db_key
 
 # ENTSO-E PSR label -> model technology class
 PSR2TECH = {
@@ -91,14 +92,26 @@ def load_demand_hist(config: Config, year: int | None = None, zones=None) -> pd.
     return out.dropna(subset=["load_mw"]).reset_index(drop=True)
 
 
+#: Memoised because `_preload` asks for the same (zone, year) repeatedly — `water_value.load_curves` runs
+#: ~26 times over overlapping zones and years, giving a measured x1.8 redundancy on this loader alone.
+#: Copy-on-return: see `framecache` for why handing out the cached frame would be a latent corruption.
+_GEN_CACHE = FrameCache(maxsize=48)
+
+
 def load_generation_hist(config: Config, year: int | None = None, zones=None) -> pd.DataFrame:
-    df = _read_long(config, "generation_table", year, zones=zones)
-    if zones is not None:
-        df = df[df["series_key"].isin(zones)]
-    df["tech"] = df["sub_key"].map(PSR2TECH).fillna(df["sub_key"])
-    out = _to_hourly(df, ["series_key", "tech"]).rename(
-        columns={"series_key": "zone", "value": "gen_mw"})
-    return out.dropna(subset=["gen_mw"]).reset_index(drop=True)
+    key = (db_key(config), "gen", year,
+           tuple(sorted(str(z) for z in zones)) if zones is not None else None)
+
+    def _build() -> pd.DataFrame:
+        df = _read_long(config, "generation_table", year, zones=zones)
+        if zones is not None:
+            df = df[df["series_key"].isin(zones)]
+        df["tech"] = df["sub_key"].map(PSR2TECH).fillna(df["sub_key"])
+        out = _to_hourly(df, ["series_key", "tech"]).rename(
+            columns={"series_key": "zone", "value": "gen_mw"})
+        return out.dropna(subset=["gen_mw"]).reset_index(drop=True)
+
+    return _GEN_CACHE.get_or_build(key, _build)
 
 
 def load_installed_capacity(config: Config, zone: str, year: int) -> dict[str, float]:
