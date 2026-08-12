@@ -33,15 +33,15 @@ now scored). Pooled |projection err| 7.9, |dispatch err| 9.5, |layer| 6.8 — NO
 previous pooled row, which was taken over eight zones rather than nine:
 
     zone       observed  backtest  projection | proj err  disp err   layer
-    BE             70.3      68.2        77.8 |     7.4      -2.1     9.6
-    CH             76.0      90.1        90.8 |    14.8      14.1     0.7
-    DE_LU          78.5      75.7        78.5 |    -0.0      -2.8     2.8
-    ES             63.0      68.2        64.2 |     1.1       5.1    -4.0
-    FR             58.0      63.1        61.4 |     3.4       5.1    -1.7
-    GB             84.5      70.9        60.2 |   -24.3     -13.6   -10.7
-    IT_NORTH      107.4      93.6        91.4 |   -16.0     -13.8    -2.2
-    NL             77.3     100.8        75.1 |    -2.2      23.5   -25.7
-    PT             63.5      69.0        65.3 |     1.8       5.6    -3.7
+    BE             70.3      68.2        76.3 |     5.9      -2.1     8.1
+    CH             76.0      90.1        90.6 |    14.6      14.1     0.5
+    DE_LU          78.5      75.7        77.9 |    -0.6      -2.8     2.2
+    ES             63.0      68.2        63.5 |     0.5       5.1    -4.7
+    FR             58.0      63.1        57.5 |    -0.5       5.1    -5.6
+    GB             84.5      70.9        48.9 |   -35.6     -13.6   -22.0
+    IT_NORTH      107.4      93.6        91.2 |   -16.2     -13.8    -2.3
+    NL             77.3     100.8        74.3 |    -3.0      23.5   -26.5
+    PT             63.5      69.0        64.7 |     1.2       5.6    -4.3
 
 Previous reference, eight zones: pooled |proj err| 6.3, |disp err| 6.0, |layer| 3.5, with BE +8.4 and
 ES -6.8 the open items.
@@ -50,17 +50,27 @@ FR IMPROVED MATERIALLY (proj err -8.3 -> +3.4, its backtest arm moving 47.5 -> 6
 the 4000 MW of phantom "GB import" tranches that had sat inside the FR stack, and this harness sees it as
 clearly as the multi-year gate does. ES also improved (layer -6.8 -> -4.0).
 
-GB IS NOW THE WORST ZONE, and both halves of its error have identified causes.
+GB IS THE WORST ZONE, and only one half of its error has an identified cause.
   * the -13.6 DISPATCH error is `io.gb_embedded` netting ~5 GW of reconstructed embedded generation off
     demand, which leaves GB structurally long and cheap. The gate scores it at 1800 hours below +5 EUR/MWh
     in 2019 against 9 observed. That trade was taken deliberately (see `DECISIONS.md`) because the
     alternative — pricing the block — re-opened a VoLL cascade into NL;
-  * the further -10.7 of LAYER is almost certainly the TYNDP gap. The coverage report prints
-    `GB: cap_solar_gw=missing, cap_wind_gw=missing, demand_twh=missing`, so GB falls back to the generic
-    CAGR: RES +4.5 %/yr against demand +0.8 %/yr, i.e. RES x1.25 vs demand x1.04 over 2019-2024. That
-    over-grows surplus in exactly the direction observed. It is the same defect class `TYNDP_SOURCES.md`
-    records as having cost NL 458 negative hours; GB acquired it when it was promoted without trajectories,
-    and filling those rows is the actionable item.
+  * the -22.0 of LAYER IS NOT EXPLAINED. An earlier version of this docstring attributed it to GB's
+    missing TYNDP rows, on the reasoning that the generic CAGR under-grew GB's RES. THAT WAS WRONG and the
+    arithmetic refutes it in two ways. The CAGR grew RES x1.25 to 2024 while the FES trajectory that
+    replaced it grows x1.45 — i.e. the fallback grew RES LESS, not more — and the BACKTEST arm already runs
+    actual 2024 RES (~x1.4), more than the CAGR, yet the backtest is the DEARER arm. RES growth therefore
+    cannot be the mechanism. Filling the rows (`scripts/gen_tyndp_gb.py`, NESO FES 2024) took the layer
+    from -10.7 to -22.0, confirming the direction and leaving the cause open.
+
+    The rows were KEPT despite that, because the same change improved or held EIGHT of the nine zones —
+    FR 3.4 -> -0.5, BE 7.4 -> 5.9, ES 1.1 -> 0.5, PT 1.8 -> 1.2, pooled excluding GB 5.84 -> 5.31 — and
+    because a sourced national scenario beats a generic 4.5 %/yr CAGR applied to a system whose build-out
+    looks nothing like 4.5 %/yr. What the deterioration measures is a forward net-zero pathway being tested
+    against one historical year that did not follow it, ON TOP of a zone whose dispatch is already too
+    long. Both effects are real; neither is fixed by choosing a different trajectory.
+
+    So GB's layer stays open, and the next place to look is the dispatch defect, not the scenario.
 
 NL's -25.7 LAYER IS AN ARTEFACT — do not read it as a projection defect. Its dispatch arm is +23.5
 (backtest 100.8 against 77.3 observed) while its projection arm is -2.2: the projection lands near-correct

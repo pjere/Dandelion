@@ -392,3 +392,62 @@ while `DE00-LUG1` and `DE00-LUV1` are internal to DE_LU and must be dropped or t
 The direction convention — "Summary Direction 1" = first code → second code — is **confirmed, not
 assumed**: four model entries reproduce the TYNDP pair exactly and in the right order (FR–BE 4300/2800 vs
 `BE00-FR00` 2800/4300; ES–PT 4200/3500; BE–GB 1000/1000; CH–AT_SI 1200/1200).
+
+---
+
+# GB — the one zone whose rows are not TYNDP
+
+GB left ENTSO-E after Brexit and TYNDP publishes no per-country UK capacity trajectory: the 2024 scenario
+figures are EU27 aggregates plus low/high ranges at 2040/2050 only. (TYNDP does still model `UK00` in its
+reference GRID, which is where this repo's GB border capacities come from — but the grid and the scenario
+data are different publications.) So GB uses its own system operator's scenarios, exactly as CH's solar
+came from BFE/Swissolar rather than from ENTSO-E.
+
+**Source:** NESO *Future Energy Scenarios 2024*, Data Workbook — sheets **ES.14** (solar capacity),
+**ES.13** (onshore wind), **ES.12** (offshore wind), **DB.ED1** (electricity demand), scenario **Holistic
+Transition**, NESO's central pathway and the closest analogue to the TYNDP National Trends+ basis the other
+zones use. <https://www.neso.energy/publications/future-energy-scenarios-fes/fes-documents>
+
+Written by `scripts/gen_tyndp_gb.py`, which carries the numbers and the arithmetic.
+
+### The 2019 anchor is measured in-house, not taken from FES [measured]
+
+FES's capacity series begin at **2023**, and `tyndp_factors` divides by the projection's **2019** reference
+year — an anchor starting after the reference year clamps, which `tyndp.coverage` flags as the dangerous
+class. GB's 2019 installed capacity is already in the lake, however: ENTSO-E published it *before* Brexit,
+in the same `entsoe_installed_capacity` table, on the same nameplate basis every other zone's anchor uses.
+
+    entsoe_installed_capacity, series_key GB, year 2019
+        Solar          13 346 MW   -> cap_solar_gw 13.346
+        Wind Onshore   12 638 MW   \
+        Wind Offshore   9 379 MW   /  -> cap_wind_gw 22.017   (onshore + offshore, per tyndp._RES_VARS)
+
+**Continuity check:** solar 13.35 (2019, ENTSO-E) -> 15.14 (2023, FES); wind 22.02 -> 28.41. Both are
+consistent with four years of build-out, so the two sources join without a step.
+
+### `demand_twh` is deliberately left CLAMPED
+
+FES's demand series starts at 2022 and measures **national** demand (343.4 TWh in 2022). The lake's GB load
+is Elexon **ITSDO** — demand at the *transmission* boundary, ~249 TWh — a different quantity by ~95 TWh of
+embedded generation and losses (see `io/gb_embedded.py`). Splicing them would inject a 38 % step into a
+ratio meant to measure structural growth. FES 2022 is therefore the earliest anchor and `_interp(2019)`
+clamps to it. The clamp misprices the small term: GB demand moved a few per cent 2019-2022, while RES
+roughly doubled and is properly anchored.
+
+### What filling these rows did, and a correction
+
+It made GB's backcast **worse** — layer -10.7 -> -22.0, projection 60.2 -> 48.9 EUR/MWh against 84.5
+observed — and it improved or held the other **eight** zones (FR 3.4 -> -0.5, BE 7.4 -> 5.9, ES 1.1 -> 0.5,
+PT 1.8 -> 1.2; pooled excluding GB 5.84 -> 5.31).
+
+**A prior explanation recorded in `scripts/projection_backcast.py` and in commit `b532a48` was WRONG** and
+is corrected here: GB's layer was attributed to the generic CAGR *under*-growing its RES. The CAGR grew RES
+x1.25 to 2024 where FES grows x1.45 — the fallback grew RES **less** — and the backtest arm already runs
+actual 2024 RES (~x1.4), more than the CAGR, while remaining the *dearer* arm. RES growth is therefore not
+the mechanism and GB's layer is **unexplained**. The rows were kept regardless: eight zones improved, and a
+sourced national scenario beats a generic 4.5 %/yr CAGR on a system whose build-out is nothing like that.
+
+### Still missing for GB
+
+`cap_flex_gw` and every thermal `cap_*` row remain absent, so GB's firm fleet is still CAGR-driven. FES
+carries battery, gas and nuclear capacity for the same scenario; that is the next gap to fill.
