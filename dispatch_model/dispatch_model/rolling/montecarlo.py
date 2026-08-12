@@ -61,7 +61,7 @@ def _run_draw(cfg, ref, draw: int, years, master_seed: int, weather_provider, n_
     for y in years:
         shapes = weather_provider(cfg, y, draw) if weather_provider is not None else None
         _stats, spot = project_year(cfg, y, ref, n_weeks=n_weeks, avail_rng=avail_rng,
-                                    weather_shapes=shapes, return_prices=True)
+                                    weather_shapes=shapes, return_prices=True, draw=draw)
         summ.append(_draw_summary(draw, spot, y))
         if write_lake:
             parts.append(spot.assign(year=y))

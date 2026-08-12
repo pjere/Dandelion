@@ -10,7 +10,7 @@ from dispatch_model.rolling import montecarlo as mc
 
 
 def _stub_project_year(cfg, year, ref, n_weeks=None, avail_rng=None, weather_shapes=None,
-                       return_prices=False):
+                       return_prices=False, draw=0):
     """Deterministic stub: price = base(year) + a draw-specific shock from the per-draw rng."""
     base = 50.0 + (year - 2030)
     shock = float(avail_rng.normal(0, 5)) if avail_rng is not None else 0.0

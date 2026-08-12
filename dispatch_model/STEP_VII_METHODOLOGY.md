@@ -196,24 +196,40 @@ DE_REST    36.0 → 36.0     9       91.8 →  91.8         86.8 →  86.8   (no
 The wedge stays a modest, positive, bounded uplift at every horizon, and negative hours survive the markup
 (DE-LU 2019: 11 hours, mean −€16.6) rather than being smoothed away.
 
-### Weather-coherent projection (#77) — built, FR exact + neighbours reduced-form
+### Weather-coherent projection (#77) — NOW THE DEFAULT: FR exact + neighbours own-weather
 
-The projection no longer *has* to hold the 2019 weather shape fixed. `weather_shapes.py` + the `project_year(
-weather_shapes=…)` hook let a projected year run on a **re-drawn weathergen shape**:
+The projection **no longer holds the 2019 weather shape fixed** — `project_trajectory` defaults to
+`weather_coherent=True` (config `projection.weather_coherent`) and builds `weather_shapes.default_weather_provider`,
+a top-level picklable provider that feeds `project_year(weather_shapes=…)` for every year (per-process caching
+of `fr_draw`, so the demand+RES horizon runs once per realization). The reference year still supplies the
+window calendar, firm-stack base, NTC structure and hydro/must-run curves; only the demand/RES *shapes* are
+re-drawn. If the engines or the weathergen cube are unavailable the run degrades to the reshaped
+reference-year weather with a warning.
 - **FR is exact.** `fr_draw` runs the demand model (step iii) and RES model (step iv) on one weathergen
   realization — both consume the *same* cube, so FR demand and RES are weather-coherent — and assembles the
-  net load. (2040 FR from a draw: 68.9 GW mean, 102 GW peak, 31 GW must-take RES.)
-- **Neighbours are reduced-form.** They have no demand/RES models, so `NeighbourWeatherModel` fits, per zone,
-  load ↔ FR national temperature (HDD/CDD + calendar) and RES ↔ the FR national RES-CF shape × the zone's
-  capacity — justified by the strong spatial correlation of European weather. Weather-*coherent* (same FR
-  draw) but not station-resolved. Levels sit at the right magnitude (BE 10, CH 8, ES 29, DE-LU 59 GW).
+  net load. Demand drivers are calibrated to PPE3 (616 TWh at 2035); RES to the PPE3 capacity (`res_capacity_trajectories`).
+- **Neighbours are own-weather reduced-form (#157).** They have no demand/RES models, so `NeighbourWeatherModel`
+  fits, per zone, load ↔ FR national temperature (HDD/CDD + calendar), and RES from the zone's **own** observed
+  ENTSO-E must-take shape (its own diurnal/seasonal climatology) modulated by the FR draw's renewable anomaly
+  vs FR normal — weather-*coherent* across draws, but the shape is each zone's own (German solar peaks at
+  German solar hours, not French). Levels sit at the projected (TYNDP) capacity.
 - `all_weather_shapes(year, realization, nb_model)` assembles the `{zone: df}` payload; the hook re-indexes
-  onto the reference calendar for windowing and borrows the ref-year nuclear/reservoir shapes (maintenance-
-  scheduled, not weather-driven). **Validated end-to-end:** a 2040 draw flows all the way to zonal prices and
-  the weather draw visibly moves them (FR €229 fixed → €1371 on a cold-calm draw).
+  onto the reference calendar for windowing. **Validated end-to-end:** `project_trajectory([2030])` runs
+  through the engines by default with negatives forming across zones.
+- **FR nuclear + reservoir availability from step-v (#160).** `rolling/fr_availability.py` reads the
+  availability_model lake — daily nuclear availability *fraction* (`availability_by_tech`, per draw, ÷ that
+  draw-year's fleet peak so it is a pure outage-pattern signal decoupled from the TYNDP capacity level) and
+  the weekly reservoir energy budget (`reservoir_budget`). `project_year` feeds the nuclear fraction to
+  `fr_window(nuc_unavail_daily=…)` — the same hook the backtest uses for the REMIT feed (#78) — as outage MW
+  at the projected `nuc_cap`, and overrides the `hydro_reservoir` energy cap per window. Mapped target→
+  reference by day-of-year / ISO-week; per-draw (wrapped mod the availability draw count). Verified: 2030
+  nuclear availability ~84 % with the maintenance dip in shoulder/autumn seasons and the winter fleet kept
+  available; config `projection.availability_from_step_v` (default on), graceful fallback to the ref-year
+  rolling-max proxy when the lake is absent.
 
 One honest caveat remains: the neighbour models are reduced-form (a full build extends weathergen to
-neighbour stations + fits per-zone demand/RES models).
+neighbour stations + fits per-zone demand/RES models — the single largest remaining build). Neighbour
+availability stays the p99-firm proxy + optional #80 REMIT spread (no per-zone availability_model exists).
 
 ### 2040 winter adequacy — the flexibility fleet (#83)
 
@@ -255,11 +271,11 @@ negatives). The flex trajectory is starter data in the tab, editable from the TY
 
 ### Three honest gaps in projection realism (historical framing — see the two above for current state)
 
-1. **Weather shape is held fixed at the reference year** (2019) rather than re-drawn from weathergen. The
-   *structure* evolves correctly, but every projected year sees 2019's weather. A weather-coherent projection
-   would replace the reference net-load shapes with **weathergen draws** pushed through steps (iii)/(iv)/(v)
-   for each neighbour zone. This is the single largest remaining build (≈ re-running the FR demand/RES models
-   for six neighbour zones on generated weather) and is scoped, not started.
+1. **Weather shape — now re-drawn by default (see "Weather-coherent projection" above).** Previously every
+   projected year saw 2019's weather; `project_trajectory` now defaults to the weathergen-drawn shapes (FR
+   exact, neighbours own-weather reduced-form). What remains genuinely unbuilt is station-resolved neighbour
+   demand/RES models (weathergen extended to neighbour stations + steps iii/iv/v ×6) — the single largest
+   remaining build — plus wiring the step-v availability_model output for FR nuclear/reservoir.
 2. **Neighbour demand/RES capacity path — now TYNDP-grounded (#76, done).** The flat per-tech CAGR is
    replaced, where available, by TYNDP trajectories: the `dispatch_tyndp` workbook tab holds per-zone anchor
    values for demand and per-tech installed capacity (National-Trends-style starter values, editable from

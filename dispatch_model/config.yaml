@@ -114,6 +114,16 @@ flexibility:
 projection:
   horizon: { start_year: 2027, end_year: 2046 }
   n_draws: 50
+  # Weather-coherent net loads (#77): FR demand/RES come from the demand_model + res_model engines on a
+  # re-drawn weathergen realization, neighbours from their reduced-form own-weather response — instead of
+  # reshaping the fixed 2019 year. The reference year still supplies the window calendar, firm-stack base,
+  # NTC structure and hydro/must-run curves. Set false to fall back to the reshaped reference-year weather;
+  # if the engines/cube are unavailable the run degrades to that fallback automatically.
+  weather_coherent: true
+  # FR nuclear + reservoir availability (#160): take the projected fleet condition from the step-v
+  # availability_model lake (daily nuclear availability fraction per draw + weekly reservoir energy budget)
+  # instead of the reference-year rolling-max-of-output proxy. False (or an absent lake) → the proxy is kept.
+  availability_from_step_v: true
 
 assumptions:
   workbook: "../scenarios.xlsx"

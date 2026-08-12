@@ -218,8 +218,10 @@ def _window_ntc(ref, border, T, target_year: int):
 
 def project_year(config: Config, target_year: int, ref, n_weeks: int | None = None,
                  avail_rng=None, weather_shapes: dict | None = None,
-                 return_prices: bool = False) -> pd.DataFrame:
-    """Clear `target_year` from the preloaded reference-year shapes in `ref`; return per-zone price stats."""
+                 return_prices: bool = False, draw: int = 0) -> pd.DataFrame:
+    """Clear `target_year` from the preloaded reference-year shapes in `ref`; return per-zone price stats.
+
+    `draw` selects the Monte-Carlo draw for the per-draw feeds (step-v FR nuclear availability, #160)."""
     zones, neigh, wb, cm, basis, floors, g = (ref[key] for key in
                                               ("zones", "neigh", "wb", "cm", "basis", "floors", "growth"))
     k = target_year - ref["ref_year"]
@@ -404,6 +406,18 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         from ..flexibility.trajectories import apply_oa_ladder, load_oa_ladder  # *volume* still decays by
         schemes["FR"] = apply_oa_ladder(schemes["FR"], load_oa_ladder(wb, target_year))  # vintage via scheme_shares
 
+    # #160: FR nuclear availability from the step-v availability_model lake for this draw, as
+    # {reference-year date → nuclear outage MW at THIS year's nuclear capacity}. Passed to `fr_window`, which
+    # then uses the true projected fleet condition (maintenance + forced outages) instead of the reference-
+    # year rolling-max-of-output proxy. None (lake absent) → the proxy is retained. Reservoir energy budget
+    # is overridden per window inside the loop.
+    fr_avail = ref.get("fr_avail")
+    nuc_unavail = None
+    if fr_avail is not None:
+        from .fr_availability import nuclear_unavail_daily
+        _nuc_cap = float(fr_stack.loc[fr_stack["tech"] == "nuclear", "capacity_mw"].sum())
+        nuc_unavail = nuclear_unavail_daily(fr_avail, target_year, ref["ref_year"], draw, _nuc_cap)
+
     price_chunks = []
     _dropped: list[str] = []            # windows the solve budget could not clear (reported below)
     prev_flex_state = None; prev_w1 = None                     # F5: FR tail state across adjacent window seams
@@ -424,7 +438,12 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         _wvd = {z: d.get(_season) for z, d in (ref.get("wv_seasonal") or {}).items()}
         zd = {"FR": fr_window(fr, fr_stack,
                               zone_prices(prices, "FR", basis, w0_t, ref.get("gas_rules")), T,
-                              wv_delta=_wvd.get("FR"))}
+                              nuc_unavail_daily=nuc_unavail, wv_delta=_wvd.get("FR"))}
+        if fr_avail is not None:                                # #160: step-v reservoir energy budget for the week
+            from .fr_availability import reservoir_budget_mwh
+            _rb = reservoir_budget_mwh(fr_avail, target_year, w0_t)
+            if _rb is not None and _rb > 0 and zd["FR"].get("energy_caps"):
+                zd["FR"]["energy_caps"]["hydro_reservoir"] = _rb
         for z in neigh:
             zd[z] = nb_window(z, nb_stack[z], nb_nl[z], ref["nb_res"][z],
                               zone_prices(prices, z, basis, w0_t, ref.get("gas_rules")), T,
@@ -647,6 +666,16 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
     if avail_years:                                # #80: REMIT neighbour availability spread (opt-in; slow)
         from ..neighbour_availability import load_zone_stats
         avail_stats = load_zone_stats(neigh, avail_years)
+    # #160: FR nuclear + reservoir availability from the step-v availability_model lake (default on) — replaces
+    # the reference-year rolling-max nuclear proxy and the ref-year reservoir energy with the PROJECTED fleet
+    # condition. None when the lake is absent → the reference-year proxy is retained (graceful).
+    fr_avail = None
+    if config.section("projection").get("availability_from_step_v", True):
+        from .fr_availability import load_fr_availability
+        fr_avail = load_fr_availability(config)
+        if fr_avail is not None:
+            print(f"  [projection] FR availability from step-v lake ({fr_avail['nuc_draws']} nuclear draw(s), "
+                  f"reservoir budget {'on' if fr_avail['reservoir'] else 'off'})", flush=True)
     from powersim_core import registry  # read each zone's registry ONCE (year-independent) and keep only
 
     from ..io.fr_fleet import latest_fleet_year
@@ -659,7 +688,7 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
         except (FileNotFoundError, KeyError, ValueError):
             res_registry[z] = None
     return {"zones": zones, "neigh": neigh, "wb": wb, "ref_year": ref_year, "markup": markup,
-            "avail_stats": avail_stats, "tyndp": load_tyndp(wb), "res_registry": res_registry,
+            "avail_stats": avail_stats, "fr_avail": fr_avail, "tyndp": load_tyndp(wb), "res_registry": res_registry,
             "cm": cm, "basis": load_zone_basis(wb), "resolver": PriceResolver(cm),
             "gas_rules": load_gas_rules(wb),
             "floors": {z: {t["scheme"]: t["floor"] for t in static.get(z, [])} for z in zones},
@@ -676,7 +705,34 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
 
 
 def project_trajectory(config: Config, years: list[int], ref_year: int = 2019,
-                       n_weeks: int | None = None) -> pd.DataFrame:
-    """Price trajectory across `years` from a single reference-year preload."""
+                       n_weeks: int | None = None, weather_coherent: bool | None = None) -> pd.DataFrame:
+    """Price trajectory across `years` from a single reference-year preload.
+
+    By DEFAULT the FR demand/RES and neighbour net-loads come from the weather-coherent engines (#77,
+    `weather_shapes.default_weather_provider`) on a re-drawn weathergen realization — NOT the fixed 2019
+    weather. `ref_year` still supplies the hourly *calendar* the weekly windows slice, the firm-stack base,
+    the NTC structure and the hydro/must-run curves; only the demand/RES *shapes* are re-drawn. Set
+    `weather_coherent=False` (or config `projection.weather_coherent: false`) to fall back to the reshaped
+    reference-year weather. If the engines or the weathergen cube are unavailable the run degrades to that
+    same fallback with a warning, so environments without the FR models still work."""
     ref = _preload(config, ref_year)
-    return pd.concat([project_year(config, y, ref, n_weeks=n_weeks) for y in years], ignore_index=True)
+    wc = (config.section("projection").get("weather_coherent", True)
+          if weather_coherent is None else weather_coherent)
+    provider = None
+    if wc:
+        from ..weather_shapes import default_weather_provider
+        provider = default_weather_provider
+    frames = []
+    for y in years:
+        ws = None
+        if provider is not None:
+            try:
+                ws = provider(config, y, draw=0, ref_year=ref_year)
+            except Exception as e:                                             # noqa: BLE001
+                print(f"  [projection] weather-coherent engines unavailable "
+                      f"({type(e).__name__}: {e}); falling back to reshaped reference-year {ref_year} weather",
+                      flush=True)
+                provider = None
+                ws = None
+        frames.append(project_year(config, y, ref, n_weeks=n_weeks, weather_shapes=ws))
+    return pd.concat(frames, ignore_index=True)
