@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dispatch_model.stacks.costs import VOM
-from dispatch_model.tyndp import _interp, flex_capacity_mw, tyndp_factors
+from dispatch_model.tyndp import _interp, flex_capacity_mw, tyndp_factors, _RES_YIELD
 
 _TYNDP = {
     "FR": {
@@ -26,10 +26,29 @@ def test_interp_clamps_outside_anchor_range():
 def test_factors_demand_res_and_capacity():
     f = tyndp_factors(_TYNDP, "FR", 2050, 2025)
     assert abs(f["demand"] - 640.0 / 460.0) < 1e-6
-    # RES volume grows with total wind+solar: (110+130)/(25+20) = 240/45
-    assert abs(f["res"] - 240.0 / 45.0) < 1e-6
+    # RES volume grows with wind+solar capacity WEIGHTED BY YIELD (`_RES_YIELD`), not by raw nameplate:
+    # (110*0.28 + 130*0.12) / (25*0.28 + 20*0.12) = 46.4 / 9.4
+    w, s = _RES_YIELD["cap_wind_gw"], _RES_YIELD["cap_solar_gw"]
+    assert abs(f["res"] - (110 * w + 130 * s) / (25 * w + 20 * s)) < 1e-6
     assert abs(f["cap"]["nuclear"] - 40.0 / 61.0) < 1e-6     # nuclear declines (<1)
     assert f["cap"]["nuclear"] < 1.0 and f["cap"]["gas"] < 1.0
+
+
+def test_res_factor_is_yield_weighted_not_nameplate():
+    """A zone that shifts its RES MIX toward solar must scale by less than nameplate suggests.
+
+    The `res` multiplier scales must-take GENERATION, so it has to be a generation ratio. Measured on
+    Portugal: nameplate said x1.77 for 2019->2024 where the metered RES fleet actually grew x1.31, because
+    PNEC's build-out is solar-dominated and a solar GW yields ~2.3x less than a wind GW. Weighting by
+    `_RES_YIELD` gives x1.38. This test pins the property, not the constants — it still passes if the
+    yields are re-measured, so long as wind out-yields solar.
+    """
+    # same nameplate total (20 GW) either side, but the mix swings wind -> solar
+    t = {"Z": {"cap_wind_gw": {2020: 10.0, 2030: 2.0}, "cap_solar_gw": {2020: 10.0, 2030: 18.0}}}
+    f = tyndp_factors(t, "Z", 2030, 2020)["res"]
+    assert f < 1.0, "a shift from wind to solar at constant nameplate must LOWER the yield ratio"
+    # the discarded nameplate form would have called this exactly 1.0
+    assert abs((2.0 + 18.0) / (10.0 + 10.0) - 1.0) < 1e-12
 
 
 def test_reference_year_factors_are_unity():

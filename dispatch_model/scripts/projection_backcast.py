@@ -33,15 +33,36 @@ now scored). Pooled |projection err| 7.9, |dispatch err| 9.5, |layer| 6.8 — NO
 previous pooled row, which was taken over eight zones rather than nine:
 
     zone       observed  backtest  projection | proj err  disp err   layer
-    BE             70.3      68.2        76.3 |     5.9      -2.1     8.1
-    CH             76.0      90.1        90.6 |    14.6      14.1     0.5
-    DE_LU          78.5      75.7        77.9 |    -0.6      -2.8     2.2
-    ES             63.0      68.2        63.5 |     0.5       5.1    -4.7
-    FR             58.0      63.1        57.5 |    -0.5       5.1    -5.6
-    GB             84.5      70.9        48.9 |   -35.6     -13.6   -22.0
-    IT_NORTH      107.4      93.6        91.2 |   -16.2     -13.8    -2.3
-    NL             77.3     100.8        74.3 |    -3.0      23.5   -26.5
-    PT             63.5      69.0        64.7 |     1.2       5.6    -4.3
+    BE             70.3      68.2        80.7 |    10.4      -2.1    12.5
+    CH             76.0      90.1        92.2 |    16.2      14.1     2.1
+    DE_LU          78.5      75.7        82.2 |     3.7      -2.8     6.5
+    ES             63.0      68.2        73.3 |    10.3       5.1     5.2
+    FR             58.0      63.1        62.0 |     4.0       5.1    -1.2
+    GB             84.5      70.9        50.2 |   -34.3     -13.6   -20.7
+    IT_NORTH      107.4      93.6        92.4 |   -15.0     -13.8    -1.2
+    NL             77.3     100.8        78.3 |     1.0      23.5   -22.5
+    PT             63.5      69.0        73.1 |     9.6       5.6     4.0
+
+THIS TABLE IS WORSE THAN THE ONE IT REPLACES (pooled |proj err| 8.7 -> 11.6) AND IS KEPT DELIBERATELY.
+Two changes landed between them, both projection-only — the multi-year gate reproduces log_err 1.54 to two
+decimals across all four years, so nothing here touched the dispatch:
+
+  * PT gained sourced trajectories (`scripts/gen_tyndp_pt.py`, revised PNEC 2030). It had none, so it ran
+    on a generic 4.5 %/yr CAGR that reaches 3.2 GW of Portuguese solar by 2046 against a national target of
+    20.8 GW by 2030. A scored zone was being projected on a placeholder.
+  * `tyndp_factors`' RES multiplier became YIELD-WEIGHTED (`tyndp._RES_YIELD`). It scales must-take
+    GENERATION but was computed from NAMEPLATE, and the two diverge whenever a zone's RES mix shifts,
+    because a solar GW yields ~2.3x less than a wind GW. Measured on PT: nameplate x1.77 for 2019->2024
+    where the metered fleet actually grew x1.31.
+
+EVERY ZONE MOVED DEARER, and that is the finding rather than a side effect. Correcting the RES weighting
+REMOVED an over-supply that had been masking an under-built firm stack: `cap_flex_gw` is still missing for
+GB/PT/NL/DK/PL_CZ/AT_SI/IT_SOUTH and every thermal `cap_*` is on a CAGR outside FR/DE/ES/IT/BE/NL/CH. Nine
+zones moving the same direction at once is the signature of one shared shortfall, not nine errors.
+
+The arithmetic confirms the RES factor is no longer the binding term for PT: at x1.38 it prints 73.1
+against 63.5 observed, so the *more* accurate x1.31 would overshoot further. Filling the firm-capacity rows
+is the next work, and until it is done these projection levels read high.
 
 Previous reference, eight zones: pooled |proj err| 6.3, |disp err| 6.0, |layer| 3.5, with BE +8.4 and
 ES -6.8 the open items.

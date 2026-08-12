@@ -20,6 +20,23 @@ _CAP_VAR = {
 # RES capacity that drives the must-take volume (wind + solar)
 _RES_VARS = ("cap_wind_gw", "cap_solar_gw")
 
+#: Typical capacity factors, used to weight the RES factor by YIELD rather than by nameplate.
+#:
+#: The `res` multiplier scales must-take GENERATION, so it has to be a generation ratio. Summing raw GW
+#: makes it a nameplate ratio, and the two differ whenever a zone changes its RES MIX — because a solar GW
+#: yields roughly 2.3x less energy than a wind GW. Measured on Portugal, whose plan is solar-dominated:
+#:
+#:     2019 -> 2024   nameplate ratio  x1.77      actual RES generation growth  x1.31
+#:                    yield-weighted   x1.38
+#:
+#: The nameplate form over-grew Portuguese RES by ~35 %, which the backcast priced at 6 EUR/MWh of extra
+#: error on PT and dragged ES with it across the Iberian border. Only the RATIO between the two constants
+#: matters (a common scale cancels top and bottom), so these are deliberately generic European values
+#: rather than per-zone fits: PT's own measured pair is 0.299 wind / 0.125 solar, a ratio of 2.39 against
+#: the 2.33 used here. A per-zone, measured version is the better form and needs the CFs threaded through
+#: from the lake — worth doing, but it is a larger change than correcting the weighting itself.
+_RES_YIELD = {"cap_wind_gw": 0.28, "cap_solar_gw": 0.12}
+
 
 def load_tyndp(workbook) -> dict:
     """{zone: {variable: {year: value}}} from the `dispatch_tyndp` tab; {} if the tab is absent."""
@@ -137,9 +154,11 @@ def tyndp_factors(tyndp: dict, zone: str, target_year: int, ref_year: int) -> di
         f = factor(var)
         if f is not None:
             out["cap"][tech] = f
-    # RES volume grows with total wind+solar capacity
-    res_ref = sum(v for var in _RES_VARS if (v := _interp(z.get(var, {}), ref_year)))
-    res_tgt = sum(v for var in _RES_VARS if (v := _interp(z.get(var, {}), target_year)))
+    # RES volume grows with wind+solar capacity WEIGHTED BY YIELD — see `_RES_YIELD`.
+    res_ref = sum(v * _RES_YIELD[var] for var in _RES_VARS
+                  if (v := _interp(z.get(var, {}), ref_year)))
+    res_tgt = sum(v * _RES_YIELD[var] for var in _RES_VARS
+                  if (v := _interp(z.get(var, {}), target_year)))
     out["res"] = (res_tgt / res_ref) if res_ref > 0 else None
     return out
 
