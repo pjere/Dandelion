@@ -77,6 +77,28 @@ ROWS = [
     ("demand_twh", 2019, 50.350, "entsoe_load 2019 total (lake)"),
     ("demand_twh", 2024, 50.000, "PNEC 2030 revised, stated 2024 level; lake reads 51.41 -> definitions agree"),
     ("demand_twh", 2030, 90.000, "PNEC 2030 revised, 2030 consumption"),
+
+    # --- firm fleet. Measured from `entsoe_installed_capacity` (sound for PT outside solar: every
+    # non-solar technology's metered peak sits below its declared nameplate), held flat past the last
+    # measured year because PNEC 2030 plans no new thermal — its firm story is storage, not generation.
+    #
+    # THE COAL ROW IS THE POINT. Portugal closed Sines and Pego during 2021 and has burned no coal since:
+    # 1.756 GW and 5.17 TWh in 2019, 0.000 GW and 0.00 TWh from 2022. Without these rows `_scale_stack`
+    # takes the CAGR branch, which decays coal 8 %/yr AND REPLACES THE RETIRED MW 1:1 WITH CCGT to protect
+    # the reserve margin — so the model carried ~1.9 GW of Portuguese firm capacity that does not exist.
+    ("cap_coal_gw", 2019, 1.756, "entsoe_installed_capacity; Sines 1.2 + Pego 0.6"),
+    ("cap_coal_gw", 2021, 1.756, "still standing at end-2021"),
+    ("cap_coal_gw", 2022, 0.000, "both plants closed during 2021 — generation 5.17 TWh (2019) -> 0.00"),
+    ("cap_coal_gw", 2050, 0.000, "Portugal is coal-free; PNEC 2030 plans no return"),
+    ("cap_gas_gw", 2019, 4.606, "entsoe_installed_capacity"),
+    ("cap_gas_gw", 2024, 4.433, "entsoe_installed_capacity"),
+    ("cap_gas_gw", 2050, 4.395, "held at the 2026 measured level — no new CCGT in PNEC 2030"),
+    ("cap_hydro_gw", 2019, 4.373, "reservoir 1.515 + run-of-river 2.858 (one var scales both, _CAP_VAR)"),
+    ("cap_hydro_gw", 2024, 4.485, "reservoir 1.629 + run-of-river 2.856"),
+    ("cap_hydro_gw", 2050, 4.645, "held at the 2026 measured level"),
+    ("cap_psp_gw", 2019, 2.820, "entsoe_installed_capacity"),
+    ("cap_psp_gw", 2024, 3.707, "Gouvaes/Alto Tamega commissioning"),
+    ("cap_psp_gw", 2050, 3.707, "held at the 2026 measured level"),
 ]
 
 
