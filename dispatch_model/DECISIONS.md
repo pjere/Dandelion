@@ -541,3 +541,64 @@ At the old setting the estimator invented nearly twice as much curtailment on cl
 on real ones — and since most hours are uncensored, that leak *is* the 46 TWh. Under-recovering real
 curtailment is the safe direction; inventing it is not. `tests/test_res_potential.py` pins the placebo
 property and both thresholds at their measured values.
+
+## Le derating nucleaire global plafonnait quatre parcs sous leur propre moyenne observee (2026-08-13)
+
+`_AVAIL_FACTOR["nuclear"] = 0.78` is a single global constant. On 2024 it put the capacity ceiling of four
+zones **below their own observed annual mean output**:
+
+| zone | nameplate | ×0.78 | observed **mean** | observed max |
+|---|---|---|---|---|
+| BE | 3929 | 3065 | **3385** | 3971 |
+| ES | 7117 | 5551 | **5957** | 7118 |
+| CH | 2970 | 2317 | **2614** | 3036 |
+| NL | 486 | 379 | **385** | 490 |
+
+A ceiling below the mean of what actually happened is not a modelling choice — no dispatch can reproduce
+the observed year against it. ~1.0 GW of baseload was permanently absent.
+
+### A floor, never a replacement — and that is the whole safety argument
+
+`METHODOLOGY.md` records why this module moved AWAY from generation quantiles to nameplate × derating: a
+quantile UNDER-reads plant that rarely runs at full output (DE gas read 11.8 GW against 31.7 GW installed,
+which over-priced Germany). `_measured_avail` therefore returns `clip(median(observed)/nameplate, default,
+1.0)` — it can only ever **raise** a factor, so the old failure mode is unreachable. Verified on 2024
+across every zone and technology:
+
+* **binds** — BE/CH/ES/NL nuclear, whose median output is 0.85–1.00 of nameplate;
+* **no-op** — every peaker, by a wide margin: DE_LU gas p99.5 = 0.48 against its 0.90 default, ES coal
+  0.29 against 0.88, DE_LU oil 0.20 against 0.85;
+* **no-op** — GB nuclear, whose AGR fleet genuinely runs at a median of 0.50 and correctly keeps 0.78.
+
+**The MEDIAN, not a high quantile.** p75/p95 put these fleets at ~1.00 of nameplate, which would let the
+model run them flat out in every hour and over-supply the mean instead of under-supplying it. The median
+carries the honest claim — *the derating may not assert less capacity than the fleet delivered in half its
+hours* — and clears the defect with the least overshoot (BE 0.88 × 3929 = 3456 against a mean of 3385).
+Result: BE 3065→3456, CH 2317→2922, ES 5551→6070, NL 379→478.
+
+### Measured: best pooled mean error and best scarcity recall of any arm
+
+| arm | \|mean err\| | log_err | negatives (obs 6136) | >200 €/MWh (obs 34917) |
+|---|---|---|---|---|
+| pre-`unclassified` baseline | 11.15 | 0.737 | 4915 | 36418 |
+| + NL metered solar + `solar_uplift` q90 | 11.08 | **0.652** | 2523 | 37091 |
+| **+ per-zone availability floor** | **10.45** | 0.666 | 2912 | **35533** |
+
+Both modern years improve on BOTH metrics (2024 |mean| 10.13→8.31 and log_err 0.838→0.820; 2025 8.78→8.17
+and 0.797→0.794). Scarcity recall lands 616 hours off target against the previous arm's 2174.
+
+**The split is informative, and it is the same split as everything else this session.** The three zones
+that improve are the over-priced ones, and they improve a lot — **CH +10.1 → +4.8**, PT +8.3 → +3.9,
+NL +4.2 → +3.1. The five that worsen were already priced too cheap and move ~2 €/MWh each (BE −8.6 →
+−11.7, DE_LU −19.8 → −21.8, FR −2.0 → −4.4, ES +1.7 → −3.0, IT_NORTH −4.3 → −6.3). Adding physically
+real capacity to a model with a residual cheap bias will keep doing this: **DE_LU at −21.8 and the 2022
+merit order remain the dominant unexplained terms**, and the single log_err regression here is confined to
+2022 (0.628 → 0.713), the year whose coal-ahead-of-gas defect is diagnosed and unfixed.
+
+On by default; opt out with `DISPATCH_ZONE_AVAIL=0`. The flag is part of the `_STACK_CACHE` key so an
+in-process A/B cannot be served the other arm's stack. `tests/test_zone_availability.py` pins the floor
+property, the peaker no-op, the 1.0 cap and the fallbacks.
+
+**Time-varying neighbour availability is the structurally right answer** — a flat number cannot represent
+a fleet that is either at nameplate or in outage. This only stops the flat number from being provably too
+low.

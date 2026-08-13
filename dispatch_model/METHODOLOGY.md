@@ -49,8 +49,19 @@ arbitrage and coarse neighbour-hydro budgets are refinements.
   recovery) — handled by step (vii).
 - **NTC coupling** (flat, representative) not flow-based → *over-couples* zones, *compressing* spreads and
   *suppressing* zonal negative-price events. Real time-varying NTCs (`rte_ntc`/ENTSO-E) restore spreads.
-- **Neighbour capacity** = p99.9 of observed generation (availability proxy); ENTSO-E installed capacity
-  is the exact input (TODO). Undersizing *inflates* scarcity; DSR tranches cap it.
+- **Neighbour capacity** = ENTSO-E installed capacity × an availability derating (`_AVAIL_FACTOR`), with
+  a p99.9-of-generation fallback only where nameplate is missing. The derating is **floored per zone at
+  the fleet's own median output** (`_measured_avail`): the global `nuclear = 0.78` put BE/ES/CH/NL's
+  ceiling *below their observed annual mean* — 3065 MW against a 3385 MW mean in Belgium — which no
+  dispatch can reproduce, so ~1.0 GW of baseload was permanently absent. The floor only ever RAISES a
+  factor, so it cannot reproduce the failure that made this module abandon generation quantiles in the
+  first place (DE gas read 11.8 GW against 31.7 installed, over-pricing Germany): measured on 2024 it
+  binds on BE/CH/ES/NL nuclear alone and is a no-op for every peaker (DE_LU gas p99.5 = 0.48 vs its 0.90
+  default) and for GB's genuinely-derated AGR fleet. Gate effect: pooled |mean error| 11.08 → **10.45**,
+  scarcity recall 616 hours off target against 2174, both modern years better on both metrics — carried
+  by the over-priced zones (CH +10.1 → **+4.8**, PT +8.3 → +3.9) at the cost of the already-too-cheap ones
+  (BE −8.6 → −11.7). A flat number still cannot represent a fleet that is either at nameplate or in
+  outage; time-varying neighbour availability remains the structurally right answer.
 - **Projected interconnection**: `dispatch_ntc_newbuild` carries one row per interconnector project with
   its commissioning year, summed as a **step** (never interpolated) and applied as an MW **delta** on the
   reference-year hourly NTC — an interconnector is a discrete asset like a reactor, not a smooth

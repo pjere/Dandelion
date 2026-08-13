@@ -8,6 +8,7 @@ the period); a workbook/TYNDP capacity override replaces this for projection.
 """
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -27,6 +28,59 @@ _THERMAL = {"gas", "coal", "lignite", "oil", "biomass"}
 # installed → available derating (nameplate is not all dispatchable at once: outages/maintenance)
 _AVAIL_FACTOR = {"nuclear": 0.78, "gas": 0.90, "coal": 0.88, "lignite": 0.90, "oil": 0.85,
                  "biomass": 0.82, "hydro_reservoir": 1.0, "hydro_psp": 0.9}
+
+
+def _measured_avail(config, zone: str, tech: str, year: int, installed_mw: float) -> float:
+    """→ availability factor for (zone, tech), floored at what the fleet DEMONSTRABLY delivered.
+
+    THE CONSTANTS ABOVE ARE GLOBAL, AND FOR NUCLEAR THEY ARE BELOW SOME ZONES' MEDIAN OUTPUT. Measured
+    on 2024, `nameplate × 0.78` against the fleet's own metered generation:
+
+        zone   nameplate   x0.78   observed MEAN   observed max
+        BE          3929    3065            3385           3971
+        ES          7117    5551            5957           7118
+        CH          2970    2317            2614           3036
+        NL           486     379             385            490
+
+    A capacity ceiling below the annual mean is not a modelling choice, it is impossible — those fleets
+    outproduced the model's ceiling all year, so the model could not reproduce the observed dispatch in
+    any hour. ~1.0 GW of baseload was permanently absent.
+
+    THE FIX IS A FLOOR, NOT A REPLACEMENT, and that distinction is what keeps it safe. `METHODOLOGY.md`
+    records why this module moved AWAY from generation quantiles to nameplate × derating: a quantile
+    UNDER-reads plant that rarely runs at full output (DE gas read 11.8 GW against 31.7 installed, which
+    over-priced Germany). That failure mode is impossible here because the measured value can only ever
+    RAISE the factor — `max(default, measured)` — never lower it. Verified across every zone/tech on 2024:
+
+        binds     BE/CH/ES/NL nuclear (median 0.85-1.00 of nameplate)
+        no-op     every peaker, by a wide margin — DE_LU gas p99.5 = 0.48 vs its 0.90 default,
+                  ES coal 0.29 vs 0.88, DE_LU oil 0.20 vs 0.85
+        no-op     GB nuclear, whose AGR fleet genuinely runs at p50 = 0.50 → keeps its 0.78
+
+    THE MEDIAN, not a high quantile. p75/p95 push these fleets to ~1.00 of nameplate, which would let the
+    model run them flat out in every hour and over-supply the mean instead of under-supplying it. The
+    median has the honest reading — *the derating may not assert less capacity than the fleet delivered in
+    half its hours* — and it clears the defect with the least over-shoot (BE 0.88 × 3929 = 3458 against an
+    observed mean of 3385).
+
+    Time-varying neighbour availability is the structurally right answer and is out of scope here; this
+    only stops a flat number from being provably too low. Opt out with `DISPATCH_ZONE_AVAIL=0`.
+    """
+    default = _AVAIL_FACTOR.get(tech, 0.88)
+    if os.environ.get("DISPATCH_ZONE_AVAIL", "1") in ("0", "false", "False") or installed_mw <= 0:
+        return default
+    try:
+        g = load_generation_hist(config, year, zones=constituents(zone))
+    except (KeyError, ValueError):
+        return default
+    if g.empty or "tech" not in g.columns:
+        return default
+    s = g[g["tech"] == tech].groupby("timestamp_utc")["gen_mw"].sum()
+    if len(s) < 1000:
+        return default
+    return float(min(max(default, float(s.median()) / float(installed_mw)), 1.0))
+
+
 # fallback must-run shares if the workbook tab is absent (see `dispatch_must_run`)
 _MUST_RUN_DEFAULT = {"lignite": 0.45, "coal": 0.35, "gas": 0.15, "biomass": 0.50, "oil": 0.0}
 
@@ -154,7 +208,10 @@ _STACK_CACHE = FrameCache(maxsize=48)
 
 def build_neighbour_stack(config: Config, zone: str, year: int, n_subblocks: int = 3,
                           cap_quantile: float = 0.999) -> pd.DataFrame:
-    key = (db_key(config), "stack", str(zone), int(year), int(n_subblocks), float(cap_quantile))
+    # the availability flag changes the stack contents, so it belongs in the key — otherwise an
+    # in-process A/B (tests, sweeps) would be served a stale stack from the other arm.
+    key = (db_key(config), "stack", str(zone), int(year), int(n_subblocks), float(cap_quantile),
+           os.environ.get("DISPATCH_ZONE_AVAIL", "1"))
     return _STACK_CACHE.get_or_build(key, lambda: _build_neighbour_stack(
         config, zone, year, n_subblocks=n_subblocks, cap_quantile=cap_quantile))
 
@@ -179,7 +236,7 @@ def _build_neighbour_stack(config: Config, zone: str, year: int, n_subblocks: in
     for tech in _DISPATCHABLE:
         g = gen_by_tech.loc[gen_by_tech["tech"] == tech, "gen_mw"]
         if tech in installed:                                     # installed × availability derating
-            cap = installed[tech] * _AVAIL_FACTOR.get(tech, 0.88)
+            cap = installed[tech] * _measured_avail(config, zone, tech, year, installed[tech])
         elif not g.empty:                                         # fallback: p99.9 of generation
             cap = float(g.quantile(cap_quantile))
         else:
