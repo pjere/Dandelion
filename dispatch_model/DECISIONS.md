@@ -602,3 +602,77 @@ property, the peaker no-op, the 1.0 cap and the fallbacks.
 **Time-varying neighbour availability is the structurally right answer** — a flat number cannot represent
 a fleet that is either at nameplate or in outage. This only stops the flat number from being provably too
 low.
+
+## Le lignite de fond de mine etait facture au prix du charbon maritime (2026-08-13)
+
+`stacks/costs.py` mapped `"lignite" -> "coal"` in `FUEL_COMMODITY`, so German/Polish/Czech lignite was
+charged the seaborne hard-coal index. Lignite is dug in an opencast pit beside the plant, moved by
+conveyor, never traded and never shipped; its cost is a **production** cost of ~1.2–1.8 €/GJ ≈ 4.3–6.5
+€/MWh_th, essentially flat year to year. In July 2022 the model charged it **37.9 €/MWh_th — about
+264 €/t of hard coal — for fuel that costs ~5**.
+
+**This repo recorded the symptom without recognising it.** The Phase-3 verification note above reads:
+*"2022 gas €340 » coal €147 / lignite €159"*. Lignite above hard coal is an **inversion** — lignite has
+the worse efficiency and the higher CO2 intensity but by far the cheaper fuel, which is precisely why
+German lignite runs baseload and hard coal does not. Corrected SRMC for July 2022, worst-efficiency block
+of each class: **lignite 195 → 101, coal 184, gas 473**.
+
+### It makes the backtest worse, and it ships anyway
+
+| arm | \|mean err\| | log_err | DE_LU 2022 mean err |
+|---|---|---|---|
+| previous shipped | **10.45** | 0.666 | −79.7 |
+| + lignite fuel corrected | 11.35 | 0.667 | **−95.3** |
+
+The over-priced lignite was a **compensating error**: it propped up the German price plateau and masked
+part of a deficiency that lives elsewhere. Removing it exposes the true size of the DE_LU 2022 gap.
+
+Shipped ON regardless, for three reasons:
+
+1. **`log_err` is unchanged (0.666 → 0.667).** The distribution's *shape* is untouched; only the level in
+   one year moved. 2024 improves marginally on both metrics.
+2. **Projection integrity, which is the decisive argument.** This is a 2027-46 projection model. Chaining
+   lignite to a seaborne index means every scenario in which coal prices rise makes German lignite look
+   uneconomic and retires it from the merit order — physically false, and it would distort twenty years
+   of projected German baseload. The compensating benefit is backtest-only; the damage is structural and
+   forward-looking.
+3. Keeping a known-false input because it happens to offset another error is how a model becomes
+   unfalsifiable. The offset is not robust — it depends on the coal price staying high.
+
+`DISPATCH_LIGNITE_FUEL=0` restores the old behaviour for A/B or if backtest level is preferred.
+
+### What this says about the 2022 merit order — the request that produced it
+
+The chantier was "fix the 2022 merit order". Two hypotheses were tested and **both failed**:
+
+* **Rhine low water restricting coal barges — REFUTED on three independent counts.** The Kaub gauge
+  bottomed in mid-August yet DE coal's monthly max ROSE 8552 (Jun) → 8977 (Jul) → 11381 (Aug, +33 %) →
+  12743 (Sep, +42 %), straight through the worst low water; strictly tidewater plants immune to Rhine
+  levels show a LARGER relative summer outage swing (19.7×) than Rhine-fed ones (3.8×); and the entire
+  barge-fed fleet above the bottleneck is 3.9 GW nominal (5.5 GW including the Saar/Moselle), too small
+  to open an 8 GW hole. Monthly coal max instead tracks the REMIT outage calendar at corr = −0.839.
+* **"It is just summer maintenance seasonality, and 2022 is unremarkable" — ALSO REFUTED**, and this is
+  the subtler error. Comparing summer dips across years has **no valid control**: coal SRMC vs spot in
+  May–Jul was in-merit 15 % of hours in 2019, 12 % in 2023, 24 % in 2024, 27 % in 2025 — but **79.7 % in
+  2022**, with 177-hour continuous in-merit runs against 7–12 hours elsewhere. In every other year the
+  output envelope measures *demand for the fleet*, not its availability. 2022 is the ONE year in which
+  "did not run" implies "could not run", so it is the one year the seasonality argument cannot be applied
+  to.
+
+**The 8 GW of summer coal headroom is real and it is availability** — but the honest sizing rules it out
+as the fix: removing 8 GW in May–Jul is worth **+6.45 €/MWh, 8 % of DE_LU 2022's −79.7 bias**. Capping
+coal at its metered monthly max in every month reaches only +18.6. Deleting the ENTIRE German hard-coal
+fleet all year is the absolute ceiling at +73.0, and it breaks October and November. The reason is that
+**lignite is interleaved with coal in the merit order**: removing a coal block hands the margin to a
+lignite block €13–20 away, never to gas. For gas to set the German price at the median, ~13.2 GW must
+leave the 31.7 GW coal+lignite stack in Jun–Aug — twice what any coal-availability story can supply.
+
+**Left alone, deliberately: the coal index.** `commodities/public_sources.py` already documents that API2
+is not published in the World Bank sheet and that "Coal, South African" (FOB Richards Bay) is a proxy with
+its own basis to ARA. Measured, it runs **17–18 % low** in 2022 — 32.78 €/MWh_th against 39.3 (CIF NWE
+marker) / 40.0 (German border price). That is a real gap, but closing it needs an ingested ARA series, not
+an invented basis adjustment, and it is worth ~5 % of the summer mis-pricing.
+
+**So the 2022 merit order is NOT fixed.** What is fixed is one unambiguous input defect found while
+looking at it. The remaining German gap is a stack-size/level problem that no coal fix reaches, and it is
+now the largest single unexplained term in the model.

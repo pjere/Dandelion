@@ -20,6 +20,12 @@ Per zone `z`, hour `t`:
          Σ_{u∈z,tech=hydro_res, t∈window} gen ≤ weekly_reservoir_budget_z    [water_value_z]
 
 `srmc = fuel/η + CO2_int/η·EUA + VOM` (nuclear ≈ €7 flat; hydro-reservoir bid ~0, energy-limited).
+**Lignite is priced at its mine-mouth production cost (~5 €/MWh_th), not off the seaborne coal index** —
+it is dug beside the plant and never traded. Charging it the hard-coal price inverted the German merit
+order (July 2022: lignite €195 *above* coal €184, for fuel costing ~5 against the 37.9 €/MWh_th it was
+billed); it now reads lignite 101 < coal 184 < gas 473. See `DECISIONS.md` — the correction makes the
+2022 backtest level *worse* by removing a compensating error, and ships anyway because chaining lignite
+to a seaborne index would distort twenty years of projected German baseload.
 Scarcity is priced inside the LP — DSR tranches (300/1000/4000 €/MWh as high-SRMC "units"), unserved
 energy at VoLL, RES curtailment at `res_bid<0`, over-generation `dump` at the price floor — so negative
 and scarcity prices, and cross-border spreads, are **duals, never post-processed**.
