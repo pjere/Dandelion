@@ -23,9 +23,10 @@ _BESS_2024 = {"DE_LU": (1.6, 2.5), "NL": (0.3, 0.6), "BE": (0.2, 0.4), "FR": (0.
 #: annihilated the negative tail (probe I). Zones without measurement fall back to nameplate × 0.6.
 _PSP_MEASURED = {"DE_LU": (4.6, 41.6), "CH": (2.8, 46.7), "ES": (2.7, 34.8),
                  "FR": (3.3, 34.6), "BE": (0.75, 4.7)}
-#: pumping-friction cost (€/MWh on CHARGE): observed discharge lands only 32–54 % in the top price
-#: quartile — real PSP is half arbitrageur, half balancing duty. The friction stops the LP pumping at
-#: every micro-spread; the effective round-trip threshold is ≈ vom_ch/η² ≈ 8.7 €/MWh. Calibration seed.
+#: pumping-friction cost (€/MWh on CHARGE): calibration seed that stops the LP pumping at every
+#: micro-spread — effective round-trip threshold ≈ vom_ch/η² ≈ 8.7 €/MWh; passed the storage re-gate.
+#: (An earlier discharge-side rationale — "32–54 % top-quartile discharge ⇒ half balancing duty" — was
+#: refuted as a fleet-composition artifact: FLEX_CALIBRATION_2024.md §"PSP discharge friction: REFUTED".)
 _PUMP_VOM = 5.0
 _ETA_PSP, _ETA_BESS = 0.76 ** 0.5, 0.90 ** 0.5
 #: BESS build-out factor vs the 2024 seed (starter trajectory, TYNDP-order; workbook-overridable later).

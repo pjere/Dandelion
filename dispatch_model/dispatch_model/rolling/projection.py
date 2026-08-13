@@ -555,7 +555,15 @@ def _preload(config: Config, ref_year: int, avail_years: list[int] | None = None
     #
     # Reconstructed on the REFERENCE year, at that year's installed capacity, so `project_year`'s `res`
     # factor then scales the FULL fleet rather than the metered remnant.
-    if "NL" in neigh:
+    #
+    # SUPERSEDED WHEN `io.unclassified_gen` IS ON — see the long note at the matching block in
+    # `backtest.py`. The fleet is not invisible in generation; TenneT files it under `Other`, which no
+    # dispatch class claimed. `neighbour_netload` now returns it already folded in, so reconstructing it
+    # here as well would double-count (50.6 TWh at a 35.3 GW peak against a real ~21 TWh). The metered
+    # series also carries the right peak — 13.04 GW vs this estimator's 22.28 — which is what the
+    # projection's `res` factor then scales.
+    from ..io.unclassified_gen import enabled as _unclassified_on, solar_enabled as _uc_solar
+    if "NL" in neigh and not (_unclassified_on() and _uc_solar()):
         try:
             from ..flexibility.res_potential import btm_solar
             from ..io.entsoe_hist import load_installed_capacity

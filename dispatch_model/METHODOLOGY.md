@@ -73,6 +73,28 @@ arbitrage and coarse neighbour-hydro budgets are refinements.
   it as supply keeps it out of price formation, which is right for heat-led CHP and conservative for the
   rest. Consequence: GB's own stack adequacy is no longer tested — acceptable because GB exists here to be
   a correct neighbour for FR/BE/NL.
+- **Unclassified generation** (`io/unclassified_gen.py`): `PSR2TECH` maps sixteen ENTSO-E labels, but
+  `_DISPATCHABLE` and `_MUSTTAKE` between them claimed only twelve — `waste`, `geothermal`, `other_res`
+  and `other` were read from the lake and then dropped, silently. On 2024 that is **34.6 % of Dutch load**,
+  8.8 % of IT-North's and 8.2 % of the Italian south's. The Netherlands is the severe case because TenneT
+  reports the decentralised solar fleet under `Other` and leaves `Solar` a stub (0.055 GW mean / 0.399 GW
+  peak against ~28 GW installed): NL `Other` has a day/night ratio of 3.04 and correlates **−0.444** with
+  price and **+0.871** with NL's own `Solar` series, where no other zone's `Other` exceeds 1.39.
+  `other` is split exactly into a day-tracking night floor and a remainder credited to must-take **only
+  where the shape is solar**; the recovered Dutch PV is 22.3 TWh against IRENA/CBS ~21–23.
+  **This SUPERSEDES `flexibility.res_potential.btm_solar`**, which reconstructed the same fleet from
+  nameplate on the false premise that it was invisible in generation: 28.4 TWh at a **22.28 GW peak
+  (0.80 of nameplate)** where the metered fleet peaks at 13.04 GW (0.47). The energies nearly agree — the
+  peak was the error, and it produced 727 phantom NL negative hours in 2024, all 05–15 UTC, Mar–Sep.
+  Shipped: **solar half ON, must-run half OFF** (|mean err| 11.15 → 11.00, log_err 0.737 → 0.692, NL 2024
+  negatives 951 → 379 against 458 observed). The cross-zonal must-run half stays off — it is real
+  generation but lowers every zone ~4 €/MWh into a pre-existing cheap bias; see `DECISIONS.md`.
+- **Known-open** (`DECISIONS.md`): the model UNDER-congests most borders — CH-IT_NORTH clears at an equal
+  price in 69 % of 2024 hours against 3.3 % observed, BE-FR 74 % against 30 % — which compresses the zonal
+  price distribution and is the leading suspect for IT-North's -12.7 EUR/MWh. A candidate mechanism is
+  that `flow_derived_ntc` reads p99.5 of realized PHYSICAL flow (loop flows included) as a COMMERCIAL
+  transfer limit. An earlier claim in the opposite direction — that published NTCs throttle borders below
+  realized flow — was tested and RETRACTED; see `DECISIONS.md`.
 - Static reserve margin (no reserve co-optimisation); no intra-zonal grid; no strategic bidding.
 
 ## Backtest — full-year 2019 (annual baseload = §8 acceptance)

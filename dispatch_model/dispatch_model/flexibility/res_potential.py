@@ -22,12 +22,42 @@ _SOLAR = ("solar",)
 _WINDOW_DAYS = 15            # ±7-day same-hour envelope
 _POS_PRICE = 5.0             # "clearly uncensored" reference hours for the noise floor
 
+#: Quantile of the same-hour dip, over clearly-uncensored hours, that defines the weather-variance floor.
+#:
+#: THIS WAS A MEDIAN, AND A MEDIAN IS NOT A FLOOR. The noise term exists to subtract off ordinary
+#: cloud variability so that what survives is censored potential. Taking its CENTRE leaves half of every
+#: uncensored hour's dip above the floor by construction, so the estimator books routine cloud cover as
+#: curtailment on hours nobody curtails. Measured on 2024 across the 12 neighbour zones:
+#:
+#:     floor quantile     0.50 (was)    0.75    0.90 (now)    0.95    0.99
+#:     total uplift TWh        29.0     11.6          3.6      1.5     0.2
+#:
+#: Three independent checks say the old level was ~10x too high. (1) 70-72 % of the uplift landed on hours
+#: the market priced at or above 50 EUR/MWh. (2) The estimator returned the same 16-25 % uplift in
+#: zone-years where curtailment was IMPOSSIBLE because the zone never priced negative — IT_NORTH has zero
+#: negative hours in 2019, 2022, 2024 and 2025 yet was uplifted every year. (3) A curtailment-free
+#: synthetic placebo reproduced 102-150 % of the real uplift in all 14 zone-years tested.
+#:
+#: 0.90 is calibrated against an independent bound on the genuine signal — the negative-hour dip in excess
+#: of the hour-of-day-matched positive-hour mean — which gives DE_LU 0.99 / ES 0.65 / GB 0.07 / IT_NORTH
+#: 0.00 TWh. At q90 the estimator returns 1.29 / 0.77 / 0.26 / 0.39, the closest match of any quantile
+#: tested; q95 undershoots DE_LU and ES by about half.
+_NOISE_Q = 0.90
+
 
 def solar_uplift(gen: pd.DataFrame, prices: pd.Series | None) -> pd.Series:
     """→ hourly MW to ADD to a zone's must-take RES: the censored solar potential estimate.
 
     `gen` = the zone's `load_generation_hist` frame (timestamp_utc/tech/gen_mw); `prices` = the zone's
-    observed day-ahead series (None ⇒ noise floor 0 — conservative over-uplift, flagged for projection use).
+    observed day-ahead series.
+
+    NO PRICES ⇒ NO UPLIFT. The previous behaviour was `floor = 0`, i.e. the FULL dip counted as
+    curtailment — maximum uplift exactly where there is least information to justify it, described in the
+    docstring as "conservative" when it is the opposite. It was firing silently in the backtest for DK,
+    PL_CZ, AT_SI and IT_SOUTH (+12.05 TWh in 2025 alone), because `_observed_prices` looks up the virtual
+    zone key while the lake stores prices under the constituent keys. The call site now aggregates
+    constituent prices; where none exist, this returns empty rather than substituting a default for
+    missing data.
     """
     s = (gen[gen["tech"].isin(_SOLAR)].groupby("timestamp_utc")["gen_mw"].sum().asfreq("h"))
     if s.dropna().empty:
@@ -39,12 +69,13 @@ def solar_uplift(gen: pd.DataFrame, prices: pd.Series | None) -> pd.Series:
     env = piv.rolling(_WINDOW_DAYS, center=True, min_periods=5).max().stack()
     envs = pd.Series([env.get((d, h), np.nan) for d, h in zip(df["day"], df["hod"])], index=df.index)
     dip = (envs - df["gen"]).clip(lower=0).fillna(0.0)
-    if prices is not None:
-        pos = prices.reindex(df.index) >= _POS_PRICE
-        noise = dip[pos].groupby(df.loc[pos, "hod"]).median()
-        floor = df["hod"].map(noise).fillna(0.0)
-    else:
-        floor = 0.0
+    if prices is None:
+        return pd.Series(dtype=float)              # no reference hours ⇒ no defensible floor ⇒ no uplift
+    pos = prices.reindex(df.index) >= _POS_PRICE
+    if not bool(pos.any()):
+        return pd.Series(dtype=float)
+    noise = dip[pos].groupby(df.loc[pos, "hod"]).quantile(_NOISE_Q)
+    floor = df["hod"].map(noise).fillna(0.0)
     return (dip - floor).clip(lower=0).rename("solar_uplift_mw")
 
 

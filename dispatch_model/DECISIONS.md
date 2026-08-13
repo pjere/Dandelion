@@ -278,3 +278,266 @@ direction is INTER-TEMPORAL, not inter-unit. Two flexible units swapping output 
 exactly the same because SRMC does not vary by hour, and no per-unit or per-border perturbation — both
 constant in time — can separate that. Breaking it needs an hour-dependent cost perturbation, which
 distorts the intra-day merit order.
+
+## Four metered technologies belonged to no dispatch class — and were silently dropped (2026-08-12)
+
+`io/entsoe_hist.PSR2TECH` maps sixteen ENTSO-E labels to model technologies. `neighbours/blocks.py` then
+splits those technologies into `_DISPATCHABLE` (they bid) and `_MUSTTAKE` (they set net load). **Four of
+the sixteen — `waste`, `geothermal`, `other_res`, `other` — appeared in neither list**, so they were read
+out of the lake, mapped to a tech, and then dropped on the floor. Nothing failed; the generation simply
+ceased to exist. Measured on 2024 as a share of each zone's own load:
+
+    NL 34.6 %   IT_NORTH 8.8 %   IT_SOUTH 8.2 %   PL_CZ 2.8 %   BE 2.7 %   DK 2.3 %
+    DE_LU 1.9 % AT_SI 1.8 %      GB 1.3 %         ES 1.2 %      FR 0.4 %   PT 0.5 %
+
+**The Netherlands is a third of its own load.** This was found while chasing NL's +23.5 EUR/MWh dispatch
+error, and it is the single largest defect the model has carried. The 2024 balance closes on it exactly:
+
+    model asks NL dispatchable for  10.91 GW   (net load 10.44 + net exports 0.47)
+    observed NL thermal              4.91 GW
+              + Other                4.21   + Waste 0.32   + flat load residual 1.48
+                                    10.92 GW      <- closes to 0.01 GW
+
+### NL's `Other` is Dutch solar, and `Solar` is a 0.4 GW stub
+
+The four are not one phenomenon and must not be treated alike. Measured per zone on 2024 (`day` = 10-15
+UTC mean, `night` = 22-05, `corr` = correlation with that zone's own day-ahead price):
+
+| category | day/night | corr price | reading |
+|---|---|---|---|
+| `waste` / `geothermal` / `other_res`, every zone | 0.95–1.01 | ~0 | flat must-run |
+| **NL `other`** | **3.04** | **−0.444** | **solar** |
+| every other zone's `other` | 0.98–1.39 | +0.09 … +0.47 | price-following |
+
+TenneT reports the decentralised Dutch fleet under `Other` and leaves `Solar` a stub reading **0.055 GW
+mean / 0.399 GW peak against a fleet of ~26 GW**. `corr(Other, Solar) = +0.871`; the diurnal runs 2.0 GW at
+03:00 to 7.7 GW at 13:00; the seasonal peak is April–July. A model reading `Solar` therefore saw 0.4 GW of
+peak Dutch PV where ~12 GW exists — which is why NL carried 458 observed negative hours against roughly
+zero modelled, and why winter evenings (solar zero, industrial floor only) ran to VoLL: 3.3 GW missing at
+2024-01-17 16:00 against a measured shortfall of 0.8 GW.
+
+This also **retires an earlier misdiagnosis**. The `participation_caps` ceiling was suspected first, and it
+is not the cause: NL gas peaked at 9.55 GW in 2024 against a 9.12 GW ceiling, and observed gas in the VoLL
+hour was 8.15 GW — the ceiling never bound. Relaxing it would have loosened a mechanism that is very nearly
+correct, to compensate for generation that was missing somewhere else entirely.
+
+### Decisions
+
+**Netting is sound here, and it was checked rather than assumed** — it is exactly the trap the GB entry
+above documents from the other side. If NL's load were already net of this generation, subtracting it again
+would double-count. The 2024 balance says it is not: `load 13.10 = generation 12.09 + net imports (−0.47) +
+residual 1.48`, with the residual **flat to ±0.03 GW across day and night** (p10 1.45, p50 1.48, p90 1.50).
+A flat residual carries no solar shape, so the load series is gross. (The 1.48 GW itself is an unexplained
+load-definition offset — station service, pumping, or a boundary difference. It is level, not shape, and is
+left for a later pass rather than folded into this one.)
+
+* **`waste` / `geothermal` / `other_res` → must-run in every zone, taken whole.** IT_CNOR's geothermal
+  averages 599 MW against a 636 MW peak — flat to within 6 % — and waste-to-energy burns because the waste
+  arrives, not because the price cleared.
+* **`other` → split exactly**, `mustrun[h] = min(floor[day(h)], other[h])` and `variable = other − mustrun`,
+  so the parts sum back to the metered series in every hour with no leakage either way. The floor is each
+  day's night minimum smoothed by a centred 7-day rolling median. What a fleet never drops below is
+  price-insensitive whatever its fuel, so the floor is must-run in **every** zone.
+* **The variable part is credited to must-take RES only where the series is demonstrably solar-shaped**
+  (threshold 2.0; NL scores 3.04, the runner-up 1.39 — the threshold sits in a wide gap and is not doing
+  delicate work).
+* **Must-run lands on load, solar lands on must-take** — not interchangeable. In projection, load scales
+  with the demand factor and must-take with the RES trajectory, which are the right drivers respectively
+  for waste/geothermal/industrial baseload and for Dutch PV. `weather_shapes.py` applies the same
+  correction *before* its temperature regression, since `load_coef` is what `shape()` evaluates to produce
+  a projected load — fitting it on gross load while reporting a net `mean_load_mw` would leave the two
+  halves of that model describing different quantities.
+* **GB is excluded by construction, not by exception.** `gb_embedded` nets a load-vs-generation *residual*,
+  and a residual already absorbs everything not otherwise represented; applying both would subtract GB's
+  `other`/`waste` floor twice.
+
+An early version of the floor used a per-month p10 over night hours and **leaked baseload into the solar
+bucket**: 0.9 GW of "solar" at midnight and a Dutch PV total of 26.3 TWh against IRENA's ~21. A floor must
+sit *at* the night level, not under its tenth percentile, because solar at night is zero rather than small.
+The day-tracking floor gives **22.3 TWh** — within 6 % of IRENA, on a quantity derived purely from shape.
+`tests/test_unclassified_gen.py` pins that as a regression, along with the exactness of the split.
+
+### Left out deliberately
+
+The **variable** part of `other` where it is price-FOLLOWING: IT_NORTH 12.0 TWh at corr +0.330, the Italian
+south, GB 3.3 TWh at +0.465 — 8.6 TWh unrepresented in total, 7 % of the 131.2 TWh at stake. That
+generation is real and it is dispatchable, so representing it needs a short-run marginal cost, and `other`
+is a residual label with no fuel. Netting it off load would assert it is must-run, which the positive price
+correlation refutes; a guessed SRMC would be an invented supply curve in the two zones whose levels are
+already the worst in the model. It stays out until it can be given a cost. `scripts/audit_unclassified.py`
+prints the split per zone so the omission is found by measurement rather than rediscovered as a surprise.
+
+### Measured — the solar half shipped, the must-run half did not
+
+The two halves were gated separately (`DISPATCH_UNCLASSIFIED_SOLAR` / `DISPATCH_UNCLASSIFIED_MUSTRUN`)
+once the first combined measurement came back worse, because they are independent corrections that only
+happened to arrive together. Multi-year gate:
+
+| arm | \|mean err\| | log_err | NL 2024 neg (obs 458) |
+|---|---|---|---|
+| pre-fix baseline | 11.15 | 0.737 | 951 |
+| **solar half only — SHIPPED** | **11.00** | **0.692** | **379** |
+| both halves | 12.71 | 0.785 | 742 |
+| both, solar netted off load | 13.88 | 0.849 | 1829 |
+
+The **solar half** beats the baseline on both pooled metrics and leaves every other zone within
+0.5 €/MWh (FR −4.3→−4.2, DE_LU −23.9→−23.8, CH +7.3→+7.2) — it is a NL-only correction that *replaces*
+a synthetic reconstruction rather than adding supply. On by default.
+
+The **must-run half** is off by default. It costs 1.7 €/MWh of pooled mean error because it lowers every
+zone ~4 €/MWh — helping the three zones priced too dear and hurting the five already priced too cheap.
+CH had **0.00 GW added yet moved −5.7**, so most of the movement is contagion, not local supply. The
+generation is real; this is not a correctness verdict. It is that adding correct supply to a model with a
+pre-existing cheap bias moves it further from observation, and the bias must be found first.
+
+### It supersedes `btm_solar` — the model was already reconstructing this fleet, wrongly
+
+The decisive finding, and the reason the first combined measurement looked like "correct but harmful".
+`rolling/backtest.py` and `rolling/projection.py` already reconstructed Dutch behind-the-meter PV via
+`flexibility/res_potential.btm_solar`, on the stated premise that the fleet is *"invisible on BOTH sides
+of the ENTSO-E balance — not in generation (behind-the-meter)"*. **The premise is false.** The
+"0.5 TWh/yr metered" it cites is the `Solar` key alone (0.055 GW × 8784 h = 0.49 TWh); the fleet is in
+`Other`, which no dispatch class claimed — dropped, not absent.
+
+|  | energy | peak | peak/nameplate |
+|---|---|---|---|
+| `btm_solar` | 28.4 TWh | **22.28 GW** | **0.80** |
+| metered `Other` solar | 22.3 TWh | 13.04 GW | 0.47 |
+| actual (IRENA/CBS) | ~21–23 TWh | | |
+
+`corr(btm, metered) = +0.913` — the same fleet twice. The **energies nearly agree; the peak is what was
+wrong**, and a 0.80 peak factor across 28 GW of mixed roof pitch and orientation is unreachable. That
+excess peak was NL's phantom midday surplus: **727 model-only negative hours in 2024, every one between
+05:00 and 15:00 UTC, March–September**, with NL the cheapest zone in nearly all of them. Running both
+paths gives 50.6 TWh at a 35.3 GW peak against a real ~21 TWh — the double-count that produced NL's
+−27.4 €/MWh in the first arm. Both call sites are gated on `solar_enabled()`, so disabling the half
+restores the synthetic path rather than leaving NL with no solar.
+
+Corroborating: observed NL and DE_LU go negative together in **86 %** of NL's negative hours (396/458);
+the pre-fix model managed **24 %** (231/951). It had decoupled the Netherlands from Germany.
+
+### Netting it off load instead — TRIED, MEASURED, REJECTED
+
+Net load is identical whether the solar part is subtracted from `load_mw` or added to `musttake_res_mw`
+(`load − mustrun − solar − musttake` regrouped), so the choice looks cosmetic. It is not: it decides
+whether the solar is **curtailable**. Netted off load it becomes inflexible negative demand, so NL's
+surplus hours ran past the RES bid floor to the **−500 EUR/MWh price floor in 997 hours of 2024**, and NL's
+pooled mean error went −19.8 → **−60.6**. Every other zone came back bit-identical, which is the tell: the
+thermal dispatch never moved, only NL's own dual.
+
+This **refines the GB decision above rather than contradicting it**. `gb_embedded` nets embedded generation
+off demand precisely to avoid manufacturing negative prices — and that manoeuvre is only safe for genuinely
+inflexible generation. Applied to a 13 GW-peak solar fleet in a zone that does price negative, it does not
+suppress the low tail, it detonates it. The distinction to carry forward is flexibility, not accounting.
+
+## Published NTC "throttling" — CLAIMED, TESTED, RETRACTED; the truth is the opposite (2026-08-13)
+
+Recorded because the wrong version of this was written into this file for several hours, and because the
+error is an easy one to repeat.
+
+**The claim.** Chasing NL's residual surplus, the applied NTC was compared against `entsoe_flows` and
+found to be exceeded constantly — NL→DE_LU capped near 1081 MW against flows reaching 5171 MW, over the
+cap in 32 % of 2024 hours; FR→CH, DE_LU→CH, FR→IT_NORTH and BE→NL the same. The reading was that the
+model forbids transfers that physically happened, isolating NL and widening both its price tails.
+
+**Why it is wrong, twice over.**
+
+1. `entsoe_flows` is ingested via `client.query_crossborder_flows` — ENTSO-E **physical flows** (A11), not
+   scheduled commercial exchanges (A09). In a meshed AC grid physical flow routinely exceeds commercial
+   NTC through loop flows and transit, so "flow > NTC" is ordinary grid physics and proves nothing. The
+   first comparison was also made against the series MEDIAN, which is not even the right scalar: the
+   published series is genuinely hourly (NL→DE_LU has 751 distinct values spanning 0–4907 MW).
+2. The valid test is price coupling — when two zones clear at the same price the border was not congested,
+   so the commercial exchange was unconstrained in that hour. In those hours the published NTC is **not**
+   small: NL→DE_LU median 1081 MW with only 130 of 1754 coupled hours below 500 MW. The published series
+   is consistent with observed coupling.
+
+**And the model runs the other way.** Comparing model against observed price convergence (|ΔP| < 1 €/MWh)
+shows the model **UNDER**-congests nearly every border — its zones are too tightly coupled, not too
+isolated:
+
+| border (2024) | observed coupled | model coupled | gap |
+|---|---|---|---|
+| CH→IT_NORTH | 3.3 % | **69.1 %** | +65.8 |
+| BE→FR | 30.1 % | 74.0 % | +43.9 |
+| CH→DE_LU | 8.2 % | 50.1 % | +41.9 |
+| FR→CH | 5.6 % | 25.2 % | +19.6 |
+| NL→DE_LU | 41.3 % | 49.4 % | +8.1 |
+
+2025 is worse on every line. Over-coupling compresses the zonal price distribution — it drags the dearest
+zone down and lifts the cheapest — which is the shape of IT-North's **−12.7 €/MWh** (observed the dearest
+zone at 107) sitting coupled to Switzerland 69 % of the time against 3.3 % observed. The model reproduces
+only half of the observed IT-North↔CH spread (16 €/MWh against 31).
+
+**Not yet a cause, and deliberately not written up as one.** Price-equality frequency conflates two
+mechanisms: an over-generous border AND two zones simply sharing a marginal fuel. Both would show as
+coupling. A plausible contributor is that `flow_derived_ntc` takes p99.5 of realized PHYSICAL flow and
+uses it as a COMMERCIAL transfer limit — the same physical-vs-commercial confusion that produced the
+retracted claim above, but this time in the model rather than in the analysis, and biased toward
+capacities that are too large. Discriminating between that and a stack/fuel explanation needs the model's
+own border flows, which the gate does not currently persist. **Open, and the largest lead still standing.**
+
+## `solar_uplift` booked cloud cover as curtailment — FIXED (2026-08-13)
+
+A parallel audit of every synthetic reconstruction in the model (5 investigations, adversarially verified)
+found `flexibility/res_potential.solar_uplift` — applied to EVERY neighbour zone at `backtest.py:221` —
+adds **46.1 TWh (2024) and 51.1 TWh (2025)** of zero-cost must-take RES across the neighbour zones, of
+which **70–72 % lands on hours the market priced ≥50 €/MWh**, where no operator curtails PV.
+
+The falsification is clean: the estimator returns the **same 16–25 % uplift in zone-years where
+curtailment was impossible because the zone never priced negative**. IT_NORTH has zero negative hours in
+2019, 2022, 2024 *and* 2025, yet is uplifted 16.3–24.6 % every year. A curtailment-free synthetic placebo
+reproduces 102–150 % of the real uplift in all 14 zone-years tested — i.e. essentially all of it is
+day-to-day cloud variability, not censored potential. A defensible upper bound on the genuine signal
+(the negative-hour dip in excess of the hour-of-day-matched positive-hour mean) is DE_LU 0.99 TWh,
+ES 0.65, GB 0.07, IT_NORTH 0.00 — roughly a tenth of what DE_LU alone is booked.
+
+Two scope facts that bound the damage: it is **peak-bounded** (uplifted peak equals observed peak in all
+28 zone-years tested, so unlike `btm_solar` it cannot inflate the peak), and it **does not reach the
+forward projection** (`projection.py` imports only `btm_solar`). It is an energy/placement bias in the
+backtest and gate-scoring path — 82.4 TWh across the four gate years.
+
+Separately, its price filter is **entirely disabled** for DK, PL_CZ, AT_SI and IT_SOUTH: `_observed_prices`
+looks up the virtual-zone key while the lake stores prices under the constituent keys, so `prices=None`
+and the noise floor falls to 0 — the docstring's "conservative over-uplift, flagged for projection use"
+branch firing silently in the backtest for 4 of 12 zones, worth +12.05 TWh in 2025. Same "dropped rather
+than absent" template as the Dutch `Other` defect.
+
+**This is the leading candidate for the cheap bias** that made the must-run half unshippable: ~46 TWh/yr
+of free zero-cost energy in the neighbour zones is exactly what would hold DE_LU at −23.9 and BE at −11.6.
+
+### The fix: a floor has to be in the tail, not at the centre
+
+**Root cause, in one line: the noise floor was a MEDIAN.** The term exists to subtract ordinary cloud
+variability so that what survives is censored potential — but taking its *centre* leaves half of every
+uncensored hour's dip above it by construction. Two changes, both in `flexibility/res_potential.py`:
+
+1. `_NOISE_Q = 0.90` — the floor is now an upper quantile of the same-hour dip over clearly-uncensored
+   hours. Measured effect on the 2024 inputs, summed over the 12 neighbour zones:
+
+       floor quantile   0.50 (was)   0.75    0.90 (now)   0.95   0.99
+       uplift TWh             29.0   11.6           3.6    1.5    0.2
+
+2. `prices=None` ⇒ **no uplift**, replacing `floor = 0` (the full dip counted as curtailment — maximum
+   uplift precisely where there is least evidence, and described in the docstring as "conservative"). The
+   call site in `backtest.py` now averages CONSTITUENT prices for the aggregate zones, so IT_SOUTH gets a
+   properly floored uplift instead of none; DK/PL_CZ/AT_SI have no constituent prices in the lake for
+   2024 and now correctly receive nothing rather than an unfloored ~17 TWh.
+
+Together: **46.1 TWh → 3.6 TWh** on 2024.
+
+`q90` is calibrated on two independent axes. On real data it lands nearest the audit's bound on the
+genuine signal (DE_LU 1.29 vs 0.99 TWh, ES 0.77 vs 0.65, GB 0.26 vs 0.07; q95 undershoots DE_LU and ES by
+about half). On a synthetic pair of solar years — one curtailment-free, one with curtailment injected on
+negative-price hours — it trades recovery for precision the right way:
+
+| floor q | placebo leak | real curtailment recovered | **false uplift on clean hours** |
+|---|---|---|---|
+| 0.50 (was) | 15.8 % | 90.0 % | **191 %** |
+| 0.90 (now) | 0.7 % | 25.2 % | **9.9 %** |
+| 0.95 | 0.3 % | 15.2 % | 1.4 % |
+
+At the old setting the estimator invented nearly twice as much curtailment on clean hours as it recovered
+on real ones — and since most hours are uncensored, that leak *is* the 46 TWh. Under-recovering real
+curtailment is the safe direction; inventing it is not. `tests/test_res_potential.py` pins the placebo
+property and both thresholds at their measured values.

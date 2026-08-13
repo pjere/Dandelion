@@ -343,5 +343,10 @@ def neighbour_netload(config: Config, zone: str, year: int) -> pd.DataFrame:
     # Britain's distribution-connected fleet, off demand. Without it GB runs out of plant and hits VoLL.
     from ..io.gb_embedded import apply_to_netload
     df = apply_to_netload(config, zone, year, df)
+    # `waste` / `geothermal` / `other_res` / `other` are mapped by `PSR2TECH` but appear in NEITHER
+    # `_DISPATCHABLE` nor `_MUSTTAKE`, so they were read from the lake and then dropped — 34.6 % of Dutch
+    # load, because TenneT reports NL's solar fleet under `Other` and leaves `Solar` a 0.4 GW stub.
+    from ..io.unclassified_gen import apply_to_netload as apply_unclassified
+    df = apply_unclassified(config, zone, year, df)
     df["netload_mw"] = (df["load_mw"] - df["musttake_res_mw"])
     return df.dropna(subset=["load_mw"]).reset_index()

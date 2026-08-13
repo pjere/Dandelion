@@ -217,8 +217,22 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         # for the estimator and its leakage boundary). FR is deliberately excluded in v1 (its negative count
         # already runs above observed; an uplift there would compound the overshoot).
         from ..flexibility.res_potential import btm_solar, solar_uplift
+
+        def _zone_prices(z):
+            """`obs` is keyed by MODELLED zone; the lake keys prices by BIDDING zone, so the aggregates
+            (DK / PL_CZ / AT_SI / IT_SOUTH) miss every time and the estimator used to fall back to an
+            unfloored uplift. Average the constituents instead — a cluster's members are coupled often
+            enough that a mean is a fair reference for "was this hour clearly uncensored"."""
+            if obs.get(z) is not None:
+                return obs[z]
+            cs = constituents(z)
+            if len(cs) <= 1:
+                return None
+            parts = [s for s in (_observed_prices(config, year, cs)).values() if s is not None]
+            return pd.concat(parts, axis=1).mean(axis=1) if parts else None
+
         for z in neigh:
-            up = solar_uplift(nb_gen[z], obs.get(z))
+            up = solar_uplift(nb_gen[z], _zone_prices(z))
             if not up.empty and float(up.sum()) > 0:
                 nl = nb_nl[z]
                 add = up.reindex(nl.index).fillna(0.0)
@@ -228,7 +242,23 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         # (behind-the-meter) and not netted from the load series (measured: net load does not collapse
         # on observed-negative noons). Without it the real Dutch surplus does not exist in the inputs
         # (2025 decomposition: model-NL ~88 €/MWh on obs-negative hours, gas marginal 470/581 h).
-        if "NL" in neigh:
+        #
+        # SUPERSEDED WHEN `io.unclassified_gen` IS ON, and the premise above is why. The Dutch fleet is
+        # NOT invisible in generation — TenneT files it under `Other`, which `_MUSTTAKE` never claimed, so
+        # it was dropped rather than absent. The "0.5 TWh/yr metered" figure is the `Solar` key alone
+        # (0.055 GW x 8784 h = 0.49 TWh); the fleet's real metered output sits in `Other` at 22.3 TWh.
+        # Running both double-counts: 50.6 TWh at a 35.3 GW peak against a real ~21 TWh (IRENA/Ember).
+        #
+        # The metered series is also the better estimator on its own terms. `btm_solar` normalises the
+        # 0.4 GW utility stub by its own p99.9 and rides nameplate on that shape, which assumes a 28 GW
+        # distributed fleet is as coincident as a single site: it returns a 22.28 GW peak, 0.80 of
+        # nameplate, where the metered fleet peaks at 13.04 GW (0.47) — inverter clipping, orientation
+        # spread and non-coincidence make 0.80 unreachable. That excess peak is the whole of NL's phantom
+        # midday surplus: 727 model-only negative hours in 2024, all between 05-15 UTC, March-September.
+        # On energy the two nearly agree (28.4 vs 22.3 TWh, against this estimator's own ~23 TWh CBS
+        # cross-check), so it is the PEAK that was wrong, not the volume.
+        from ..io.unclassified_gen import enabled as _unclassified_on, solar_enabled as _uc_solar
+        if "NL" in neigh and not (_unclassified_on() and _uc_solar()):
             from ..io.entsoe_hist import load_installed_capacity
             inst = load_installed_capacity(config, "NL", year).get("solar", 0.0)
             btm = btm_solar(nb_gen["NL"], inst)

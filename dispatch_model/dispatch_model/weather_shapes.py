@@ -140,6 +140,30 @@ class NeighbourWeatherModel:
         zones = [z for z in config.all_zones if z != "FR"]
         for z in zones:
             ld = load_demand_hist(config, year, zones=constituents(z)).groupby("timestamp_utc")["load_mw"].sum()
+            # THE SUFFICIENCY GUARD STAYS AHEAD OF `load_generation_hist`. An earlier version of this
+            # correction hoisted the generation read above it, which crashed the whole fit with
+            # `KeyError: 'tech'` on the first zone that has load rows but no generation rows — an empty
+            # frame has no columns. The fit is the shipped default for weather-coherent projection, so
+            # that turned a silent degrade into a hard failure for every Monte Carlo trajectory.
+            if len(pd.DataFrame({"load": ld}).join(temperature, how="inner").dropna()) < 500:
+                continue
+            g = load_generation_hist(config, year, zones=constituents(z))
+            mt = (g[g["tech"].isin(_MUSTTAKE)].groupby("timestamp_utc")["gen_mw"].sum()
+                  if not g.empty and "tech" in g.columns else pd.Series(dtype=float))
+            # `_MUSTTAKE` alone reads NL's solar as a 0.4 GW stub, because TenneT reports the Dutch fleet
+            # under `Other` (see `io.unclassified_gen`). This path is the one the Monte Carlo trajectories
+            # use, so it needs the same correction `neighbour_netload` applies to the backtest — otherwise
+            # a projected NL keeps a net load its real system never sees, and never prices a negative hour.
+            # The must-run part lands on LOAD (it is not weather-driven and must not enter `res_shape`,
+            # which is scaled by the draw's renewable anomaly); the solar part lands on must-take.
+            #
+            # It is applied BEFORE the temperature regression, not after: `load_coef` is what `shape()`
+            # evaluates to produce a projected `load_mw`, so fitting it on gross load while reporting a net
+            # `mean_load_mw` would leave the two halves of this model describing different quantities.
+            from .io.unclassified_gen import apply_to_netload as apply_unclassified
+            _d = apply_unclassified(config, z, year, pd.DataFrame(
+                {"load_mw": ld, "musttake_res_mw": mt.reindex(ld.index).fillna(0.0)}))
+            ld, mt = _d["load_mw"], _d["musttake_res_mw"]
             j = pd.DataFrame({"load": ld}).join(temperature, how="inner").dropna()
             if len(j) < 500:
                 continue
@@ -147,8 +171,6 @@ class NeighbourWeatherModel:
             beta, *_ = np.linalg.lstsq(X, j["load"].to_numpy(), rcond=None)
             load_coef[z] = beta.tolist()
             # RES: the zone's OWN observed must-take shape (unit-mean) + its mean level (#157).
-            g = load_generation_hist(config, year, zones=constituents(z))
-            mt = g[g["tech"].isin(_MUSTTAKE)].groupby("timestamp_utc")["gen_mw"].sum()
             res_beta[z] = {"mean_res_mw": float(mt.mean()) if len(mt) else 0.0,
                            "mean_load_mw": float(ld.mean())}
             res_shape[z] = _norm_shape(mt, year)
