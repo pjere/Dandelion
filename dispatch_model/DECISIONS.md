@@ -676,3 +676,77 @@ an invented basis adjustment, and it is worth ~5 % of the summer mis-pricing.
 **So the 2022 merit order is NOT fixed.** What is fixed is one unambiguous input defect found while
 looking at it. The remaining German gap is a stack-size/level problem that no coal fix reaches, and it is
 now the largest single unexplained term in the model.
+
+## La disponibilite thermique voisine devient mensuelle (2026-08-13)
+
+`participation_caps` already clamps neighbour thermal to the fleet the market revealed, but with **one
+number for the whole year** — so the model may spend a November availability in June. Measured on German
+coal+lignite, output in the 100 dearest hours of each year against the model's own capacity:
+
+| year | delivered | model capacity | **phantom** | gas−coal SRMC spread |
+|---|---|---|---|---|
+| 2019 | 32.9 GW | 41.3 GW | **8.5 GW** | €1 |
+| 2022 | 24.2 | 33.3 | **9.1** | **€184** |
+| 2024 | 20.3 | 32.7 | **12.5** | €14 |
+| 2025 | 20.8 | 27.7 | **6.9** | €27 |
+
+**7–12 GW of German coal+lignite never delivers even at the 100 highest prices of the year — in every
+year.** The defect is chronic; only its price consequence is not. When coal and gas sit within €1–27 of
+each other, getting the marginal technology wrong costs nothing. At a €184 spread the same error is worth
+−95 €/MWh. That is the whole explanation for DE_LU reading −3.0 / −4.8 / −10.0 in 2019/2024/2025 and
+−95.3 in 2022: **2022 is not a broken year, it is the only year with a working test.** DE_LU's net load is
+right in 2022 (model 33.6 GW against 35.1 GW implied), so this is not demand-side; and the model carries
+84.8 GW of dispatchable against a net-load p95 of 54.5 GW, which is why scarcity almost never binds.
+
+### The reveal test is the whole design
+
+Observed output bounds AVAILABILITY only where the plant was INFRAMARGINAL — only then does "did not run"
+imply "could not run". German coal was in merit for 79.7 % of May–July hours in 2022 but 12–27 % in
+2019/2023/2024/2025. A naive monthly cap would therefore encode DEMAND as unavailability in the cheap
+years and invent scarcity. So `blocks.monthly_avail` uses a month only when the zone's observed spot
+exceeded that tech's SRMC for ≥ 50 % of its hours. The profiles show the test doing its job:
+
+    DE_LU 2022  coal     Jan 0.84  Mar 0.75  May 0.52  Jun 0.50  Jul 0.54  Aug 0.66  Nov 0.95  Dec 0.93
+                lignite  0.83-0.97, all twelve months
+    DE_LU 2019  lignite  January and February only   (coal never in merit — spread €1)
+    DE_LU 2024  coal     November only               (spread €14)
+    gas         never, in any year
+
+Gas never earns a shape, which is correct: it is the marginal unit, so its output is demand-determined
+rather than availability-determined. The test excludes it automatically rather than by a hardcoded rule.
+
+### Measured: the best arm of the series on both headline metrics
+
+| arm | \|mean err\| | log_err | DE_LU 2022 | DE_LU 2022 hours >200 (obs 4642) |
+|---|---|---|---|---|
+| pre-`unclassified` baseline | 11.15 | 0.737 | −80.8 | 1487 |
+| + per-zone availability floor | 10.45 | 0.666 | −79.7 | — |
+| + lignite fuel corrected | 11.35 | 0.667 | −95.3 | 1487 |
+| **+ monthly availability** | **9.96** | **0.654** | **−63.5** | **2998** |
+
+DE_LU 2022 recovers **+31.8 €/MWh** and its scarcity-hour deficit halves. Five of eight zones improve
+(FR −5.4→−2.6, BE −13.2→−9.5, DE_LU −28.3→−18.9, ES −3.4→−2.1, IT_NORTH −6.7→−6.2).
+
+**It is neutral where it was designed to be neutral**, which is the property that distinguishes it from
+every other change in this series: log_err 2019 0.345→0.344, 2024 0.816→0.819, 2025 0.793→0.793. The
+reveal test simply declines to act in the years that are already right, so it cannot break them.
+
+**The scarcity overshoot is inherited, not created.** System-wide `>200 €/MWh` goes from 1501 under target
+to 3308 over, but the decomposition is entirely 2022 and mostly pre-existing: CH was already +1685 hours
+over and this added **29**; IT-North was +1233 over and this added **13**. What the change actually did was
+move DE_LU **1511 hours toward** its 4642-hour target while adding ~760 across FR/BE/PT. CH and IT-North
+being over-scarce in 2022 while DE_LU is under-scarce is a separate, older defect — the same
+"distribution too wide across zones" signature recorded elsewhere in this file.
+
+### Scope and hazards
+
+* **Backtest only.** `rolling/projection.py` still passes `avail_profile=None`. A shape measured on an
+  observed year must not silently propagate into projected years, where the fleet is a TYNDP trajectory
+  and no reveal test can be run. Carrying a seasonal maintenance shape forward is defensible and is the
+  obvious follow-up, but it is a separate decision.
+* **Returns `{}`, never a default.** A zone with no observed price series, or a tech with no revealing
+  month, keeps flat availability — absence of evidence produces no clamp.
+* `DISPATCH_MONTHLY_AVAIL=0` restores flat behaviour.
+* **The low tail is untouched and still wrong**: negatives 2922 → 2797 against 6136 observed, with ES at
+  5 against 803 and CH at 15 against 613. Those two zones have no negative-price mechanism at all and
+  remain the largest open item after this.

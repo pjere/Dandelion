@@ -198,6 +198,14 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     elif nuclear_curve:
         fr_stack = nuc.expand_stack(fr_stack, nuc.load_curve(config, year, nuc_installed))
     nb_nl = {z: neighbour_netload(config, z, year).set_index("timestamp_utc") for z in neigh}
+    # SEASONAL thermal availability (opt-in, default on). `participation_caps` clamps neighbour thermal to
+    # the fleet the market revealed, but with ONE number per year — so the model may spend a November
+    # availability in June. Measured on German coal+lignite, 7-12 GW never delivers even at the 100 dearest
+    # hours of the year, in every year. `monthly_avail` returns a month shape ONLY where the tech was
+    # inframarginal enough that non-generation implies unavailability; elsewhere it returns {} and the
+    # zone keeps flat availability. See `neighbours.blocks.monthly_avail`.
+    from ..neighbours.blocks import monthly_avail
+    nb_avail = {z: monthly_avail(config, z, year) for z in neigh}
     for z in list(neigh):                       # a zone with load data missing for this year → drop it (else
         if nb_nl[z].empty:                      # its empty net-load yields a degenerate LP time coord)
             neigh.remove(z); zones.remove(z); nb_stack.pop(z, None); nb_nl.pop(z, None)
@@ -360,7 +368,8 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
             zd[z] = nb_window(z, nb_stack[z], nb_nl[z], nb_res[z],
                               zone_prices(prices, z, basis, w0, gas_rules), T,
                               wv_delta=wv_levels.get(z, {}).get(wk),
-                              mustrun_floors=nb_mustrun.get(z))
+                              mustrun_floors=nb_mustrun.get(z),
+                              avail_profile=nb_avail.get(z))
         borders = [b for b in NTC if b[0] in zd and b[1] in zd]
         # market rules effective in THIS window (IT/ES were floored at 0 before TIDE / Dec-2023)
         res_bid, price_floor = rules_at(wb, w0, list(zd))

@@ -382,6 +382,101 @@ def participation_caps(config: Config, zone: str, year: int) -> dict[str, float]
     return out
 
 
+#: Techs given a monthly availability shape. The reveal test below decides per (tech, month) whether the
+#: data supports one, so listing a tech here is permission, not an assertion.
+_MONTHLY_AVAIL_TECHS = ("coal", "lignite", "oil")
+
+#: A month reveals a tech's availability only if the tech was INFRAMARGINAL for at least this share of the
+#: month's hours. Below it, low output means "not called", not "not available".
+_MONTH_REVEAL_SHARE = 0.50
+
+_MAVAIL_CACHE: dict = {}
+
+
+def monthly_avail(config: Config, zone: str, year: int) -> dict[str, dict[int, float]]:
+    """→ {tech: {month: fraction of stack capacity available}} — a SEASONAL availability shape.
+
+    `participation_caps` already clamps neighbour thermal to the fleet the market revealed, but it does so
+    with ONE number for the whole year, so the model may spend a November availability in June. Measured on
+    German coal+lignite, output in the 100 dearest hours of each year against the model's own capacity:
+
+        year   delivered   model cap   PHANTOM
+        2019     32.9 GW      41.3 GW    8.5 GW
+        2022     24.2         33.3       9.1
+        2024     20.3         32.7      12.5
+        2025     20.8         27.7       6.9
+
+    7-12 GW of German coal+lignite never delivers even at the 100 highest prices of the year, in EVERY
+    year. The defect is chronic; only its price consequence is not. The gas-minus-coal SRMC spread is 1
+    EUR/MWh in 2019, 14 in 2024 and 27 in 2025 — so getting the marginal technology wrong costs nothing —
+    but **184 EUR/MWh in 2022**, where the same error is worth -95 EUR/MWh on DE_LU. 2022 is not a broken
+    year, it is the only year with a working test.
+
+    THE RESERVATION THAT SHAPES THE DESIGN: observed output is a valid ceiling on AVAILABILITY only where
+    the plant was INFRAMARGINAL, because only then does "did not run" imply "could not run". German coal
+    was in merit for 79.7 % of May-July hours in 2022 but 12-27 % in 2019/2023/2024/2025, so a naive
+    monthly cap would encode DEMAND as availability in the cheap years and invent scarcity. Hence the
+    per-(tech, month) reveal test: the month is used only if the zone's observed spot exceeded that tech's
+    SRMC for at least `_MONTH_REVEAL_SHARE` of its hours. This also excludes the MARGINAL technology
+    automatically — gas rarely clears above its own SRMC, so gas rarely earns a monthly shape, which is
+    right because gas output is demand-determined rather than availability-determined.
+
+    Returns {} when prices or generation are unavailable — never a default, so a zone without evidence
+    keeps the flat behaviour. Opt out with `DISPATCH_MONTHLY_AVAIL=0`.
+    """
+    if os.environ.get("DISPATCH_MONTHLY_AVAIL", "1") in ("0", "false", "False"):
+        return {}
+    key = (db_key(config), str(zone), int(year))
+    if key in _MAVAIL_CACHE:
+        return _MAVAIL_CACHE[key]
+
+    out: dict[str, dict[int, float]] = {}
+    try:
+        from ..commodities.model import CommodityModel
+        from ..commodities.resolve import PriceResolver
+        from ..rolling.backtest import _observed_prices
+        from ..stacks.costs import thermal_srmc
+        obs = _observed_prices(config, year, [zone]).get(zone)
+        if obs is None or obs.dropna().empty:
+            _MAVAIL_CACHE[key] = out
+            return out
+        px = obs.dropna()
+        res = PriceResolver(CommodityModel.from_workbook(
+            config.resolve(config.section("assumptions")["workbook"])))
+        g = load_generation_hist(config, year, zones=constituents(zone))
+        inst = load_installed_capacity(config, zone, year)
+    except Exception:                                # noqa: BLE001 — no evidence → flat, never a default
+        _MAVAIL_CACHE[key] = out
+        return out
+
+    for tech in _MONTHLY_AVAIL_TECHS:
+        nameplate = float(inst.get(tech, 0.0))
+        if nameplate < 300.0:
+            continue
+        cap = nameplate * _measured_avail(config, zone, tech, year, nameplate)
+        s = g[g["tech"] == tech].groupby("timestamp_utc")["gen_mw"].sum() if "tech" in g.columns else None
+        if s is None or len(s) < 1000 or cap <= 0:
+            continue
+        eff_worst = EFF_RANGE.get(tech, (0.36, 0.46))[0]
+        prof: dict[int, float] = {}
+        for m in range(1, 13):
+            gm = s[s.index.month == m]
+            pm = px[px.index.month == m]
+            if len(gm) < 100 or len(pm) < 100:
+                continue
+            try:
+                srmc = thermal_srmc(tech, eff_worst, res.prices_at(pd.Timestamp(f"{year}-{m:02d}-15", tz="UTC")))
+            except Exception:                        # noqa: BLE001 — cannot price the month → skip it
+                continue
+            if float((pm > srmc).mean()) < _MONTH_REVEAL_SHARE:
+                continue                             # not inframarginal → output measures demand, not availability
+            prof[m] = float(min(1.0, max(0.0, float(gm.quantile(0.995)) / cap)))
+        if prof:
+            out[tech] = prof
+    _MAVAIL_CACHE[key] = out
+    return out
+
+
 def neighbour_netload(config: Config, zone: str, year: int) -> pd.DataFrame:
     """→ hourly [timestamp_utc, load_mw, musttake_res_mw, netload_mw] from ENTSO-E actuals.
 

@@ -112,6 +112,15 @@ arbitrage and coarse neighbour-hydro budgets are refinements.
   that `flow_derived_ntc` reads p99.5 of realized PHYSICAL flow (loop flows included) as a COMMERCIAL
   transfer limit. An earlier claim in the opposite direction — that published NTCs throttle borders below
   realized flow — was tested and RETRACTED; see `DECISIONS.md`.
+- **Seasonal neighbour thermal availability** (`blocks.monthly_avail`, backtest only): `participation_caps`
+  clamps to the revealed fleet with ONE number per year, so the model could spend a November availability
+  in June. Measured on German coal+lignite, **7-12 GW never delivers even at the 100 dearest hours of the
+  year, in every year** — chronic, but only visible in the price when the gas-coal spread is large (€1 in
+  2019, €14 in 2024, **€184 in 2022**). A month is used only where the tech was inframarginal for >=50 %
+  of its hours, so low output cannot be misread as unavailability in cheap years; gas never qualifies,
+  correctly, being the marginal unit. Gate effect: pooled |mean err| 11.35 -> **9.96**, log_err 0.667 ->
+  **0.654**, DE_LU 2022 -95.3 -> **-63.5** with its >200 EUR/MWh hours 1487 -> 2998 against 4642 observed,
+  and flat log_err in 2019/2024/2025 where the test declines to act.
 - Static reserve margin (no reserve co-optimisation); no intra-zonal grid; no strategic bidding.
 
 ## Backtest — full-year 2019 (annual baseload = §8 acceptance)

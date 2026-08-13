@@ -108,13 +108,20 @@ def apply_measured_mustrun(st, zone, T, floors: dict | None = None) -> pd.DataFr
     return st
 
 
-def nb_window(zone, stack, nl, res, prices, T, wv_delta=None, mustrun_floors=None) -> dict:
+def nb_window(zone, stack, nl, res, prices, T, wv_delta=None, mustrun_floors=None,
+              avail_profile=None) -> dict:
     """Neighbour zone dict for one window: block SRMC, measured seasonal must-run (DE_LU), DSR tranches,
     reservoir budget from the window's actual generation.
 
     `wv_delta` (opt-in, #136) recentre les prix d'offre hydrauliques sur le λ structurel de la SDP.
     `mustrun_floors` (opt-in, FLEX) : planchers must-run MESURÉS {month: {tech: MW}} remplaçant
-    l'heuristique chp×heat_factor (cf. apply_measured_mustrun)."""
+    l'heuristique chp×heat_factor (cf. apply_measured_mustrun).
+
+    `avail_profile` (opt-in) : {tech: {mois: fraction}} de `blocks.monthly_avail` — la forme SAISONNIÈRE
+    de disponibilité thermique. Sans lui les voisins passent `avail=None`, donc 1.0 partout, et le modèle
+    peut dépenser en juin une disponibilité de novembre : mesuré sur le charbon+lignite allemand, 7 à 12 GW
+    ne sont jamais livrés même aux 100 heures les plus chères de l'année, et ce dans CHAQUE année. Les
+    techs absentes du profil gardent 1.0, y compris les tranches DSR ajoutées plus bas."""
     st = apply_water_value(stack.assign(srmc_eur_mwh=srmc(stack, prices).to_numpy()))
     if wv_delta is not None:
         from ..hydro.synthesis import shift_hydro_bids
@@ -124,5 +131,14 @@ def nb_window(zone, stack, nl, res, prices, T, wv_delta=None, mustrun_floors=Non
     st = pd.concat([st, dsr_tranches(zone, float(w["load_mw"].max()))], ignore_index=True)
     budget = float(res.reindex(T).fillna(0).sum()) if len(res) else 0.0
     caps = {"hydro_reservoir": budget} if budget > 0 and (st["tech"] == "hydro_reservoir").any() else {}
+    av = None
+    if avail_profile:
+        months = pd.DatetimeIndex(T).month
+        a = np.ones((len(st), len(T)))
+        for i, tech in enumerate(st["tech"].to_numpy()):
+            prof = avail_profile.get(tech)
+            if prof:
+                a[i, :] = [prof.get(int(m), 1.0) for m in months]
+        av = xr.DataArray(a, coords=[("unit", st["unit_id"].to_numpy()), ("time", T)])
     return {"stack": st, "demand": w["load_mw"].to_numpy(), "res_pot": w["musttake_res_mw"].to_numpy(),
-            "avail": None, "energy_caps": caps}
+            "avail": av, "energy_caps": caps}
