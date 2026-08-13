@@ -58,3 +58,9 @@ venv/
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+
+# --- scratchpads: probes, A/B arms, gate parquets, one-off diagnostics -------
+# Never committed. Unanchored so it matches at any depth (dispatch_model/scratchpad/
+# today, any future module's too). These hold multi-hundred-MB gate outputs and
+# throwaway scripts whose conclusions belong in DECISIONS.md, not in history.
+scratchpad/
