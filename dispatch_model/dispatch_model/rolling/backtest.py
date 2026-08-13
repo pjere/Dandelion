@@ -267,9 +267,12 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         # ladders, BTM-NL, participation ceilings), the re-gate PASSED decisively: FR 530/510 strict
         # and 1042/1066 boundary (essentially exact), CH scarcity 248→39/52 and IT 192→34/43 (the
         # excluded PSP was exactly their over-print), no annihilation (FR keeps 530 vs the 3 of the
-        # 2024 probes). Known residual: discharge is still frictionless — observed PSP discharge
-        # utilization is only 32–54 % in the top price quartile (psp_envelopes) and the discharge-side
-        # derate is NOT yet encoded, so model peaks are shaved slightly too hard (DE 44 vs 162 h >200).
+        # 2024 probes). Discharge carries only the 0.5 €/MWh VOM — deliberately: a discharge-side
+        # friction was investigated and REFUTED (FLEX_CALIBRATION_2024.md "PSP discharge friction:
+        # REFUTED"). The "32–54 % top-quartile utilization" was a composition artifact of a
+        # heterogeneous fleet — observed top-hour discharge runs 0.93–1.12× the envelope, and a
+        # 0–1000 €/MWh VOM sweep left h>200 unchanged — so the missing >200 h sit with the top of
+        # the merit order and the step-vii markup, not with storage.
         if enable_storage or (enable_storage is None and flex_on):
             from ..flexibility.storage import storage_spec
             from ..io.entsoe_hist import load_installed_capacity
