@@ -121,6 +121,22 @@ arbitrage and coarse neighbour-hydro budgets are refinements.
   correctly, being the marginal unit. Gate effect: pooled |mean err| 11.35 -> **9.96**, log_err 0.667 ->
   **0.654**, DE_LU 2022 -95.3 -> **-63.5** with its >200 EUR/MWh hours 1487 -> 2998 against 4642 observed,
   and flat log_err in 2019/2024/2025 where the test declines to act.
+- **Feed-coverage repair** (`io/ch_hydro.py`): ENTSO-E series are not always complete, and the model had no
+  notion of it. Swiss run-of-river reads 1.95–2.27 TWh in 2019–2024 and **14.50 TWh in 2025** — new filers
+  plus a reclassification out of reservoir (13.9 → 9.9 TWh) — with declared capacity flat across the step
+  and a pre-2025 declaration that refutes itself (0.63 GW nameplate, 0.98 GW metered peak). ROR is
+  must-take and peaks on snowmelt, which is when Swiss prices go negative, so five sixths of the fleet was
+  missing exactly when it mattered: **15 modelled negative hours against 613 observed**, with a modelled
+  median of +22.35 €/MWh in the hours Switzerland actually cleared negative. Repaired by scaling the
+  metered series to the complete year (k = 7.07, capped at its p99 of 3.39 GW); the partial filers are
+  shape-representative — normalised monthly profiles correlate 0.81–0.90 with the complete year. Added to
+  must-take, **not** netted off load — the opposite of `gb_embedded`, because Swiss ROR is what spills in a
+  Swiss surplus, so netting it would create the surplus and then hide it. Gate: CH mean error +5.4 →
+  **−3.3** (2019 +5.8→+2.5, 2024 +13.3→+6.0, 2025 untouched), log_err 0.654 → 0.650, scarcity recall
+  38225 → 36956 against 34917; cost 0.54 €/MWh of pooled mean error, nearly all of it CH 2022 overshooting
+  to −16.8. A sweep of all 51 candidate coverage steps across every zone and technology found this to be
+  the only large one in a scored zone — see `DECISIONS.md` for the adjudication and for the RES zero-bid
+  sink, which is measured and held OFF pending a depth fix.
 - Static reserve margin (no reserve co-optimisation); no intra-zonal grid; no strategic bidding.
 
 ## Backtest — full-year 2019 (annual baseload = §8 acceptance)
