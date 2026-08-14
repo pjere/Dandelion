@@ -750,3 +750,106 @@ being over-scarce in 2022 while DE_LU is under-scarce is a separate, older defec
 * **The low tail is untouched and still wrong**: negatives 2922 → 2797 against 6136 observed, with ES at
   5 against 803 and CH at 15 against 613. Those two zones have no negative-price mechanism at all and
   remain the largest open item after this.
+
+## Le run-of-river suisse etait sous-declare jusqu'a la correction de flux 2025 (2026-08-13)
+
+The ENTSO-E Swiss run-of-river series reads **1.95 / 1.85 / 2.13 / 2.27 TWh in 2019/2022/2023/2024 and
+then 14.50 TWh in 2025**. Swiss reservoir moves the other way across the same boundary (13.9 → 9.9 TWh), so
+the step is partly new filers and partly a reclassification between the two hydro categories. It is not
+water: `entsoe_installed_capacity` is flat across it, and the pre-2025 declaration is self-refuting — 0.63
+GW of nameplate against a metered series peaking at 0.98 GW.
+
+Run-of-river is must-take, uncurtailable and peaks on snowmelt, and Swiss negative prices ARE a snowmelt
+phenomenon (observed CH negatives cluster April–July, 09:00–14:00). With five sixths of the fleet missing
+the zone had no surplus to price: **15 modelled negative hours against 613 observed**, and in the hours
+Switzerland really did clear negative the model's median was **+22.35 €/MWh** — nowhere near its floor.
+CH was not floored, it was empty.
+
+### The anchor is the same series in the year it is complete
+
+**A residual-based reconstruction was built first and it was wrong.** Using the zone's balance residual
+(load − generation − net imports, 2.10 GW mean on 2024) looked reasonable — the residual is ROR-shaped
+(monthly corr +0.778 against ROR, +0.328 against reservoir; day/night 0.93 against ROR's 1.00). But the
+residual collapses from 18.5 to 5.6 TWh across the same 2024/2025 boundary, so it was tracking **reporting
+completeness, not hydrology**. It produced a 3× swing between adjacent years and a 4.99 GW peak, 36 % above
+anything the Swiss fleet has ever delivered. Recorded because it is a convincing wrong answer.
+
+The 2025 feed supplies both level and envelope, and the assumption it rests on is stated rather than
+assumed: **the partial filers are shape-representative.** Every partial year's normalised monthly profile
+correlates **0.81–0.90** with the complete year's, and all peak in June–July and trough in February–March.
+So they are a scaled-down sample of the same fleet on the same freshet, and their own year-to-year
+variation carries that year's hydrology.
+
+    reconstructed = metered × k,   k = 14.50 / 2.05 = 7.07,   capped at the 2025 p99 of 3.39 GW
+
+The cap matters: 2024's metered peak is 0.98 GW against 0.46–0.49 GW in the other partial years, so a bare
+scale factor would assert more capacity than the fleet possesses.
+
+Added to **must-take**, not netted off load — the opposite of `gb_embedded`, deliberately. Britain's
+residual is netted off demand precisely so it cannot price, because heat-led embedded CHP does not respond
+to price. Swiss ROR is what spills in a Swiss surplus; netting it off load would create the surplus and
+then hide it.
+
+### Measured
+
+| arm | \|mean err\| | log_err | negatives (obs 6136) | >200 (obs 34917) |
+|---|---|---|---|---|
+| previous shipped | **9.96** | 0.654 | 2797 | 38225 |
+| + CH ROR | 10.50 | **0.650** | 2879 | **36956** |
+
+CH's level improves where the repair bites — **2019 +5.8 → +2.5, 2024 +13.3 → +6.0**, pooled +5.4 → −3.3 —
+and 2025 is correctly untouched because its feed is already complete. `log_err` and scarcity recall both
+improve. The cost is 0.54 €/MWh of pooled mean error, and it is **almost entirely one cell: CH 2022
+overshooting to −16.8 from +7.5**. Adding 1.29 GW of free must-take to a zone clearing near 280 €/MWh in
+the crisis year moves it hard. **Open**: a correct repair should not move one year by 24 €/MWh, and the
+untouched reservoir side of the same reclassification (13.9 → 9.9 TWh, i.e. CH's *dispatchable* stack is
+also mis-stated pre-2025) is the leading suspect.
+
+### The sweep behind "CH only"
+
+Every (zone, sub_key) year-on-year step above 1.8× was swept and classified against declared capacity, the
+zone's generation total, boundary timing, sibling offsets and reporting-hour counts. Of **51 candidate
+steps**, adjudication gave: 5 confirmed real by a matching capacity move, 3 closures (PT hard coal 2021,
+GB hard coal 2024, IT_CSUD waste), 3 reclassifications (CZ coal→solar 96 % mirrored, IT_CALA, DK_2), 2
+physical ramps, 1 coverage loss (IT_CNOR fossil oil, reporting hours 8039 → 114), 1 data step at 1 January
+(**FR hard coal 2022→23**, capacity flat — France is scored, and FR coal *also* steps ×7.76 in 2024→25 with
+capacity flat, so the French coal series moves twice without its fleet changing), and 16 unresolved.
+
+**There is no general feed-completeness epidemic.** Only 6 of the 26 unresolved sit in scored zones and 4
+of those are sub-TWh series that are never marginal. The 16 unresolved mostly show `jump ≈ 1.0` and no
+ramp, no sibling mirror — ordinary variation in small plant that the 1.8× threshold was too tight for, so
+the sweep's false-positive rate at that threshold is high. That is why this ships as a targeted repair
+keyed on `_COVERAGE_FIXED` rather than as a general coverage-factor mechanism. `scratchpad/` holds the
+sweep and the adjudicator.
+
+## Le rung RES a exactement zero est un puits de curtailment gratuit — MESURE, TENU (2026-08-13)
+
+`res_schemes._zone_tranches` now reprices any scheme tranche recorded at exactly 0.00 to −0.01, **behind
+`DISPATCH_NO_ZERO_RES_BID`, default OFF**. The mechanism is real: the LP curtails the least-negative
+tranche first, so a rung at exactly zero is marginal for every surplus that fits inside it and pins the
+dual at exactly 0.000. Spain's merchant rung holds 38 % of RES at 0.00 against rungs of −1.01/−5.80 below,
+so the surplus fitted inside the sink in 91–94 % of hours: **1513 pooled hours at exactly zero and zero
+hours below −0.05**, against 803 observed negatives. It leaked into Portugal, whose 186 "negatives" were
+all exactly −0.001 — the `_EPS_FLOW` wheeling penalty on Spain's zero. This repo already fixed it for
+France (`mer_bid = −0.01`, with the same rationale) and the fix never reached the other zones.
+
+**Held anyway, because it moves nothing economic.** With CH ROR in place, enabling it leaves `|mean err|`
+at 10.50 and `log_err` at 0.650 — identical to three digits — while adding 2678 negative hours. It flips
+signs at 0.01 €/MWh. It also buys false positives: **ES 1224 against 803 observed, PT 859 against 396,
+IT_NORTH 100 against 0**, while FR (549/893), DE_LU (667/1288) and CH (190/613) still undershoot — the
+right total from the wrong parts.
+
+**What it exposed is the real defect: the ladders are too coarse to have a negative-price distribution.**
+The model can only print AT a rung, and the observed negative mass falls between them:
+
+| zone | rungs | observed negatives strictly between rungs |
+|---|---|---|
+| ES 2024 | [−1.01, 0.00] | 220/247 (89 %) |
+| CH | [−50.0, 0.00] | 264/292 (90 %) |
+| FR | [−40, −5, 0] | 211/352 (60 %) |
+| DE_LU | [−300, −20, −2] | 142/457 (31 %) |
+
+DE_LU has the finest ladder and is the only zone whose median negative depth is right (−2.00 against
+−2.01). Depth, not sign, is what the markup layer and the projection consume. Ship this together with a
+depth fix — sub-tranche interpolation *within* the existing endpoints, which uses no observed-price
+information — rather than alone.

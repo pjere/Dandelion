@@ -19,6 +19,8 @@ editable `dispatch_res_schemes` tab. See docs/RES_BIDDING_DESIGN.md.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from .lp.multi_zone import solve_multizone
@@ -85,15 +87,65 @@ def _neg_runlength(price: np.ndarray) -> np.ndarray:
     return out
 
 
+#: Bid for a merchant (post-support) RES tranche that the workbook records as exactly 0.00.
+#:
+#: A TRANCHE AT EXACTLY ZERO IS A ZERO-COST CURTAILMENT SINK, and it makes negative prices unreachable no
+#: matter how large the surplus. The LP minimises `sum(floor_i * res_i)`, so it curtails the LEAST negative
+#: tranche first; while that tranche is partially curtailed it is marginal and the balance dual is exactly
+#: its bid. If that bid is 0.00, the zone prints exactly 0.000 for every surplus that fits inside the
+#: tranche, and only jumps to the next rung once the tranche is exhausted.
+#:
+#: Measured on Spain, whose merchant rung holds 38 % of RES at 0.00 while the rungs below it sit at -1.01
+#: (2024) and -5.80 (2025): the modelled surplus is 4.2-4.7 GW against a merchant volume of ~7.2 GW, so it
+#: fits inside the sink in 91-94 % of hours. An LP sweep shows the discontinuity exactly — curtailment of
+#: 0 %, 5 %, ... 37.9 % of RES all price at -0.000, and 38.1 % jumps straight to -1.010. The result was
+#: **1513 pooled hours at exactly zero and ZERO hours below -0.05**, against 803 observed negative hours.
+#:
+#: It also leaked across the border: all 186 Portuguese "negative" hours were exactly -0.001, the
+#: `_EPS_FLOW` wheeling penalty on Spain's zero — Portugal exported into the Spanish zero-sink rather than
+#: curtailing at home, despite carrying a -10.00 ladder of its own.
+#:
+#: THIS REPO ALREADY KNEW, for France. `flexibility.trajectories` sets `mer_bid = -0.01` and says why:
+#: "merchant (post-support) has no subsidy: it curtails just BELOW zero (imbalance/shutdown micro-costs)
+#: ... a bid of exactly 0.0 would absorb the knife-edge surplus without ever printing negative". That fix
+#: reached FR alone, through `apply_oa_ladder`, because only FR carries the OA/CR schemes it repriced. The
+#: value here is that same documented constant, not a number fitted to the gate.
+#:
+#: HELD OFF BY DEFAULT, and the measurement is why. Removing the sink moves the negative-hour COUNT from
+#: 2797 to 5350 against 6136 observed — but it moves nothing else: pooled |mean err| 10.0 -> 10.0 and
+#: log_err 1.55 -> 1.55, because 493 Spanish hours merely shifted from exactly 0.00 to -0.014. The sign
+#: flips; the economics do not. It also buys false positives: IT_NORTH prints 100 negative hours in 2025
+#: against ZERO observed in every year, ES overshoots its observed count 1.96x in 2024, PT 2.20x.
+#:
+#: The measurement's real value is what it exposed. With the sink gone the model's negative tail is a
+#: SPIKE AT THE SHALLOWEST BID rather than a distribution — ES median -0.01 against -0.10 observed, CH
+#: -0.01 against -6.83, and CH's minimum -0.01 against an observed -427.51. Depth is the defect; the sign
+#: was only hiding it. Enable with `DISPATCH_NO_ZERO_RES_BID=1` to reproduce, and ship it together with a
+#: depth fix rather than alone.
+_MERCHANT_BID = -0.01
+
+
+def _no_zero_bid() -> bool:
+    """Read at call time so an A/B arm can flip it without reimporting."""
+    return os.environ.get("DISPATCH_NO_ZERO_RES_BID", "0") not in ("0", "false", "False")
+
+
 def _zone_tranches(zone, schemes, res_bid_z, n) -> list[dict]:
     """Base tranches for a zone: floored zones (regulatory 0) → one tranche at 0; else scheme tranches
-    (falling back to a single merchant tranche at the zone's res_bid)."""
+    (falling back to a single merchant tranche at the zone's res_bid).
+
+    A scheme tranche recorded at exactly 0.00 is repriced to `_MERCHANT_BID`. The REGULATORY floor above is
+    deliberately left at exactly 0 — ES before Dec-2023 and IT-North before the Jan-2025 TIDE reform could
+    not print negative at all, and that is a market rule, not a bid.
+    """
     if res_bid_z is not None and res_bid_z >= 0:                 # IT/ES pre-reform: no negative prices
         return [{"scheme": "floored", "share": 1.0, "floor": np.zeros(n), "trigger": 0}]
     trs = schemes.get(zone) or [{"scheme": "merchant", "share": 1.0, "floor": float(res_bid_z or -10.0),
                                  "trigger": 0}]
     return [{"scheme": t["scheme"], "share": t["share"], "trigger": t["trigger"],
-             "floor": np.full(n, float(t["floor"]))} for t in trs]
+             "floor": np.full(n, _MERCHANT_BID if (_no_zero_bid() and float(t["floor"]) == 0.0)
+                              else float(t["floor"]))}
+            for t in trs]
 
 
 def solve_with_triggers(times, zones_data, borders, ntc, schemes,

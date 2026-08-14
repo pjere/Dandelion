@@ -500,5 +500,12 @@ def neighbour_netload(config: Config, zone: str, year: int) -> pd.DataFrame:
     # load, because TenneT reports NL's solar fleet under `Other` and leaves `Solar` a 0.4 GW stub.
     from ..io.unclassified_gen import apply_to_netload as apply_unclassified
     df = apply_unclassified(config, zone, year, df)
+    # CH only: ~11 TWh of un-metered run-of-river. The ENTSO-E Swiss feed reports 2.3 TWh against a fleet
+    # nearer 17-19, and its own declaration betrays the partial coverage (metered peak 0.978 GW against a
+    # declared 0.63 GW nameplate). ROR is must-take, uncurtailable and peaks on snowmelt — which is when
+    # Swiss prices go negative — so without it CH has no surplus at all: 15 modelled negative hours
+    # against 613 observed. See `io.ch_hydro`.
+    from ..io.ch_hydro import apply_to_netload as apply_ch_ror
+    df = apply_ch_ror(config, zone, year, df)
     df["netload_mw"] = (df["load_mw"] - df["musttake_res_mw"])
     return df.dropna(subset=["load_mw"]).reset_index()
