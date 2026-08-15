@@ -853,3 +853,85 @@ DE_LU has the finest ladder and is the only zone whose median negative depth is 
 −2.01). Depth, not sign, is what the markup layer and the projection consume. Ship this together with a
 depth fix — sub-tranche interpolation *within* the existing endpoints, which uses no observed-price
 information — rather than alone.
+
+## Contrainte jointe de transfert par zone — ESSAYÉE, MESURÉE, REJETÉE (2026-08-15)
+
+Four gate runs, a correct diagnosis, a physically-motivated fix, and it does not work. Recorded because
+the reasoning is convincing all the way to the measurement, and the next person to reach for it deserves
+the numbers rather than the argument.
+
+### The diagnosis, which still stands
+
+`flow_derived_ntc` bounds a zone's simultaneous export by scaling EVERY border by one coincidence factor
+= p99.5(total simultaneous export) / Σ(per-border p99.5). That is a **box approximation to a simplex**: it
+forbids one corridor running at its own revealed capability while the others idle, and only touches the
+true constraint at a corner. The fair form of "these corridors share a limit" is a constraint on the SUM.
+
+Measured on IT-North, whose internal NORD→CNOR corridor carries **91 % of its exports** and is
+**anti-correlated (−0.081)** with the rest: own p99.5 = 4210 MW, derated to **1843**, and observed flow
+exceeds that in **41.8 % of 2024 hours**. Northern Italy is not competing for one export budget — it is
+**transiting**: in its top-100 export hours it imports **6470 MW** across the Alps while exporting
+**4146 MW** south, and it does both at once in 71 % of all hours. Germany is the opposite and is the case
+the factor was built for: every corridor positively correlated (+0.08…+0.70), Σp99.5 20.0 GW against
+13.4 GW simultaneous. **The factor is right for Germany and wrong for Italy, and the correlation sign is
+the discriminator.**
+
+### The fix, and what it measured
+
+A per-zone row in `lp.highs_solver._build`, `Σ_w f_{z→w,t} ≤ export_cap_z`, carried in `zones_data` exactly
+as `energy_caps` is (so no signature changes and `multi_zone.py` untouched), with the coincidence derating
+switched off underneath it. Then a symmetric import row, then a version restricted to borders with no
+published NTC. All three:
+
+| arm | \|mean err\| | log_err | IT_NORTH err | IT_NORTH log | >200 (obs 34917) |
+|---|---|---|---|---|---|
+| shipped | **10.50** | 0.650 | **−7.9** | 0.417 | 36956 |
+| joint export only | 11.71 | 0.630 | −9.1 | 0.406 | 35558 |
+| + symmetric import row | 11.71 | **0.628** | −9.1 | 0.403 | 35862 |
+| + restricted to unpublished borders | 11.56 | 0.629 | **−9.1** | 0.403 | **35394** |
+
+**The target zone gets WORSE by 1.2 €/MWh, identically in all three.** Freeing NORD→CNOR from 1843 to
+4210 MW does not move Italy's price level at all, which means that corridor was never the binding
+constraint on IT-North's price — despite genuinely being over-derated.
+
+### Two explanations offered and both refuted by their own follow-up
+
+1. *"The export row is asymmetric — turning off the derating loosened imports too."* The symmetric import
+   row was built to test it and moved essentially nothing (11.85 → 11.71, log_err 0.630 → 0.628). The
+   import bound almost never binds, because a zone's imports are already limited by its neighbours' export
+   rows.
+2. *"The damage comes from the eleven interior borders where the factor was doing real work."* Restricting
+   the rows to unpublished borders was built to test it and also moved essentially nothing (11.71 → 11.56,
+   log_err 0.628 → 0.629). Whatever degrades levels here is **not scope-dependent**.
+
+A third claim died earlier in the same investigation: IT-North's Alpine borders were never affected at
+all. `hourly_ntc` overrides the derived scalar wherever ENTSO-E publishes a day-ahead series, so
+IT_NORTH↔CH stayed 1810/2748 and IT_NORTH↔FR 1995/2622 in every arm. Only ONE IT-North border ever moved.
+
+### What is worth keeping
+
+* **`flow_derived_ntc` takes p99.5 of PHYSICAL flow as a COMMERCIAL limit.** CH→IT's published day-ahead
+  median is 2738 against a physical p99.5 of 4210. Physical flow contains loop flows and transit that no
+  participant can schedule, so the derived scalar overstates commercial capability wherever it is used —
+  and the coincidence factor has been partly compensating for that overstatement, which is why removing it
+  loosens so much so widely. **This is a defect in the derivation itself and is independent of how the
+  simultaneity is expressed.**
+* The joint rows do buy a small real gain in coupling SHAPE — pooled log_err 0.650 → 0.629, better in 6 of
+  8 zones, and 2024 improves on both metrics (8.44 → 7.74 and 0.808 → 0.791) — at a mean-error cost
+  concentrated in 2022 (23.36 → 27.32) and 2025 (8.55 → 9.93). Not enough to ship, but the mechanism is
+  sound and is preserved behind `DISPATCH_JOINT_EXPORT` (default off, 13 tests) should the level problem
+  ever be understood.
+* **IT-North's real error is most likely its STACK, not its borders.** The workflow that opened this line
+  measured `EFF_RANGE["gas"]` topping at 0.58 against an Italian revealed marginal heat rate of 0.45–0.53,
+  so roughly 6 of 18 GW of Italian gas is offered 13–18 €/MWh too cheap. That is the lead to pick up next,
+  and it is a different file.
+
+### The methodological note, which is the expensive part
+
+Three of this investigation's mechanisms were diagnosed correctly and none of the fixes helped. The
+pattern across this whole series is now unmistakable: **changes that improve the SHAPE of the price
+distribution keep degrading its LEVEL**, and it has happened with the unclassified must-run half, the
+lignite fuel correction, the CH run-of-river repair and all three joint-transfer arms. That is not four
+coincidences. It says the model carries a systematic level bias that shape-improving changes expose rather
+than cause, and that chasing it one mechanism at a time will keep producing this result. Finding it is
+worth more than the next border fix.

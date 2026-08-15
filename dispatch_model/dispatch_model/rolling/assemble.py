@@ -157,6 +157,99 @@ def hourly_ntc(config, year: int, default: dict | None = None) -> dict:
     return out
 
 
+def joint_export_enabled() -> bool:
+    """Opt-in for the per-zone simultaneous-export row (`lp.highs_solver`). Read at each call site."""
+    import os
+    return os.environ.get("DISPATCH_JOINT_EXPORT", "0") not in ("0", "false", "False")
+
+
+def published_directions(config: Config, year: int) -> set:
+    """→ {(model_zone_a, model_zone_b)} directed pairs that carry a PUBLISHED day-ahead NTC series.
+
+    `hourly_ntc` overrides the derived scalar wherever such a series exists, so those directions already
+    carry a commercial authority and must be left out of the joint rows — see `zone_transfer_caps`.
+    """
+    import sqlite3
+    con = sqlite3.connect(config.resolve(config.section("data")["sqlite_path"]))
+    try:
+        df = pd.read_sql("SELECT DISTINCT series_key FROM entsoe_ntc WHERE ts_utc >= ? AND ts_utc < ?",
+                         con, params=(f"{year}-01-01", f"{year + 1}-01-01"))
+    except Exception:                                    # noqa: BLE001 — no table → nothing published
+        return set()
+    finally:
+        con.close()
+    owner = {c: z for z in {zz for bd in NTC for zz in bd} for c in constituents(z)}
+    out = set()
+    for k in df["series_key"]:
+        a, _, b = str(k).partition(">")
+        za, zb = owner.get(a.strip()), owner.get(b.strip())
+        if za and zb and za != zb:
+            out.add((za, zb))
+    return out
+
+
+def zone_transfer_caps(config: Config, year: int) -> dict:
+    """→ {zone: {"export": MW, "import": MW, "borders": [names]}} for the joint transfer rows.
+
+    A zone's borders share internal network elements, so what limits simultaneous transfer is a shared
+    element and the constraint belongs on the SUM. `flow_derived_ntc` approximates that with one
+    coincidence factor per zone applied to every border, which is a BOX approximation to a SIMPLEX: it
+    forbids one corridor running at its own revealed capability while the others idle. Measured on
+    IT-North, whose NORD->CNOR corridor carries 91 % of its exports and is ANTI-correlated with the rest
+    (p99.5 4210 MW, derated to 1843, exceeded in 41.8 % of 2024 hours) — northern Italy imports 6470 MW
+    across the Alps while exporting 4146 MW south in its top-100 export hours, so it TRANSITS rather than
+    competing for one budget.
+
+    RESTRICTED TO BORDERS WITH NO PUBLISHED NTC, and that restriction is the whole lesson of the wide
+    version. `hourly_ntc` already overrides the derived scalar wherever ENTSO-E publishes a day-ahead
+    series, so IT-North's Alpine borders never moved at all when the coincidence factor came off
+    (IT_NORTH-CH stayed 1810/2748, IT_NORTH-FR 1995/2622). What DID move was eleven unrelated interior
+    borders that have no published series — FR-BE +2010/+1856, FR-DE_LU +1977, DE_LU-PL_CZ +1752,
+    FR-GB +1771 — where the coincidence factor was doing legitimate work. The wide version therefore
+    improved coupling SHAPE (pooled log_err 0.650 -> 0.628, better in 5 of 8 zones and all 4 years, best
+    scarcity recall of any arm) while degrading LEVELS (|mean err| 10.50 -> 11.71), and IT-North itself
+    got cheaper rather than dearer because north-west Europe loosened around it.
+
+    So the rows bound exactly the residue that has no authority of its own, and their RHS is the p99.5 of
+    the simultaneous total over THOSE legs only. Use with `flow_derived_ntc(..., coincident=False)`.
+    """
+    import sqlite3
+    con = sqlite3.connect(config.resolve(config.section("data")["sqlite_path"]))
+    try:
+        df = pd.read_sql("SELECT ts_utc, series_key, value FROM entsoe_flows "
+                         "WHERE ts_utc >= ? AND ts_utc < ?",
+                         con, params=(f"{year}-01-01", f"{year + 1}-01-01"))
+    finally:
+        con.close()
+    if df.empty:
+        return {}
+    df["ts"] = pd.to_datetime(df["ts_utc"], utc=True)
+    piv = df.pivot_table(index="ts", columns="series_key", values="value").fillna(0.0)
+    pub = published_directions(config, year)
+
+    def flow_series(x, y):
+        cols = [f"{i}>{j}" for i in constituents(x) for j in constituents(y) if f"{i}>{j}" in piv.columns]
+        return piv[cols].sum(axis=1) if cols else pd.Series(0.0, index=piv.index)
+
+    out: dict = {}
+    for z in {zz for bd in NTC for zz in bd}:
+        neigh = [b for (a, b) in NTC if a == z] + [a for (a, b) in NTC if b == z]
+        ex_w = [w for w in neigh if (z, w) not in pub]        # unpublished EXPORT directions only
+        im_w = [w for w in neigh if (w, z) not in pub]        # unpublished IMPORT directions only
+        ex = sum((flow_series(z, w) for w in ex_w), start=pd.Series(0.0, index=piv.index))
+        im = sum((flow_series(w, z) for w in im_w), start=pd.Series(0.0, index=piv.index))
+        e = float(ex[ex > 0].quantile(0.995)) if (ex > 0).sum() > 100 else None
+        i = float(im[im > 0].quantile(0.995)) if (im > 0).sum() > 100 else None
+        if e is None and i is None:
+            continue
+        names = {f"{a}>{b}" for (a, b) in NTC
+                 if (a == z and b in ex_w) or (b == z and a in ex_w)
+                 or (b == z and a in im_w) or (a == z and b in im_w)}
+        out[z] = {"export": e, "import": i, "borders": sorted(names),
+                  "export_legs": sorted(ex_w), "import_legs": sorted(im_w)}
+    return out
+
+
 def slice_ntc(ntc: dict, border, index) -> tuple:
     """(fwd, bwd) for one border over `index` — arrays where an hourly series exists, scalars otherwise.
 

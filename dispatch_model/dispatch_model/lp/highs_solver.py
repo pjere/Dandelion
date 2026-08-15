@@ -634,6 +634,87 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
             row_tags.append(("energy cap", xrow, xrow + 1))
             xrow += 1
 
+    # per-zone SIMULTANEOUS-EXPORT rows: Σ_w f_{z→w,t} ≤ export_cap_z  (opt-in, absent ⇒ no rows at all)
+    #
+    # A zone's borders are not independent wires — they share internal network elements, so what limits
+    # simultaneous export is a shared element and the constraint is naturally on the SUM. `flow_derived_ntc`
+    # approximates that by scaling every border by one coincidence factor, which is a BOX approximation to
+    # a SIMPLEX: it forbids feasible points (one corridor at full revealed capability while the others idle)
+    # and only touches the true constraint at a corner. Measured on IT-North, whose NORD→CNOR corridor
+    # carries 91 % of its exports and is ANTI-correlated with the others: p99.5 = 4210 MW, derated to 1843,
+    # and observed flow exceeds that in 41.8 % of 2024 hours. Northern Italy imports 6470 MW across the Alps
+    # while exporting 4146 MW south in its top-100 export hours — it is TRANSITING, not competing for one
+    # export budget, so a coincidence derating throttles the wheeling the zonal split exists to represent.
+    #
+    # Expressing it as a row instead lets each border keep its own revealed capability while the zone's
+    # total stays physically bounded. It is also the closer analogue of flow-based coupling, where the
+    # market is constrained by `PTDF · net_positions ≤ RAM` — a linear combination of NET POSITIONS, never
+    # a single border flow. Its dual is the shadow price of the zone's export capability.
+    #
+    # RESTRICTED to the legs named in `zones_data[z]["export_legs"]` (None ⇒ all). Borders with a PUBLISHED
+    # day-ahead NTC already carry a commercial authority — `hourly_ntc` overrides the derived scalar there —
+    # so including them would let published flows consume a budget meant to bound the residue. Applying the
+    # rows to every border instead improved coupling shape (log_err 0.650 -> 0.628) but degraded levels
+    # (|mean err| 10.50 -> 11.71), because it also replaced the coincidence factor on eleven interior
+    # borders where that factor was doing legitimate work. See `assemble.zone_transfer_caps`.
+    #
+    # Carried in `zones_data[z]` rather than a new argument, exactly as `energy_caps` is, so nothing in the
+    # call chain changes and `multi_zone.py` is untouched.
+    export_rows = {}
+    for z in zones:
+        cap = zones_data[z].get("export_cap")
+        if cap is None or not np.isfinite(float(cap)) or float(cap) <= 0:
+            continue
+        sel = zones_data[z].get("export_legs")             # neighbour zones this row bounds (None ⇒ all)
+        legs = []
+        for (a, b), nm in zip(borders, bnames):
+            fb, wb = flow_cols[nm]
+            if a == z and (sel is None or b in sel):
+                legs.append(fb)                            # fwd a→b is an export FROM a
+            elif b == z and (sel is None or a in sel):
+                legs.append(wb)                            # bwd b→a is an export FROM b
+        if not legs:
+            continue
+        rr = xrow + np.arange(n)
+        for base in legs:
+            rows.append(rr); cols.append(base + np.arange(n)); vals.append(np.ones(n))
+        row_lo.append(np.full(n, -_INF)); row_up.append(np.full(n, float(cap)))
+        export_rows[z] = xrow
+        row_tags.append(("export sum", xrow, xrow + n))
+        xrow += n
+
+    # ...and the mirror on IMPORTS: Σ_w f_{w→z,t} ≤ import_cap_z.
+    #
+    # The export row alone is ASYMMETRIC, and measurably so. `flow_derived_ntc` derated each direction by
+    # the EXPORTING zone's coincidence factor, so switching to `coincident=False` loosened every zone's
+    # IMPORT capability as a side effect: IT-North's inbound caps from CH and FR went 2469 -> 4210 and
+    # 2044 -> 3613, Switzerland could then push a whole corridor into Italy whenever it was not exporting
+    # elsewhere, and the zone the row was built to help got CHEAPER (mean error -7.9 -> -9.3), with CH
+    # dragged -3.3 -> -9.8 from the other side. The physics is symmetric — the shared internal elements
+    # that bound simultaneous export bound simultaneous import too — so the constraint must be.
+    import_rows = {}
+    for z in zones:
+        cap = zones_data[z].get("import_cap")
+        if cap is None or not np.isfinite(float(cap)) or float(cap) <= 0:
+            continue
+        sel = zones_data[z].get("import_legs")
+        legs = []
+        for (a, b), nm in zip(borders, bnames):
+            fb, wb = flow_cols[nm]
+            if b == z and (sel is None or a in sel):
+                legs.append(fb)                            # fwd a→b is an import INTO b
+            elif a == z and (sel is None or b in sel):
+                legs.append(wb)                            # bwd b→a is an import INTO a
+        if not legs:
+            continue
+        rr = xrow + np.arange(n)
+        for base in legs:
+            rows.append(rr); cols.append(base + np.arange(n)); vals.append(np.ones(n))
+        row_lo.append(np.full(n, -_INF)); row_up.append(np.full(n, float(cap)))
+        import_rows[z] = xrow
+        row_tags.append(("import sum", xrow, xrow + n))
+        xrow += n
+
     # balance RHS (equality: lower = upper = demand)
     dem = np.concatenate([zinfo[z]["demand"] for z in zones])
     row_lower = np.concatenate([dem] + row_lo)
@@ -647,7 +728,8 @@ def _build(times, zones_data, borders, ntc, res_bid, voll, price_floor, res_tran
         "n": n, "zones": zones, "ncol": ncol, "nrow": nrow,
         "col_cost": np.concatenate(col_cost), "col_lo": np.concatenate(col_lo), "col_up": np.concatenate(col_up),
         "row_lower": row_lower, "row_upper": row_upper, "coo": (R, C, V),
-        "bal_dual_ix": bal_dual_ix, "flow_cols": flow_cols, "ecap_rows": ecap_rows, "T": T,
+        "bal_dual_ix": bal_dual_ix, "flow_cols": flow_cols, "ecap_rows": ecap_rows,
+        "export_rows": export_rows, "import_rows": import_rows, "T": T,
         "gen_cols": gen_cols, "res_cols": res_cols, "ens_cols": ens_cols, "dump_cols": dump_cols,
         "row_tags": row_tags, "srmc_by_unit": srmc_by_unit, "res_schemes": res_schemes, "flex_cols": flex_cols,
         "flex_spec": flex,          # the input flex spec (params per zone) — for the F6 debug dump

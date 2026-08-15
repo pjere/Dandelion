@@ -319,7 +319,12 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     # PUBLISHED hourly day-ahead NTC where it exists, the flow-derived scalar elsewhere. A constant
     # cannot represent a border that closes: 13 of 16 measured directions reach 0 MW, and the old
     # scalar sat above the real p10 on ALL of them (see assemble.hourly_ntc).
-    ntc = hourly_ntc(config, year, default=flow_derived_ntc(config, year))
+    # With the joint export row on, the per-border COINCIDENCE derating comes off: the simultaneity it
+    # approximates is then enforced exactly, and applying both would constrain each zone twice.
+    from .assemble import joint_export_enabled, zone_transfer_caps
+    _joint = joint_export_enabled()
+    ntc = hourly_ntc(config, year, default=flow_derived_ntc(config, year, coincident=not _joint))
+    transfer_caps = zone_transfer_caps(config, year) if _joint else {}
     # regime-conditional caps: OPT-IN (`regime_ntc=True`), default OFF — REVERTED after the 2024
     # bisection. The measurement behind it is real (on surplus hours observed flows run at 0–60 % of
     # the p99.5 cap, at-cap 0–6 %, prices decoupled 34–100 %: the flow-based domain shrinks when RES is
@@ -370,6 +375,12 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
                               wv_delta=wv_levels.get(z, {}).get(wk),
                               mustrun_floors=nb_mustrun.get(z),
                               avail_profile=nb_avail.get(z))
+        for _z, _d in zd.items():                  # RHS of the joint transfer rows ({} ⇒ no rows at all)
+            _c = transfer_caps.get(_z) or {}
+            _d["export_cap"] = _c.get("export")
+            _d["import_cap"] = _c.get("import")
+            _d["export_legs"] = _c.get("export_legs")   # unpublished borders only — see zone_transfer_caps
+            _d["import_legs"] = _c.get("import_legs")
         borders = [b for b in NTC if b[0] in zd and b[1] in zd]
         # market rules effective in THIS window (IT/ES were floored at 0 before TIDE / Dec-2023)
         res_bid, price_floor = rules_at(wb, w0, list(zd))
