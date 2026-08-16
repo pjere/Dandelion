@@ -21,6 +21,17 @@ class _Cfg:
     pass
 
 
+@pytest.fixture(autouse=True)
+def _clear_cache():
+    """`ch_hydro._CACHE` is module-level and keyed on (db_key, zone, year). Every test here uses the same
+    `_Cfg` stub, so without this one test's patched series is served to the next from cache — which is a
+    silent cross-test dependency that only surfaces under `pytest-randomly`'s ordering (it did: a
+    no-evidence case was handed a cached 1400 MW series and failed one run in two)."""
+    ch._CACHE.clear()
+    yield
+    ch._CACHE.clear()
+
+
 def _patch(monkeypatch, per_year: dict[int, np.ndarray]):
     """`_tech_series` returns the metered series for a year; None where the year is absent."""
     def fake(config, zones, year, tech):
