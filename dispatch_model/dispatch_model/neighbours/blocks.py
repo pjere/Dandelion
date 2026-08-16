@@ -229,7 +229,15 @@ def _build_neighbour_stack(config: Config, zone: str, year: int, n_subblocks: in
     # aggregate zones sum nameplate across constituents; per-hour generation is summed for the fallback
     installed: dict = {}
     for z in zs:
-        for tech, mw in load_installed_capacity(config, z, year).items():
+        got = load_installed_capacity(config, z, year)
+        if not got:
+            # Italy publishes installed capacity at CONTROL-AREA level only — every bidding-zone request
+            # returns nodata — so its whole stack fell through the p99.9-of-generation fallback, which
+            # under-reads energy-limited plant worst (IT-North reservoir 1.54 GW against an allocated
+            # 4.18, PSP 2.52 against 5.18). See `io.area_capacity`; opt-in, {} when it has no evidence.
+            from ..io.area_capacity import allocated_capacity
+            got = allocated_capacity(config, z, year)
+        for tech, mw in got.items():
             installed[tech] = installed.get(tech, 0.0) + mw
     gen_by_tech = gen.groupby(["timestamp_utc", "tech"])["gen_mw"].sum().reset_index()
     rows = []

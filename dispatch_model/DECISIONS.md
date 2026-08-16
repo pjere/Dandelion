@@ -935,3 +935,74 @@ lignite fuel correction, the CH run-of-river repair and all three joint-transfer
 coincidences. It says the model carries a systematic level bias that shape-improving changes expose rather
 than cause, and that chasing it one mechanism at a time will keep producing this result. Finding it is
 worth more than the next border fix.
+
+## Capacité de zone de réglage allouée aux zones de marché — CONSTRUITE, MESURÉE, DÉSACTIVÉE (2026-08-16)
+
+### The data gap is real and is now closed
+
+`entsoe_installed_capacity` held **no rows for any Italian bidding zone**, so every Italian technology fell
+through `build_neighbour_stack`'s p99.9-of-generation fallback. That was not a missing ingestion: all seven
+IT zones had been requested and ENTSO-E returned `nodata` for each. Verified directly against the API —
+`IT` returns 18 technologies and 97.5 GW for 2024, while `IT_NORD` and `IT_CNOR` raise
+`NoMatchingDataError`. **Italy publishes installed capacity at control-area level only**, while its market
+is split into seven bidding zones.
+
+**161 rows of Italian control-area capacity (2018–2026) were ingested** and are now in the lake under
+`series_key='IT'`. The series is coherent and matches known history: gas 39.1 → 48.5 GW, hard coal 6.0 →
+4.7, solar 4.7 → 11.9 with the post-2024 acceleration, `Energy storage` first appearing in 2026. **That
+ingestion stands regardless of everything below** — it is a fact the lake now carries.
+
+Two findings from the same probe, both worth recording so nobody re-runs it:
+
+* **GB raises `NoMatchingDataError` at every level.** ENTSO-E publishes no British installed capacity at
+  all (12 rows in the lake, 2 chunks logged `nodata`). Not fixable by ingestion; GB's data legitimately
+  comes from Elexon, which the model already uses.
+* **CH returns only four technologies** (hydro ×3 + nuclear, 16.1 GW). That is precisely why Swiss solar
+  and wind are absent, independently confirming the `TYNDP_SOURCES.md` note, and it is the same root cause
+  as the run-of-river gap `io.ch_hydro` repairs.
+
+### The allocation, and why it is off
+
+`io/area_capacity.py` splits the control-area nameplate across bidding zones by **each zone's share of
+observed generation per technology** — so the total is externally anchored and only the split is inferred,
+which is strictly better than the status quo where both came from the same quantile.
+
+**It validates geographically**, which is the check that it is not merely reproducing the proxy it
+replaces. The 2024 shares put hard coal 63 % Sardinia / 30 % IT_CNOR / 1 % north (Fiume Santo and
+Torrevaldaliga; the northern plants had effectively stopped), geothermal 100 % IT_CNOR (Larderello),
+reservoir 92 % north and run-of-river 88 % north (the Alpine fleet), oil 50 % IT_CNOR + 41 % Sicily. Every
+one is where the plant physically is.
+
+It also **corrected a hypothesis recorded in this file's own investigation**: IT-North's 0.00 GW of
+modelled hard coal looked like a defect and is not one. Italian coal is southern and insular; the north
+really does have almost none. The quantile was right.
+
+Effect on the stack (IT-North 2024, dispatchable 22.33 → **29.57 GW**), concentrated exactly where a
+generation quantile under-reads energy-limited plant: reservoir 1.54 → 4.18, PSP 2.52 → 4.66, gas
+18.05 → 20.39 (after its 0.90 derating), coal 0.00 → 0.05.
+
+**And the gate says no:**
+
+| arm | \|mean err\| | log_err |
+|---|---|---|
+| shipped | **10.50** | **0.650** |
+| + allocation | 12.01 | 0.663 |
+
+IT-North goes −7.9 → **−15.5** and every zone drifts cheaper. The per-year split is the diagnosis:
+
+    IT_NORTH   2019  -2.1 -> -13.7   log 0.200 -> 0.532
+               2022  -3.0 -> -22.4   log 0.297 -> 0.290
+               2024 -14.6 -> -15.1   log 0.584 -> 0.559
+               2025 -11.8 -> -10.9   log 0.589 -> 0.466   <- better on BOTH
+
+**2024 and 2025 improve; 2019 and 2022 collapse.** The key's weakness is the cause: a zone gets none of a
+technology it did not generate, and in 2019/2022 Italian plant ran in different places, so the allocation
+hands IT-North capacity its dispatch of those years cannot justify — in the crisis year above all, which
+the model already struggles with.
+
+Left **off** (`DISPATCH_AREA_CAPACITY`, 7 tests). What is demonstrably right is narrower than what was
+built: the ingested data, the geographic validation, and the 2025 result. A better key would split by
+something that does not vanish when a plant is idle — per-zone REMIT nominal capacity would qualify, except
+that REMIT files the same Italian plant at both production-unit and generation-unit level with different
+EICs (35.1 GW of "IT-North gas" against a real ~18), and only 21 of 45 coded units have a capacity twin
+among the clean names, so it needs the unit hierarchy resolved first.

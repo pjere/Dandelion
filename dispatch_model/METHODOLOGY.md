@@ -137,6 +137,14 @@ arbitrage and coarse neighbour-hydro budgets are refinements.
   to −16.8. A sweep of all 51 candidate coverage steps across every zone and technology found this to be
   the only large one in a scored zone — see `DECISIONS.md` for the adjudication and for the RES zero-bid
   sink, which is measured and held OFF pending a depth fix.
+- **Italian nameplate** (`io/area_capacity.py`, opt-in, currently OFF): ENTSO-E publishes installed
+  capacity for Italy at CONTROL-AREA level only — every bidding-zone request returns `nodata` — so the
+  Italian stack runs on the p99.9-of-generation fallback, which under-reads energy-limited plant worst
+  (IT-North reservoir 1.54 GW against an allocated 4.18, PSP 2.52 against 5.18). The control-area series is
+  now ingested (161 rows, 2018-2026); allocating it to bidding zones by generation share validates
+  geographically but measured WORSE on the gate (|mean err| 10.50 -> 12.01), improving 2024/2025 and
+  collapsing 2019/2022 — see `DECISIONS.md`. GB publishes none at any level (Elexon is its source) and CH
+  publishes only four technologies, which is why Swiss solar/wind are absent.
 - Static reserve margin (no reserve co-optimisation); no intra-zonal grid; no strategic bidding.
 
 ## Backtest — full-year 2019 (annual baseload = §8 acceptance)
