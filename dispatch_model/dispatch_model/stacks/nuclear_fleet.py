@@ -11,10 +11,11 @@ commissioning year and capacity — and one rule per country:
 
 * **committed phase-out (DE, ES)** — reactors retire on the dates the phase-out plan fixes, regardless
   of age. Germany's `Atomgesetz` schedule ended 2023-04-15; Spain's 2019 protocol runs 2027→2035.
-* **lifetime extension (FR, BE, CH, NL)** — reactors run to `LIFETIME_YEARS` (60), the operating life
-  the long-term-operation programmes target. Units that closed EARLY for their own reasons carry an
-  explicit `closed` year (Belgium's Doel 3 / Tihange 2, France's Fessenheim), which always wins: a
-  historical fact outranks a rule.
+* **lifetime extension (BE, CH, NL)** — reactors run to `LIFETIME_YEARS` (60), the operating life the
+  long-term-operation programmes target. FR is instead handled by `glide_closures` — a partial oldest-first
+  phase-out at 60 y, the rest extended, gliding to ~52 GW in 2050 (RTE-N03-consistent). Units that closed
+  EARLY for their own reasons carry an explicit `closed` year (Belgium's Doel 3 / Tihange 2, France's
+  Fessenheim), which always wins: a historical fact outranks a rule.
 
 The output pre-fills the workbook, so every number stays user-editable — the rule is a *default*, not a
 constraint. `scripts/gen_nuclear_trajectory.py` writes it; the projection reads the sheet as before and
@@ -22,7 +23,14 @@ needs no code change.
 """
 from __future__ import annotations
 
-LIFETIME_YEARS = 60
+LIFETIME_YEARS = 60             # operating life for the neighbour extension countries (BE/CH/NL), and the
+#                                 fallback for any FR reactor `glide_closures` does not schedule. FRANCE is
+#                                 handled by the GLIDE (see `glide_closures`), NOT this flat rule: a strict 60
+#                                 forced the fleet to ~18 GW by 2050 (a phase-out no French scenario endorses,
+#                                 manufacturing loss-of-load against the PPE3-electrified demand), while a flat
+#                                 80 for all held it at ~74 GW — above even RTE's highest scenario. The glide
+#                                 partially phases out the oldest reactors at 60 y and extends the rest, landing
+#                                 ~52 GW in 2050 (RTE-N03-consistent, extension in lieu of SMRs).
 
 #: Countries whose fleet retires on a POLICY schedule rather than by age.
 PHASE_OUT_ZONES = ("DE_LU", "ES")
@@ -127,6 +135,47 @@ def newbuild_mw(zone: str, year: int, newbuild: list[tuple[str, float, int]] | N
     """Capacity from units not yet built: online once commissioned, and not subject to the lifetime
     rule inside any horizon we project (a 2038 unit reaches 60 years in 2098)."""
     return sum(mw for z, mw, com in (newbuild or []) if z == zone and int(com) <= year)
+
+
+def glide_closures(fr_units: list[tuple[float, int, int | None]],
+                   newbuild: list[tuple[str, float, int]] | None,
+                   target_2050: float = 52.0, hold_until: int = 2037,
+                   min_life: int = 60, horizon: int = 2050) -> list[tuple[float, int, int | None]]:
+    """Assign each schedulable FR reactor a closure year on a GLIDE PATH, returning `fr_units` with the
+    `closed` slot filled.
+
+    The TOTAL fleet (historic + `newbuild` EPR2) holds ~full until `hold_until`, then declines SMOOTHLY to
+    `target_2050` GW by `horizon`. Reactors are retired OLDEST-FIRST and never before `min_life` years — a
+    partial phase-out: the oldest units close at 60 y while the younger fleet is extended beyond 60 y (so the
+    ~52 GW 2050 level is reached by extension in lieu of RTE-N03's SMRs). Reactors an explicit closure already
+    fixes (Fessenheim) keep it and are excluded from the schedule; reactors never selected are EXTENDED past
+    the horizon (`horizon + 50`) — NOT left to the 60-year fallback, which would retire a young unit reaching
+    60 y before 2050 and undershoot the target.
+    """
+    fixed = [(mw, com, cl) for mw, com, cl in fr_units if cl is not None]
+    sched = sorted(((mw, com) for mw, com, cl in fr_units if cl is None), key=lambda t: t[1])  # oldest first
+    full_gw = sum(mw for mw, _ in sched) / 1e3
+
+    def epr2_gw(y: int) -> float:
+        return sum(mw for z, mw, com in (newbuild or []) if z == "FR" and int(com) <= y) / 1e3
+
+    def target_total(y: int) -> float:                         # target installed nuclear (GW), incl. EPR2
+        if y <= hold_until:
+            return full_gw + epr2_gw(y)
+        f = min((y - hold_until) / (horizon - hold_until), 1.0)
+        return full_gw + (target_2050 - full_gw) * f
+
+    closed: dict[int, int] = {}                                # sched index → closure year
+    remaining = full_gw
+    for y in range(hold_until + 1, horizon + 1):
+        while remaining + epr2_gw(y) > target_total(y) + 1e-6:
+            i = next((k for k, (mw, com) in enumerate(sched)
+                      if k not in closed and y - com >= min_life), None)
+            if i is None:
+                break                                          # nothing has reached min_life yet — hold
+            closed[i] = y
+            remaining -= sched[i][0] / 1e3
+    return fixed + [(mw, com, closed.get(k, horizon + 50)) for k, (mw, com) in enumerate(sched)]
 
 
 def trajectory(zones: tuple[str, ...], years: tuple[int, ...],

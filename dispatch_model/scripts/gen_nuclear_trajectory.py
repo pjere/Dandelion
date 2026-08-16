@@ -32,6 +32,21 @@ ZONES = ("FR", "BE", "CH", "ES", "DE_LU", "NL")
 cfg = load_config("config.yaml")
 wb_path = cfg.resolve(cfg.section("assumptions")["workbook"])
 
+# CLI knobs. Neighbours (BE/CH/NL) use nf.LIFETIME_YEARS (`--lifetime N` to override). FRANCE is GLIDED to a
+# 2050 target by partial oldest-first phase-out: `--fr-target-2050 G` (default 52, RTE-N03), `--fr-min-life Y`
+# (default 60 — the age at which a reactor becomes eligible to retire), `--fr-no-glide` to use the flat rule.
+def _argval(flag, default):
+    return type(default)(sys.argv[sys.argv.index(flag) + 1]) if flag in sys.argv else default
+
+if "--lifetime" in sys.argv:
+    nf.LIFETIME_YEARS = int(sys.argv[sys.argv.index("--lifetime") + 1])
+FR_TARGET = _argval("--fr-target-2050", 52.0)
+FR_MINLIFE = _argval("--fr-min-life", 60)
+FR_GLIDE = "--fr-no-glide" not in sys.argv
+print(f"neighbour life {nf.LIFETIME_YEARS} y | FR "
+      + (f"glide → {FR_TARGET} GW @2050 (oldest-first phase-out at {FR_MINLIFE} y)" if FR_GLIDE
+         else f"flat rule ({nf.LIFETIME_YEARS} y)"))
+
 # FR reactor-by-reactor: real capacity from the stack, commissioning year from the fleet registry
 stack = build_fr_stack(cfg)
 stack = stack[stack["tech"] == "nuclear"][["name", "capacity_mw"]]
@@ -66,6 +81,8 @@ except (ValueError, KeyError):
     print(f"\nEPR2 sheet absent — will create it with EDF's retained dates ({len(nb)} units)")
 newbuild = [(str(r.zone), float(r.capacity_mw), int(r.commissioning_year)) for r in nb.itertuples()]
 
+if FR_GLIDE:                       # France: partial oldest-first phase-out gliding to FR_TARGET GW @2050
+    fr_units = nf.glide_closures(fr_units, newbuild, target_2050=FR_TARGET, min_life=FR_MINLIFE)
 rows = nf.trajectory(ZONES, YEARS, fr_units=fr_units, newbuild=newbuild)
 tab = pd.DataFrame(rows).pivot_table(index="zone", columns="year", values="value")
 print("\ncap_nuclear_gw (policy default):")
