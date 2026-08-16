@@ -32,6 +32,13 @@
 **/reports/*.npz
 **/reports/figures/
 
+# ...with ONE exception. `markup_model.json` is generated, but it is not a report: `rolling/projection.py`
+# LOADS it, so it is an INPUT to every projected year and to every Monte Carlo trajectory. Untracked, a
+# fresh clone has no wedge at all — `apply_markup` falls back to clipped SMC — so the same code produces a
+# different pipeline depending on whose machine it runs on. It degrades gracefully (the fitted wedge is
+# worth ~1 % of MAE out-of-sample) which is exactly what makes the divergence easy to miss.
+!**/reports/markup_model.json
+
 # --- legacy per-model workbooks (superseded by the root scenarios.xlsx, ADR-5)
 #     and generated workbook templates. Keep only scenarios.xlsx.
 assumptions*.xlsx

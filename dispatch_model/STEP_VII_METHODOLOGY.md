@@ -103,6 +103,20 @@ reduction; out to 2040 it is meaningless — shrinking toward a 2019-calibrated 
 generated the negative markups. Forbidding it (`smc ≥ 0`) costs ~40 % of the in-sample R² and reveals the
 **honest** fit quality below. We take the honest, projectable model.
 
+### Refit 2026-08-16 — strength chosen out-of-sample, and the artifact is now tracked
+
+The wedge shipped until now was fitted on 2019/2022/2023 against an SMC that predated five dispatch
+changes, so it double-counted them and **overshot the recent years** (FR +6 → +17, ES +7 → +20, CH +6 →
++22). Refitted on the current SMC with 2024/2025 in the panel, and — the substantive change — its strength
+selected by **leave-one-year-out** rather than fit quality, because the projection applies it entirely out
+of sample. `shrink = 0` reproduces raw SMC exactly, and **every setting at 0.5 or above (including the old
+default) is worse out-of-sample than applying no wedge at all**. Selected: `alpha_frac=0.5, shrink=0.25`.
+
+The honest verdict on the mechanism: **the best projectable wedge is worth ~1 % of MAE** (LOYO 25.06 →
+24.80). It matters here only because it removes the stale wedge's damage — France 2024 MAE 22.2 → 16.7,
+2025 23.2 → 18.5. France's accuracy for a Monte Carlo is **MAE 17.6 €/MWh on a 59 €/MWh level (30 %)**,
+and that is in-sample for the dispatch too. See `DECISIONS.md`.
+
 ### Drivers (all projectable)
 
 | driver | captures | projectable because |

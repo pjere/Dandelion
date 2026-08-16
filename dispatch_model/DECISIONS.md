@@ -1006,3 +1006,70 @@ something that does not vanish when a plant is idle — per-zone REMIT nominal c
 that REMIT files the same Italian plant at both production-unit and generation-unit level with different
 EICs (35.1 GW of "IT-North gas" against a real ~18), and only 21 of 45 coded units have a capacity twin
 among the clean names, so it needs the unit hierarchy resolved first.
+
+## Le markup refité sur le SMC courant, et sa force choisie hors échantillon (2026-08-16)
+
+### The gate does not score what step vii ships
+
+`apply_markup` is imported by `rolling/projection.py` and **not** by `rolling/backtest.py`. So every
+`mean_err` in this file compares **raw SMC against post-markup observed spot** — and the model is *designed*
+to sit below spot, with the wedge as the bridge. `STEP_VII_METHODOLOGY.md` states the trade explicitly:
+*"The markup can correct a level bias… but it cannot invent shape. So every structural driver of shape had
+to be fixed inside the dispatch first."*
+
+That reframes this whole series. The recurring pattern — a change improves `log_err` and worsens
+`|mean err|` — is **the architecture working**, not a defect, and the methodological note in `6db9cf2`
+overstates it. `|mean err|` on raw SMC is close to the wrong yardstick for judging a dispatch fix.
+
+### The shipped wedge was stale, and it was applied at twice a defensible strength
+
+`reports/markup_model.json` was fitted on 2019/2022/2023 against an SMC predating this session's five
+dispatch changes, so every fix that raised the SMC left the wedge double-counting. Measured, it closed the
+gap on its fitted years and **overshot the recent ones**: DE_LU −3 → +14, ES +7 → +20, CH +6 → +22,
+FR +6 → +17. Pooled it moved `|mean err|` 10.50 → 10.31 while making `log_err` **worse**, 0.650 → 0.690.
+
+A naive refit on the current SMC improves in-sample (10.50 → 7.80) and is **worse under leave-one-year-out**
+(10.99, `log_err` 0.706 against 0.650 for no wedge at all). A wedge that memorises its training years is
+worthless for 2027-46, which the projection extrapolates entirely out of sample — so LOYO, not fit quality,
+is the selection criterion. Sweeping (alpha_frac, shrink) and scoring each on held-out years:
+
+    alpha shrink   LOYO bias   LOYO MAE   LOYO RMSE
+      —   (none)      -5.22      25.06       41.47   <- raw SMC, the thing to beat
+     0.5    0.25      -4.57      24.80       41.14   <- selected
+     0.5    0.50      -3.93      25.20       41.44   <- the SHIPPED default: worse than no wedge
+     0.5    1.00      -2.65      27.20       43.35
+
+**`shrink = 0` reproduces the raw-SMC numbers exactly**, so the parameter is "how much of the fitted wedge
+to apply" — and **every setting at 0.5 or above is worse than applying none**. The old default was in that
+band.
+
+Saved: `alpha_frac=0.5, shrink=0.25`, panel 2019/2022/2024/2025 (2023 has no current gate run; 2024/2025
+enter, which is the point). Nine zones now carry a wedge against seven before — GB and PT newly pass
+`build_panel`'s quality gate, and CH and IT-North's 2022, which previously failed it on correlation, now
+survive. **That improvement is this session's dispatch work showing up in the calibration inputs.**
+
+### What it is worth, and what it is not
+
+**The best projectable wedge buys ~1 % of MAE** (25.06 → 24.80). Calibration is spent as a lever; the rest
+is dispatch error. But the refit is still a large fix *relative to the status quo*, because it removes the
+stale wedge's damage. France, the zone that matters most here:
+
+| FR | shipped (stale) | refit | raw SMC |
+|---|---|---|---|
+| 2024 bias / MAE | +16.7 / 22.2 | **+5.9 / 16.7** | +6.0 / 16.9 |
+| 2025 bias / MAE | +15.3 / 23.2 | **+4.3 / 18.5** | +4.4 / 19.0 |
+
+**France's honest accuracy for a Monte Carlo: MAE 17.6 €/MWh, bias +5.1, RMSE 23.5 — 30 % of a 59 €/MWh
+level — on 2024-25, correlation 0.85-0.87.** And that is optimistic: 2019-2025 are the years every
+structural fix was measured against, so they are in-sample for the *dispatch* too, and genuine 2027-46
+error will exceed it. Crisis-regime draws are the weak point — 2022 sits at MAE 60 on a 276 level.
+
+### The artifact is now tracked
+
+`.gitignore` gains one exception, `!**/reports/markup_model.json`. It is generated, but it is not a report:
+`projection.py` LOADS it, so it is an **input** to every projected year. Untracked, a fresh clone has no
+wedge and `apply_markup` silently falls back to clipped SMC — the same code producing a different pipeline
+per machine, and degrading *gracefully* (~1 % of MAE), which is exactly what makes the divergence easy to
+miss. Every other `reports/*.json|csv|png|npz` stays ignored; verified that `git add reports/` now stages
+this file and nothing else. The pre-refit model is preserved at `scratchpad/markup_model_BACKUP.json`, and
+`scratchpad/refit_projectable.py` regenerates the selection from the gate parquets in ~15 minutes.
