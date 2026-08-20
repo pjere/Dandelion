@@ -124,13 +124,29 @@ def _assemble_draw(config, model, registry, draw, temp_daily, hstart, days, n_da
     return avail, state, urow
 
 
-def project(config: Config, n_draws: int | None = None):
+def project(config: Config, n_draws: int | None = None, layer: str = "availability",
+            partitions: dict | None = None, draw_ids: list[int] | None = None):
+    """Project availability. `layer`/`partitions` isolate a Monte-Carlo draw's output.
+
+    A weather-Monte-Carlo re-runs this once per weather draw, and the default tables are SHARED — two
+    draws in flight would overwrite each other's availability halfway through the other's dispatch. Writing
+    to `layer="availability_mc", partitions={"wdraw": d}` gives each draw its own tables and leaves the
+    canonical `availability` layer untouched, so the ordinary single-run path is unaffected.
+
+    `draw_ids` computes exactly those draw indices instead of `range(n_draws)`. Every outage stream is
+    seeded `substream(config.seed, draw, ...)`, so a weather Monte-Carlo that always asked for
+    `n_draws=1` got draw index 0 every time — identical planned outages, forced outages and common-mode
+    events in all N draws, with only the weather-COUPLED channels (thermal derating, reservoir wetness)
+    varying. Measured on two draws: gas and reservoir availability came out bit-identical, nuclear differed
+    only by derating. Passing `draw_ids=[d]` makes the outage realisation follow the weather draw, which
+    matters because nuclear outage variability is a first-order driver of French price spread."""
     model = CalibratedAvailability.load(config.models_dir / "calibrated_availability.json")
     registry = load_scenario_registry(config)
     from ..io.weather import load_national_weather
     temp_daily, wetness = load_national_weather(config)
     hstart, days, n_days = _horizon(config)
     nd = int(n_draws or config.section("projection")["n_draws"])
+    ids = list(draw_ids) if draw_ids is not None else list(range(nd))
     outdir = config.output_dir
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -139,7 +155,7 @@ def project(config: Config, n_draws: int | None = None):
     nuc_mask = registry["technology"].to_numpy() == "nuclear"
 
     tech_frames, nuc_frames, ic_frames = [], [], []
-    for d in range(nd):
+    for d in ids:
         avail, state, urow = _assemble_draw(config, model, registry, d, temp_daily, hstart, days, n_days)
         # aggregate available capacity by technology (daily)
         for t in techs:
@@ -159,10 +175,12 @@ def project(config: Config, n_draws: int | None = None):
 
     by_tech = pd.concat(tech_frames, ignore_index=True)
     nuc = pd.concat(nuc_frames, ignore_index=True)
-    lake.write_table(by_tech, "availability", "availability_by_tech", index=False)
-    lake.write_table(nuc, "availability", "availability_nuclear_units", index=False)
-    lake.write_table(pd.concat(ic_frames, ignore_index=True), "availability", "interconnectors", index=False)
-    lake.write_table(reservoir_energy_budget(config, model, wetness), "availability", "reservoir_budget", index=False)
+    pk = dict(partitions or {})
+    lake.write_table(by_tech, layer, "availability_by_tech", index=False, **pk)
+    lake.write_table(nuc, layer, "availability_nuclear_units", index=False, **pk)
+    lake.write_table(pd.concat(ic_frames, ignore_index=True), layer, "interconnectors", index=False, **pk)
+    lake.write_table(reservoir_energy_budget(config, model, wetness), layer, "reservoir_budget",
+                     index=False, **pk)
 
     meta = run_metadata(config, weather_draw="shared_cube")
     meta["n_draws"] = nd

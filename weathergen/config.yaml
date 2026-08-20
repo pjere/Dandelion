@@ -118,7 +118,9 @@ simulate:
   enforce_constraints: true
   # co-génère le vent 100 m conditionné au vent 10 m simulé (pour step iv EnR ; cf. wind100.py).
   # Ajuster une fois via scripts/fit_wind100.py ; ignoré si le fichier est absent.
-  wind100_model: "models/wind100.pkl"
+  wind100_model: "models/wind100.json"   # was .pkl: the file was renamed to .json, and the
+  # existence check in simulate._append_wind100 tests the RAW path, so a stale suffix silently skipped
+  # wind100 co-generation entirely — producing a 7-variable cube that step iv rejects outright.
 
 # --- Phase 8 : validation ----------------------------------------------------
 validate:

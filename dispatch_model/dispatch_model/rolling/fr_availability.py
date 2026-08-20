@@ -26,9 +26,16 @@ def load_fr_availability(config) -> dict | None:  # noqa: ARG001 (config kept fo
 
     → {"nuc_frac": Series[(draw, year, doy) → frac], "nuc_draws": int,
        "reservoir": {(year, iso_week): budget_mwh}}."""
+    import os
+
     from powersim_core import lake
+    # A Monte-Carlo draw writes its own availability to an isolated layer (see availability_model.project).
+    # `DISPATCH_AVAIL_WDRAW` selects it, read at call time so parallel workers each see their own draw and
+    # never the concatenation of everyone's. Unset -> the canonical shared tables, unchanged.
+    _w = os.environ.get("DISPATCH_AVAIL_WDRAW")
+    _layer, _pk = ("availability", {}) if _w is None else ("availability_mc", {"wdraw": int(_w)})
     try:
-        bt = lake.read_table("availability", "availability_by_tech")   # [draw, day, technology, available_mw]
+        bt = lake.read_table(_layer, "availability_by_tech", **_pk)    # [draw, day, technology, available_mw]
     except (FileNotFoundError, KeyError, ValueError, OSError):
         return None
     nuc = bt[bt["technology"] == "nuclear"].copy()
@@ -44,7 +51,7 @@ def load_fr_availability(config) -> dict | None:  # noqa: ARG001 (config kept fo
     frac = nuc.set_index(["draw", "year", "doy"])["frac"].sort_index()
     out: dict = {"nuc_frac": frac, "nuc_draws": int(nuc["draw"].nunique()), "reservoir": {}}
     try:
-        rb = lake.read_table("availability", "reservoir_budget")       # [week_start, avail_energy_gwh]
+        rb = lake.read_table(_layer, "reservoir_budget", **_pk)        # [week_start, avail_energy_gwh]
         rb = rb.copy()
         rb["week_start"] = pd.to_datetime(rb["week_start"])
         yr = rb["week_start"].dt.year

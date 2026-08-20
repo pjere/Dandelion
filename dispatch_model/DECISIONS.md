@@ -1073,3 +1073,341 @@ per machine, and degrading *gracefully* (~1 % of MAE), which is exactly what mak
 miss. Every other `reports/*.json|csv|png|npz` stays ignored; verified that `git add reports/` now stages
 this file and nothing else. The pre-refit model is preserved at `scratchpad/markup_model_BACKUP.json`, and
 `scratchpad/refit_projectable.py` regenerates the selection from the gate parquets in ~15 minutes.
+
+---
+
+## The first 20-year projection run, and the two zones whose prices it cannot be used for (2026-08)
+
+Running the 2027–2046 horizon end to end and reading VOLUMES out of it (`DISPATCH_CAPTURE_DISPATCH`, see
+METHODOLOGY.md) surfaced two zone-level failures that no price-only gate could have shown. Both are
+recorded here because both look, from the price series alone, like ordinary model output.
+
+### Portugal is capacity-inadequate in the scenario — the LP is right, the inputs are short
+
+PT prints 15000 €/MWh (VOLL) in ~200 h of 2027 and carries 6.4 GWh of unserved energy, while also showing
+1947 negative hours: scarcity and glut in the same year. The stack is the explanation — **7.3 GW of firm
+capacity** (gas 4.0, hydro reservoir 1.6, DSR 1.3, biomass 0.5) against a **15.3 GW peak**, with RES
+peaking at 14.4 GW and a single Spanish link.
+
+The first reading of this was that the link was under-used — PT at VOLL while ES sat at 134 €/MWh, with the
+flow at 2.0 GW against a 4.3 GW annual maximum. **That reading was wrong**, and the way it was wrong is
+worth keeping: it compared the flow to the border's ANNUAL maximum instead of to that hour's own published
+NTC. Measured against the hourly cap, the link is at **100.0 % of capacity in all 197 scarce hours** —
+mean utilisation 1.000, minimum 1.000. The LP is doing exactly the right thing.
+
+The gap is in the scenario, not the code: TYNDP `cap_flex_gw` is **missing for PT**, so no battery or DSR
+build-out is applied to a zone whose entire adequacy problem is flexible capacity. The same field is
+missing for GB, NL, DK, PL_CZ and AT_SI, which biases scarcity up and negative hours down in all six.
+
+**PT volumes are usable; PT prices are not.**
+
+### Great Britain's markup coefficient is out of family by a factor of twenty
+
+GB projects a 30.4 €/MWh annual mean spot against a 54.9 €/MWh SMC — the wedge subtracts 24.5 €/MWh on
+average and ranges −119 to +47. The cause is in the fitted model, not the dispatch: GB carries
+**β = −27.41** on one standardised feature where every other zone is under 2 in absolute value (NL −1.28,
+PT −1.14, IT-North +0.23), and GB's SMC feature was standardised with **σ = 753 €/MWh**, which is 2022
+dominating its panel.
+
+This is a direct consequence of the refit above: GB and PT are the two zones that newly passed
+`build_panel`'s quality bar, and the LOYO selection that chose `shrink=0.25` was scored **pooled across
+zones**, so a single zone's pathological coefficient could not show up in it. The selection criterion needs
+a per-zone extrapolation-safety check, not only a pooled out-of-sample error.
+
+An independent confirmation falls out of the congestion-rent table: on the FR–GB border the markup inverts
+the price order relative to the LP's flow in **3895 of 8736 hours** (45 %), against 535–1113 on France's
+other five borders, and the border's annual rent drops from 508.5 M€ on SMC to 160.9 M€ on spot.
+
+**Use GB's SMC column. GB spot is not usable.** Not fixed here — changing the markup artifact is a
+behavioural change to a tracked projection input and belongs in its own measured, gated change.
+
+### What the run does support
+
+France's 2027 numbers are internally coherent and behave the way the underlying physics should: RES
+captures **0.68** of the zone mean — the cannibalisation ratio, and close to the 0.676 observed for FR
+solar in 2024 — gas captures 2.72 as a peaker should, and nuclear 1.28. Congestion rent on SMC is
+non-negative in every hour on every border, which is the sign convention checking itself.
+
+---
+
+## The GB markup coefficient, fixed — and it was never really a coefficient (2026-08)
+
+The entry above called GB's `beta = -27.41` an out-of-family coefficient and proposed a per-zone
+extrapolation-safety check. That diagnosis was **half right and pointed at the wrong layer.** Chasing it
+found two defects, neither of which is about coefficient magnitude, and a per-zone `|beta|` cap would have
+suppressed the symptom while leaving both causes in place.
+
+### Cause 1 — the panel was being fed a failed dispatch
+
+GB's backtested SMC reaches the LP's 15000 €/MWh VOLL in **89–155 hours of every fitted year**, against an
+observed GB that never exceeded 1860. Modelled standard deviation vs observed: **5.5× (2022), 13.4× (2024),
+25.8× (2025)**, and 2.55× even in the quiet 2019. `build_panel`'s quality gate never saw it, because both
+its tests are blind to tails — a median does not move for 100 hours out of 8735, and the correlation bar is
+0.2 while GB scores 0.28–0.42.
+
+So the regression was handed a zone whose price error is a **capacity failure**, and spent its entire
+coefficient budget trying to wedge away a 15000 €/MWh dispatch defect. That is not something a wedge can
+repair, and the docstring already said so: *"a zone-year the dispatch prices badly is a failed dispatch,
+not a wedge the markup should learn."* The gate simply did not test for this way of pricing badly.
+
+Added criterion (c): `max_std_ratio`, default 2.0. It excludes GB in all four years and NL 2024, and
+**nothing else** — the largest surviving ratio is PT 2022 at 1.32, so the threshold sits in a wide empty
+gap rather than being tuned to a target. NL 2024 is an independent confirmation: it is the same zone that
+ran away to 1522 €/MWh by 2046 in the projection.
+
+### Cause 2 — the sign constraints were one-sided across a collinear pair
+
+`_SIGN_LB` bounded `smc`, `tight` and `peak_kink` at zero and left `tight_sq` free. But `tight` and
+`tight_sq` are **0.96–0.99 collinear** within any one zone's range, so bounding one of them does not bound
+the tightness *response*: the solver satisfies `tight ≥ 0` by pinning it to exactly 0 and putting the
+negative response on the free partner. **Five of nine zones did exactly this** — BE −0.46, CH −0.53,
+PT −1.14, NL −1.28, GB −27.41 — every one of them with `tight` sitting precisely on its bound.
+
+GB's fitted wedge therefore ran from **+19 €/MWh at `tight=0` to −115 at `tight=0.68`**: strictly
+decreasing in tightness, which is the precise behaviour the constraint block's own comment says it exists
+to forbid ("non-decreasing in the price level and in tightness"). GB was the loudest case, not a special
+one.
+
+### Why the first fix alone was not enough
+
+Constraining `tight_sq` without the panel gate leaves GB's wedge still falling (+9 → −39) and `max|beta|`
+at 14.3 — the response just moves again. **Both causes had to go.** This is why the "cap the coefficient"
+instinct from the previous entry was wrong: the magnitude was a symptom of a mis-specified constraint set
+operating on unusable data.
+
+### The measured result
+
+Re-selected on the repaired panel with **every zone scored** (the previous sweep scored eight and fitted
+nine — a zone that is fitted but never scored cannot be caught by any criterion, which is the root cause
+behind both of the above). Old configuration vs new, each at its own best setting, leave-one-year-out:
+
+| | LOYO MAE | RMSE | bias | worst \|beta\| |
+|---|---|---|---|---|
+| old | 30.49 | 66.00 | −5.12 | 13.26 (GB) |
+| new (`alpha_frac=0.1, shrink=0.25`) | **29.58** | **65.30** | **−4.37** | **5.04** (DE_LU) |
+
+Per zone, all improving except PT (+0.05, noise): **GB −5.53**, NL −0.91, ES −0.30, FR −0.36, BE −0.35,
+IT-North −0.32, CH −0.29, DE-LU −0.20.
+
+One detail worth keeping: the old arm's *own* best LOYO setting is `alpha=2.0`, not the shipped `0.5`.
+Scoring GB would have pushed the old configuration toward heavier regularisation on its own — the missing
+evaluation zone is what selected the setting that let 27.41 through, more than the constraint set did.
+
+In projection, GB's applied wedge goes from **−24.5 €/MWh to exactly 0**: it is out of the panel, so it
+projects on clipped SMC. For a zone whose dispatch runs out of capacity 100+ hours a year, "no wedge" is
+the honest answer, not a defeat. NL's flips from −3.0 to +1.4. France moves −0.60 → −0.76, i.e. not at all.
+
+Honest limit on GB by year: the repair wins through 2019 (MAE 38.6 → 15.0 — **the shipped wedge was making
+2019 worse than raw SMC**) and loses 1–6 MAE in 2022/2024/2025, netting −5.5. The wedge it removes was
+buying in-sample level correction on three years by memorising a dispatch failure; LOYO says that does not
+transfer, and 2027-46 is entirely out of sample.
+
+The pre-repair artifact is preserved at `scratchpad/markup_model_PRE_GBFIX.json`;
+`scratchpad/refit_gbfix.py` regenerates the selection and `scratchpad/loyo_old_vs_new.py` the A/B above.
+
+---
+
+## The flexibility bid is the price level, and it is pinned twice at 300 €/MWh (2026-08)
+
+Once `cap_flex_gw` closes adequacy in every zone, the flex block stops being a backstop and becomes the
+marginal unit. Measured on FR 2046: the SMC takes four values, and **300.0 — `VOM["flex"]`, exactly — is
+3140 of 8640 hours (36 %), carrying 71 % of the annual mean.** The others are −0.0 (RES surplus, 22 %),
+7.0 (nuclear, 16 %) and 201.0 (gas, 6 %).
+
+Those hours are **nightly, not seasonal**: hour-of-day peaks at 23:00 (257 h) and is empty 10:00–14:00
+(1–3 h), with RES at 18.2 GW against 48.0 GW in the cheapest half of the year. This is why the RES
+trajectory is the wrong lever on the LEVEL — scaling FR RES to the PPE3 high end (+27 %) removes 121 of
+those 3129 hours, and doubling it leaves 1476. Solar cannot clear a 22:00 price. The RES range moves the
+cheap tail (negative hours, capture rates, RES revenue), not the mean.
+
+### The sensitivity, measured
+
+A full 300 → 180 arm (`DISPATCH_FLEX_VOM`, 20 years, same workbook and draw):
+
+| FR mean spot | 2030 | 2035 | 2040 | 2046 |
+|---|---|---|---|---|
+| VOM 300 | 58.4 | 85.0 | 114.6 | 159.5 |
+| VOM 180 | 56.2 | 78.6 | 103.0 | **133.4** |
+| Δ | −2.2 | −6.4 | −11.6 | **−26.0** |
+
+**−26.0, not the −43.5 a back-of-envelope gives** (3129 h × 120 / 8640). The arithmetic fails because the
+affected hours split three ways, and only one of the three reprices by the full 120:
+
+| the 3140 base hours at 300 became | hours | share | why |
+|---|---|---|---|
+| **300.0, unchanged** | 1324 | 42 % | **DSR's first rung is ALSO exactly 300** |
+| 180.0 | 879 | 28 % | flex still marginal, now cheaper |
+| 201.0 | 543 | 17 % | flex fell below gas; gas is marginal |
+
+**Two independent scarcity parameters sit at the same number.** `_DSR = [(0.03, 300.0), (0.03, 1000.0),
+(0.05, 4000.0)]` in `rolling/windows.py` puts its cheapest demand-response tranche at exactly `VOM["flex"]`.
+Lower one alone and DSR simply inherits the margin at the same price in 42 % of the hours. Anyone trying to
+move the model's scarcity price must move **both**, and the coincidence is undocumented on either side.
+
+Confirmed directly: in the 1327 hours that stayed at 300, flex runs 21.6 GW (near its cap) and DSR
+dispatches 0.84 GW — DSR is the marginal unit.
+
+### It is a DISPATCH parameter, not only a price parameter
+
+The larger surprise. FR 2046 volumes and revenue:
+
+| tech | TWh @300 | TWh @180 | revenue @300 | @180 | Δ M€ |
+|---|---|---|---|---|---|
+| flex | 22.1 | **68.8** | 7412 | 17762 | **+10350** |
+| nuclear | 298.7 | 298.6 | 61651 | 51716 | −9935 |
+| hydro reservoir | 44.0 | **30.9** | 11789 | 7089 | −4699 |
+| res | 299.9 | 299.9 | 29764 | 24828 | −4936 |
+| oil | 8.1 | **3.7** | 2560 | 1183 | −1377 |
+| dsr | 7.2 | **1.3** | 2412 | 580 | −1832 |
+
+At 300 the block is a peaking backstop (22 TWh); at 180 it is a **mid-merit resource running 3× the
+energy** (69 TWh), displacing 13 TWh of hydro reservoir, 4.4 of oil and 5.9 of DSR. Total French generator
+revenue falls **14.1 bn€, −11 %**, on one parameter that `stacks/costs.py` documents as a default rather
+than a revealed-behaviour measurement.
+
+Negative hours are untouched (1227 in both arms) and the median barely moves (146.2 → 146.1): the whole
+effect sits in the upper-middle of the distribution.
+
+Every zone moves the same way, France most — 2046 Δ: FR −26.0, CH −8.6, IT-North −7.8, BE −6.0, ES −5.6,
+GB −3.5, PT −3.8, DE_LU −2.5, NL −1.9, DK −1.2, PL_CZ and AT_SI ~0.
+
+**Nothing is changed by default.** `flex_vom()` reads `DISPATCH_FLEX_VOM` at call time and falls back to
+`VOM["flex"] = 300`, so the shipped model is unchanged; `scratchpad/cmp_flexvom.py` reproduces the table.
+
+---
+
+## The flexibility module is switched ON, and the flex block is split into real storage + a DSR/H2 rump (2026-08)
+
+Three changes, one scenario decision.
+
+### 1. `flexibility.enabled: false → true`
+
+The storage machinery — `flexibility/storage.py`, SoC-constrained PSP and BESS — is gated behind this
+flag, and the flag was off. So for the whole 2027-46 horizon **there was no storage in the LP at all**:
+no batteries, and no pumped storage either (France's 3.3 GW of PSP simply absent). The dispatch capture
+confirms it directly: no `storage_*` and no `hydro_psp` columns in any projected year before this change.
+
+`config.yaml` had a test asserting it ships off ("byte-identical default, golden preserved"). That test is
+now inverted, and the guarantee it protected is deliberately gone. **`rolling/backtest.py` reads the same
+flag**, so this changes the backtest too — and `reports/markup_model.json` was fitted on flat-LP backtest
+SMC. The wedge is small (shrink 0.25, mean 1-5 €/MWh in most zones) next to what the module itself moves,
+but the calibration and the dispatch are no longer the same model. Re-deriving the panel under flex is
+outstanding.
+
+Cost: ~12 s per weekly window against ~1 s flat, so a 20-year horizon runs in hours rather than minutes.
+
+### 2. The flex block was never a battery, and now it isn't asked to be
+
+`cap_flex_gw` is documented as "battery + demand-response + H2-peaker" but entered the LP as ONE
+thermal-like unit with a flat bid: no state of charge, no charging leg, no round-trip loss, **no energy
+limit**. Its energy was free and unbounded. Measured on FR 2046 at a 180 €/MWh bid it delivered **68.8 TWh
+from 24 GW — 2866 full-load hours, roughly double a 4-hour battery at one cycle a day**.
+
+The workbook now carries `cap_bess_gw` beside `cap_flex_gw`; `storage_spec`/`bess_power_mw` read it and
+`_append_flex` shrinks the flat block by exactly that much (the anti-double-count hook already existed —
+it had simply never run). France 2050: **28 GW total = 17.5 BESS + 10.5 DSR/H2**, a 62.5 % battery share
+applied to every zone at every anchor. With storage live, FR 2046 discharges 26.9 TWh from 18.3 GW =
+**1471 FLH, almost exactly one cycle a day**, charging 31.6 TWh at an 0.853 round-trip.
+
+`_BESS_PROJ_DURATION_H = 4.0` is the parameter that decides whether a stated GW figure covers an evening
+peak: 15 GW is 22.5 GWh at the 2024 seeds' 1.5 h and 60 GWh at 4 h. New grid-scale build is procured at
+4 h; the seeds describe what was built by 2024.
+
+`VOM["flex"]` returns to **180**, and now prices only what is left in the block — demand response and H2
+peakers. 180 is an H2 OCGT at ~2 €/kg and ~40 % efficiency; published H2-peaker SRMC spans ~150 (2 €/kg)
+to ~300 (4 €/kg), with one published scenario at 284.
+
+### 3. The DSR ladder, 300/1000/4000 → 180/250/500
+
+With the module on, FR 2046 sat at **exactly 4000 €/MWh for 170 hours**, which alone carried 79 €/MWh of a
+221 €/MWh annual mean — with ZERO unserved energy. A ladder written to represent emergency load-shedding
+was setting the average price of the year. The rungs now sit in the same register as the resources they
+compete against.
+
+**The first rung equals `VOM["flex"]` exactly, as 300 did before.** Two independent scarcity parameters
+remain pinned to one number, so a sensitivity on either alone leaves ~40 % of the affected hours unmoved —
+measured on the old 300 pair: of 3140 FR hours at 300, 1324 did not move when only the flex bid fell.
+Move them together.
+
+### What enabling the module does to the shape
+
+FR 2046 SMC, flat LP vs flexibility on (before the DSR change):
+
+| | mean | median | p90 | h ≤ 0 | h > 500 | h at 4000 |
+|---|---|---|---|---|---|---|
+| flat LP | 128.6 | 140.7 | 300 | 1677 | 17 | 0 |
+| FLEX + BESS | **221.2** | **130.0** | **215** | 1979 | **364** | **170** |
+
+The median FELL and p90 FELL — the middle of the distribution improves. The entire mean increase is the
+scarcity tail. Nuclear-marginal hours collapse 1414 → 371 because the rigidity module bids the socle at
+~45 rather than 7. This is qualitatively what a rigidity module is for; the open question is whether a
+mean decided by ~2 % of hours at a ladder rung is fit for a Monte Carlo.
+
+---
+
+## Monte-Carlo over real weather draws — and the two bugs that made the old draw index a lie (2026-08)
+
+The projection's `--draw N` had been threaded through demand, RES, availability and dispatch since #77/#80.
+It did nothing. Two independent defects, both silent.
+
+### 1. The realization index selected nothing
+
+`weathergen/output/simulation.nc` has dims `(time, station, variable)` — 175 200 h, exactly the 20-year
+horizon, and **no ensemble dimension**. `powersim_core.weather_cube._select_realization` looks for
+`realization|member|draw|ensemble`, finds none, and falls through to `return ds`. So every draw read
+identical weather, and a 50-draw Monte Carlo would have produced 50 identical weather years varying only
+in stochastic outages (of which the lake held 2).
+
+The availability model's own docstring had already recorded this — *"the 50 projection draws vary only the
+stochastic outages… kept for forward-compatibility with an ensemble cube"* — so the limitation was known
+on one side of the interface and not the other.
+
+### 2. A regenerated cube would have broken step iv
+
+`weathergen/config.yaml` pointed `simulate.wind100_model` at `models/wind100.pkl`; the file had been
+renamed to `.json`. `_append_wind100` tests the RAW path for existence and returns the cube unchanged when
+it is absent — so co-generation was skipped silently and the cube came out with **7 variables**.
+`res_model.load_weather_synthetic` raises outright without `wind_speed_100m_ms`. The shipped cube predates
+the rename, so this would only have fired the first time anyone regenerated. (`Wind100Model.load` already
+normalises the suffix; only the existence check was wrong.) Config now names the real file.
+
+### The design
+
+Rather than build an ensemble cube (50 × 472 MB = 23 GB), each draw generates its own cube and every
+consumer is redirected at it by ONE env var:
+
+* `powersim_core.weather_cube.open_cube` honours `POWERSIM_WEATHER_CUBE`. Four configs name this file
+  (demand, res, availability, dispatch); overriding the shared reader redirects all four at once, which is
+  what makes a draw *coherent* rather than four unrelated randomisations.
+* `effective_cube_path` fixes a companion trap: the demand and RES driver caches test freshness by
+  comparing their mtime against the **configured** cube. Under an override that compares against the wrong
+  file and declares a cache built from another draw's weather fresh — a wrong answer, not a slow one.
+* Draw *d* runs step v on its own cube into lake layer `availability_mc`, partition `wdraw=d`, selected by
+  `DISPATCH_AVAIL_WDRAW`. The canonical `availability` layer is never touched, so the single-run path is
+  unchanged. Confirmed in the parallel smoke: each worker reports "1 nuclear draw(s)", not the shared 2.
+* The dispatch runs with `--draw d`, which keys the demand/RES driver caches (`realization=d`). Passing 0
+  for every draw would make them share one cache entry and hand draw *d+1* the drivers of draw *d*
+  whenever its cube predates that cache.
+
+Nothing is shared and written, so draws parallelise. `--workers K` is bounded by RAM (a preload plus a
+HiGHS model each), not cores: two concurrent preloads measured 774 s against ~500 s alone, ~65 % efficiency.
+
+### Cost, measured
+
+| step | per draw |
+|---|---|
+| weathergen simulate | ~60 s (fitted model loads once, 2.5 s) |
+| step v availability | **5 s** |
+| steps iii+iv | inside the preload |
+| dispatch 20 y, flexibility on | ~4.4 h |
+
+So the ensemble is dispatch-bound: N=50 is ~230 h serial, ~2.5 days at 3 workers. The driver is resumable
+— a draw whose analysis workbook exists is skipped — which is a requirement, not a nicety, at that length.
+
+### What the ensemble does and does not span
+
+Weather only. Scenario capacities, demand trajectories, commodity prices, NTC structure and the fitted
+markup are identical across draws. It is weather risk, not scenario risk, and the ENSEMBLE notice says so.
+
+Validated end to end on two truncated draws: FR annual means differ by 32.5 €/MWh on average (inflated by
+the truncation), HDD 1721 vs 1519, and each draw carries its own weather as a workbook tab.

@@ -14,10 +14,32 @@ import pandas as pd
 _ENSEMBLE_DIMS = ("realization", "member", "draw", "ensemble")
 
 
+def effective_cube_path(path):
+    """The cube path actually read, after the `POWERSIM_WEATHER_CUBE` override.
+
+    Cache-freshness checks in demand/res compare a cached table's mtime against the cube's. They must
+    compare against the cube that will REALLY be read: resolving the configured path instead means a
+    Monte-Carlo draw pointed elsewhere by the override sees a cache built from a different draw's weather
+    and silently declares it fresh. That is a wrong-answer bug, not a slow one."""
+    import os
+    from pathlib import Path
+    return Path(os.environ.get("POWERSIM_WEATHER_CUBE") or path)
+
+
 def open_cube(path):
+    """Open the weathergen cube, honouring the `POWERSIM_WEATHER_CUBE` override.
+
+    Four configs name this file (demand, res, availability, dispatch) and a Monte-Carlo draw needs all
+    four to read the SAME per-draw cube. Overriding one env var here — read at call time, never cached —
+    redirects every consumer at once, which is what makes a draw coherent across steps iii/iv/v/vi.
+    Unset (the normal case) the caller's configured path is used unchanged."""
+    import os
     from pathlib import Path
 
     import xarray as xr
+    override = os.environ.get("POWERSIM_WEATHER_CUBE")
+    if override:
+        path = override
     if not Path(path).exists():
         raise FileNotFoundError(f"weathergen cube not found: {path}")
     return xr.open_dataset(path)

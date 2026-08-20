@@ -41,7 +41,8 @@ def projection_drivers(config: Config, realization: int = 0, force: bool = False
     from ..calibration.historical import _national_pv
     from ..io.loaders import load_weather_synthetic
     cache = lake.table_path("res", "proj_drivers", realization=realization)
-    cube_path = config.resolve(config.section("weather")["weathergen_output"])
+    from powersim_core.weather_cube import effective_cube_path
+    cube_path = effective_cube_path(config.resolve(config.section("weather")["weathergen_output"]))
     fresh = (cache.exists() and cube_path and cube_path.exists()
              and cache.stat().st_mtime >= cube_path.stat().st_mtime)
     if fresh and not force:                          # invalidate if the cube was regenerated

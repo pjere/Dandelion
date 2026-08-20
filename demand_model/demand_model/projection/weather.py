@@ -34,7 +34,8 @@ def _tidy_weather(config: Config, realization: int) -> tuple[pd.DataFrame, pd.Da
 def projection_features(config: Config, realization: int = 0, force: bool = False) -> pd.DataFrame:
     """National feature frame for one weather realization, trend frozen at the anchor year."""
     cache = lake.table_path("demand", "projection_features", realization=realization)
-    cube_path = config.resolve(config.section("projection")["weathergen_output"])
+    from powersim_core.weather_cube import effective_cube_path
+    cube_path = effective_cube_path(config.resolve(config.section("projection")["weathergen_output"]))
     fresh = (cache.exists() and cube_path and cube_path.exists()
              and cache.stat().st_mtime >= cube_path.stat().st_mtime)
     if fresh and not force:                          # invalidate if the cube was regenerated
