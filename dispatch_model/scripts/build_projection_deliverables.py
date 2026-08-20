@@ -271,6 +271,9 @@ def main() -> int:
     print(f"[deliverables] {len(years)} years: {years[0]}-{years[-1]}", flush=True)
 
     spot_all, rev, cong, neg, psum, sysr = [], [], [], [], [], []
+    from powersim_core.progress import Progress
+    prog = Progress(len(years), 'deliverables')
+    prog.__enter__()
     for y in years:
         smc, spot, d, fl = _load_year(src, y)
         s = spot.copy()
@@ -283,8 +286,9 @@ def main() -> int:
             sysr.append(system_table(y, d))
         if fl is not None:
             cong.append(congestion(y, smc, spot, fl, hub=args.hub))
-        print(f"  {y} ok", flush=True)
+        prog.update(note=str(y))
 
+    prog.close()
     prices = pd.concat(spot_all).sort_index()
     prices.index.name = "timestamp_utc"
     cols = [args.hub] + [c for c in prices.columns if c not in (args.hub, "FR_SMC")] + ["FR_SMC"]

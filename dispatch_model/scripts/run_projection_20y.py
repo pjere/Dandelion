@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd                                                            # noqa: E402
 
+from powersim_core.progress import Progress                                    # noqa: E402
 from dispatch_model.config import load_config                                  # noqa: E402
 from dispatch_model.rolling.projection import _preload, project_year           # noqa: E402
 
@@ -72,6 +73,8 @@ def main() -> int:
         provider = default_weather_provider
 
     stats = []
+    prog = Progress(len(todo), f"projection {start}-{end}")
+    prog.__enter__()
     for y in todo:
         t1 = time.monotonic()
         ws = None
@@ -99,10 +102,12 @@ def main() -> int:
             sink["flows"].to_parquet(out / f"flows_{y}.parquet", index=False)
 
         drop = sink.get("dropped") or []
+        prog.update(note=f"{y} FR {spot['FR'].mean():.1f} EUR/MWh")
         print(f"[20y] {y} done in {time.monotonic() - t1:.0f}s  hours={len(spot)}  "
               f"FR mean {spot['FR'].mean():.1f} (smc {smc['FR'].mean():.1f})"
               + (f"  DROPPED {len(drop)} window(s): {drop}" if drop else ""), flush=True)
 
+    prog.close()
     pd.concat(stats, ignore_index=True).to_csv(out / "stats.csv", index=False)
     print(f"[20y] complete in {(time.monotonic() - t0) / 60:.1f} min -> {out}", flush=True)
     return 0

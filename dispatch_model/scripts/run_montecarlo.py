@@ -132,9 +132,13 @@ def main() -> int:
     print(f"[mc] {len(todo)} draw(s) {todo[0]}..{todo[-1]}, master_seed={a.master_seed}, out={out_root}",
           flush=True)
     t0 = time.monotonic()
+    from powersim_core.progress import Progress
+    prog = Progress(len(todo), f"monte-carlo {len(todo)} draws")
+    prog.__enter__()
     if a.workers <= 1:
         for d in todo:
             run_draw(d, out_root, a.master_seed, a.keep_cubes, a.n_weeks)
+            prog.update(note=f"draw {d}")
     else:
         from concurrent.futures import ProcessPoolExecutor, as_completed
         done, failed = 0, []
@@ -150,8 +154,9 @@ def main() -> int:
                     failed.append((d, f"{type(exc).__name__}: {exc}"))
                     print(f"[mc] draw {d} FAILED: {type(exc).__name__}: {exc}", flush=True)
                 done += 1
-                print(f"[mc] {done}/{len(todo)} draws finished "
-                      f"({(time.monotonic() - t0) / 3600:.2f} h elapsed)", flush=True)
+                prog.update(note=f"draw {d}" + (" FAILED" if failed and failed[-1][0] == d else ""))
+    prog.close()
+    if a.workers > 1:
         if failed:
             print(f"[mc] {len(failed)} draw(s) failed: {failed}", flush=True)
             print("[mc] re-run the same command to retry them (completed draws are skipped)", flush=True)

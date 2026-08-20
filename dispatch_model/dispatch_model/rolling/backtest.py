@@ -360,9 +360,14 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
     flex_stats = {"modulated_mwh": 0.0, "deepmod_mwh": 0.0, "hours": 0}   # F7 §9: fleet modulation aggregates
     prev_flex_state = None                                       # F5: previous window's tail state (FR), or None
     prev_w1 = None                                               # end of the previous window (seam-adjacency check)
-    for w0, w1 in zip(weeks[:-1], weeks[1:]):
+    from powersim_core.progress import Progress
+    _wk = list(zip(weeks[:-1], weeks[1:]))
+    _prog = Progress(len(_wk), f"backtest {year}")
+    _prog.__enter__()
+    for w0, w1 in _wk:
         T = fr.loc[(fr.index >= w0) & (fr.index < w1)].index
         if len(T) < 24:
+            _prog.update(note=f"{w0.date()} short")
             prev_flex_state = None
             continue
         prices = resolver.prices_at(w0)
@@ -415,6 +420,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
         if out is None:
             prev_flex_state = None
             continue
+        _prog.update(note=str(w0.date()))
         price_chunks.append(out["prices"])
         if out.get("storage"):          # storage primal → hourly per-zone dispatch (validation of the
             for z, sv in out["storage"].items():        # storage calibration against observed PSP)
@@ -438,6 +444,7 @@ def run_backtest(config: Config, year: int, n_weeks: int | None = None,
                            if flex_spec is not None and out.get("flex") else None)   # F5 tails, per zone
         prev_w1 = w1
 
+    _prog.close()
     model = pd.concat(price_chunks).sort_index()
     metrics = _score(model, obs, zones)
     if write_lake:

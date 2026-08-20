@@ -21,13 +21,18 @@ from .simulate import simulate
 
 def fit_model(config: Config) -> FittedModel:
     """Run the full fitting chain and return a serializable FittedModel."""
+    from powersim_core.progress import Progress
+    _p = Progress(6, "weathergen fit")            # phases, not iterations: the chain is fixed-length
+    _p.__enter__()
     rng = config.rng()
     ingest = io.build_dataset(config, rng)
+    _p.update(note="ingest")
     cube, station_meta = ingest.cube, ingest.station_meta
 
     # Phase 3: transform raw -> ~Gaussian latent (before climatology; see D3.1)
     tset = transforms.fit(cube, config.variables)
     g = tset.forward(cube)
+    _p.update(note='transforms')
 
     # Phase 2: climatology on the transformed variable -> standardized anomaly
     cc = config.section("climatology")
@@ -37,6 +42,7 @@ def fit_model(config: Config) -> FittedModel:
     )
     clim = climatology.fit(g, spec)
     anom = clim.standardize(g)
+    _p.update(note='climatology')
 
     mat, keys = to_matrix(anom)
     # dry mask (on RAW values) for intermittent variables -> censored marginal
@@ -48,6 +54,7 @@ def fit_model(config: Config) -> FittedModel:
     dry_mat, _ = to_matrix(dry_da)
     q = float(config.section("marginals")["threshold_quantile"])
     margs = marginals.fit(mat, keys, config.variables, q, dry_mat)
+    _p.update(note='marginals')
     u = margs.to_uniform(mat, dry_mat)
     gauss = ndtri(u)                      # uniforms -> standard normal latent field
 
@@ -55,7 +62,10 @@ def fit_model(config: Config) -> FittedModel:
     months = pd.DatetimeIndex(cube["time"].values).month.to_numpy()   # season for the innovation cov (D5.3)
     dep = dependence.fit(gauss, months, dcfg["eof_variance"], int(dcfg["var_order"]),
                          dcfg.get("copula", "gaussian"), rng)
+    _p.update(note="dependence")
     trd = trend.fit(config.section("trend"), config.variables)
+    _p.update(note="trend")
+    _p.close()
 
     model = FittedModel(
         config_raw=config.raw, station_meta=station_meta,

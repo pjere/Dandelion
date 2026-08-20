@@ -430,7 +430,11 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
     disp_chunks, flow_chunks = [], []   # volumes, only when the caller passed a sink
     _dropped: list[str] = []            # windows the solve budget could not clear (reported below)
     prev_flex_state = None; prev_w1 = None                     # F5: FR tail state across adjacent window seams
-    for w0, w1 in zip(ref["weeks"][:-1], ref["weeks"][1:]):
+    from powersim_core.progress import Progress
+    _weeks = list(zip(ref["weeks"][:-1], ref["weeks"][1:]))
+    _prog = Progress(n_weeks or len(_weeks), f"{target_year} windows")
+    _prog.__enter__()
+    for w0, w1 in _weeks:
         T = fr.loc[(fr.index >= w0) & (fr.index < w1)].index
         if len(T) < 24:
             prev_flex_state = None
@@ -488,7 +492,9 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         if out is None:
             _dropped.append(str(w0.date()))
         if out is None:
+            _prog.update(note=f"{w0.date()} DROPPED")
             prev_flex_state = None; continue
+        _prog.update(note=str(w0.date()))
         price_chunks.append(out["prices"])
         if sink is not None:
             # windows are half-open [w0, w1) on a shared calendar, so these concatenate without overlap
@@ -501,6 +507,7 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
             prev_flex_state = tail_state(out["flex"]["FR"]); prev_w1 = w1
         if n_weeks and len(price_chunks) >= n_weeks:
             break
+    _prog.close()
     if not price_chunks:
         raise RuntimeError(f"projection {target_year}: every weekly LP window failed to solve")
     if _dropped:

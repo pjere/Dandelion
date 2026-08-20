@@ -155,6 +155,9 @@ def project(config: Config, n_draws: int | None = None, layer: str = "availabili
     nuc_mask = registry["technology"].to_numpy() == "nuclear"
 
     tech_frames, nuc_frames, ic_frames = [], [], []
+    from powersim_core.progress import Progress
+    _prog = Progress(len(ids), 'availability draws')
+    _prog.__enter__()
     for d in ids:
         avail, state, urow = _assemble_draw(config, model, registry, d, temp_daily, hstart, days, n_days)
         # aggregate available capacity by technology (daily)
@@ -172,7 +175,9 @@ def project(config: Config, n_draws: int | None = None, layer: str = "availabili
         ic = interconnector_availability(config, _interconnectors(config), draw=d)
         ic["draw"] = d
         ic_frames.append(ic)
+        _prog.update(note=f'draw {d}')
 
+    _prog.close()
     by_tech = pd.concat(tech_frames, ignore_index=True)
     nuc = pd.concat(nuc_frames, ignore_index=True)
     pk = dict(partitions or {})
