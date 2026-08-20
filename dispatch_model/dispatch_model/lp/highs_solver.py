@@ -836,6 +836,44 @@ def _report_iis(h, spec) -> None:
                       for k, v in sorted(hit.items(), key=lambda kv: -kv[1][1])), flush=True)
 
 
+def _read_dispatch(cv, spec) -> pd.DataFrame:
+    """Per-(zone, tech) MW for the window, aggregated over units from the primal already in memory.
+
+    Opt-in via `DISPATCH_CAPTURE_DISPATCH` (default off) because it is dead weight for the backtest and the
+    gate, which score prices alone: the projection is what needs volumes, to turn duals into REVENUES.
+
+    Read-only — it touches no column bound, no row, no cost. The LP is untouched whether the flag is set or
+    not; only the size of the returned dict changes.
+
+    The pseudo-techs complete the balance so the capture can be *checked* rather than trusted: `res` is the
+    dispatched (i.e. NOT curtailed) part of the RES potential summed over its subsidy tranches, `ens` the
+    unserved energy, `dump` the curtailment column. With the net flows these satisfy, per zone-hour,
+
+        gen + res + ens - dump + storage_discharge - storage_charge + net_import = demand
+
+    which `tests/test_dispatch_capture.py` asserts against the LP's own balance rows. Columns are a
+    (zone, tech) MultiIndex over the window's timestamps."""
+    T, n = spec["T"], spec["n"]
+    cols: dict[tuple[str, str], np.ndarray] = {}
+    for z, (gbase, m, _units, tech) in spec["gen_cols"].items():
+        blk = cv[gbase:gbase + m * n].reshape(m, n)               # unit-major: unit j occupies [j*n, (j+1)*n)
+        tech = np.asarray(tech, object)
+        for tname in pd.unique(tech):
+            cols[(z, str(tname))] = blk[tech == tname].sum(axis=0)
+    for z, (rbase, ntr) in spec["res_cols"].items():              # tranche-major, same convention
+        cols[(z, "res")] = cv[rbase:rbase + ntr * n].reshape(ntr, n).sum(axis=0)
+    for z, ebase in spec["ens_cols"].items():
+        cols[(z, "ens")] = cv[ebase:ebase + n]
+    for z, dbase in spec["dump_cols"].items():
+        cols[(z, "dump")] = cv[dbase:dbase + n]
+    for z, (gd, gc, _eb, ns) in (spec.get("storage_cols") or {}).items():
+        cols[(z, "storage_discharge")] = cv[gd:gd + ns * n].reshape(ns, n).sum(axis=0)
+        cols[(z, "storage_charge")] = cv[gc:gc + ns * n].reshape(ns, n).sum(axis=0)
+    df = pd.DataFrame(cols, index=pd.DatetimeIndex(T))
+    df.columns = pd.MultiIndex.from_tuples(df.columns, names=["zone", "tech"])
+    return df
+
+
 def _solve_and_read(h, spec, price_sign, diagnose: bool = False):
     import os
     import time as _t
@@ -889,6 +927,8 @@ def _solve_and_read(h, spec, price_sign, diagnose: bool = False):
                               "ch": cv[gc:gc + ns * n].reshape(ns, n),
                               "soc": cv[eb:eb + ns * n].reshape(ns, n)}
                           for z, (gd, gc, eb, ns) in spec["storage_cols"].items()}
+    if os.environ.get("DISPATCH_CAPTURE_DISPATCH", "0") not in ("0", "false", "False"):
+        out["dispatch"] = _read_dispatch(cv, spec)
     if _TRACE_SOLVES or os.environ.get("DISPATCH_TRACE_SOLVES"):
         print(f"      · read  {_t.monotonic() - _tread:7.1f}s", flush=True)
     if diagnose:                       # lecture seule de la solution primale (cf. lp.diagnostics)

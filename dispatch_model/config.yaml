@@ -108,7 +108,7 @@ solver:
 # the LP is byte-identical to the pre-module dispatch (golden preserved). Physics per reactor class live in
 # flexibility/reactor_class.py; year-indexed regime trajectories in the dispatch_* workbook tabs.
 flexibility:
-  enabled: false
+  enabled: true
 
 # --- Projection --------------------------------------------------------------
 projection:

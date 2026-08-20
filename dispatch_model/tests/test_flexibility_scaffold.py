@@ -20,9 +20,25 @@ def test_flag_defaults_off():
     assert enabled(_StubConfig({"flexibility": {"enabled": True}})) is True
 
 
-def test_config_yaml_ships_off():
+def test_config_yaml_ships_on_and_the_backtest_shares_the_switch():
+    """`config.yaml` now ships flexibility ON (2026-08, by scenario decision — the projection needs the
+    storage module, which is gated behind this same flag).
+
+    This test used to assert the opposite, guarding "byte-identical default, golden preserved". That
+    guarantee is deliberately gone, and the consequence it was protecting against is real and worth
+    stating where someone will trip over it: `rolling/backtest.py` reads the SAME flag, so turning it on
+    changes the BACKTEST too, not only the projection. Anything calibrated against flat-LP backtest SMC —
+    `reports/markup_model.json` above all — was fitted under the old regime and is now being applied to a
+    different dispatch. Re-derive those before trusting a level.
+
+    What is still pinned is that the shipped config and the storage module agree: flexibility on, and the
+    projection's storage path reachable — because storage silently does nothing when the flag is off, and
+    that silence is what hid the missing BESS and PSP for the whole 2027-46 horizon."""
     from dispatch_model.config import load_config
-    assert enabled(load_config("config.yaml")) is False        # byte-identical default (golden preserved)
+    from dispatch_model.flexibility.storage import storage_spec
+
+    assert enabled(load_config("config.yaml")) is True
+    assert storage_spec({}, 2046), "storage must build units once the flag is on"
 
 
 def test_reactor_class_by_capacity():

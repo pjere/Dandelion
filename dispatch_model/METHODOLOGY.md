@@ -178,6 +178,70 @@ This model outputs **system marginal prices**. Step (vii) fits a calibrated mark
 mapping SMC → day-ahead spot. The backtest residuals here (parallel level gaps, spread compression, spike
 under-prediction) are precisely its training signal.
 
+## Reading volumes out of the LP (`DISPATCH_CAPTURE_DISPATCH`, opt-in, 2026-08)
+
+Everything this model was scored on until now is a **price**: the gate, the backtest and the golden harness
+all compare price series, so the solver only ever returned duals, flows and water values. Generation stayed
+inside HiGHS as an unread block of the primal vector.
+
+A price alone cannot answer what a projection is usually asked for. Revenue is `Σₕ MWₕ × priceₕ`, and the
+gap between that and `annual MWh × annual mean price` **is** the capture-rate effect — for RES it is the
+whole economic question. So `lp/highs_solver._read_dispatch` now reads the blocks that were already solved
+and aggregates them per `(zone, tech)`: the generation block by its unit tech labels, the RES tranches
+summed to the dispatched (i.e. non-curtailed) potential, plus ENS, dump and the storage primal.
+
+It is read-only — no column bound, no row, no cost changes — and gated off by default, because it is dead
+weight for every price-scored caller. `rolling/projection.project_year` takes a matching `sink` dict which
+retains the year's dispatch, flows and both price series; left `None` the memory profile is unchanged.
+
+The property that makes the capture checkable rather than merely plausible is the zonal balance:
+
+```
+gen + res + ens − dump + storage_discharge − storage_charge + net_import = demand
+```
+
+Block extraction is index arithmetic on a flat primal vector, where an off-by-one in a base offset or a
+unit-major/time-major reshape confusion yields numbers of the right magnitude and sign attributed to the
+wrong plant — plausible, and wrong. `tests/test_dispatch_capture.py` asserts the identity above against the
+LP's own balance rows, which is the check such a mistake cannot pass.
+
+`scripts/run_projection_20y.py` drives the horizon with this on and persists parquet per year;
+`scripts/build_projection_deliverables.py` turns that into revenue, congestion-rent and negative-hour
+tables. Congestion rent is `Σₕ flowₕ × (p_importing − p_exporting)`, which on SMC is non-negative by
+construction — a useful self-check, since flow only ever runs cheap→dear in the LP. On post-markup spot it
+can go negative, and that count is reported rather than hidden: it measures how far the zone-by-zone markup
+moves zones relative to a coupling the LP had ordered the other way.
+
+## The flexibility bid sets the price level (`DISPATCH_FLEX_VOM`, 2026-08)
+
+`cap_flex_gw` adds one dispatchable block per zone — battery + demand response + H2 peaker — bid at
+`VOM["flex"]`. Once adequacy is closed, that bid stops being a backstop and becomes **the price**.
+
+Measured on the 2027-46 projection, the French SMC in 2046 takes essentially four values:
+
+| SMC | hours | share | marginal unit |
+|---|---|---|---|
+| **300.0** | 3129 | 36 % | the flex block, at exactly its VOM |
+| −0.0 | 1867 | 22 % | RES surplus |
+| 7.0 | 1413 | 16 % | nuclear |
+| 201.0 | 500 | 6 % | gas |
+
+The 300 band carries **71 % of the annual mean**. So a single default — one the `stacks/costs.py` comment
+already flags as "a DEFAULT, not a revealed-behaviour measurement" — sets more than a third of French hours
+and most of the price level.
+
+Those hours are **nightly, not seasonal**: the hour-of-day histogram peaks at 23:00 (257 h) and is
+essentially empty between 10:00 and 14:00 (1-3 h), with RES averaging 18.2 GW against 48.0 GW in the
+cheapest half of the year. This is why RES capacity is the wrong lever on the price LEVEL: scaling French
+RES to the PPE3 high end (+27 %) removes 121 of those 3129 hours, and doubling it still leaves 1476. Solar
+cannot clear a 22:00 price. What the RES trajectory does move is the cheap tail — negative hours, capture
+rates, and therefore RES revenue.
+
+`costs.flex_vom()` reads `DISPATCH_FLEX_VOM` at every call so the level can be swept. The effect is not a
+simple re-pricing of the affected hours: at 180 the block sits BELOW gas (~201 €/MWh in 2046) rather than
+above it, so it displaces gas instead of being displaced by it and the marginal unit changes identity. That
+has to be measured, not extrapolated from the base run.
+
 ## Remaining work
 
 Projection-mode neighbours (weather-regression demand, RES CF transfers, TYNDP capacities) for 2027–2046;

@@ -33,7 +33,7 @@ from ..res_schemes import load_res_schemes, solve_with_triggers
 from ..rules import rules_at
 from ..hydro.water_value import season_of as wv_season_of
 from ..scheme_evolution import scheme_shares, trigger_hours
-from ..stacks.costs import VOM
+from ..stacks.costs import flex_vom
 from ..tyndp import (flex_capacity_mw, load_ntc_newbuild, load_tyndp, ntc_delta_mw, report_coverage,
                      tyndp_factors)
 from .assemble import (_EXCLUDE_DISPATCH, MEASURED_MUSTRUN_ZONES, NTC, flow_derived_ntc,
@@ -174,8 +174,9 @@ def _append_flex(stack: pd.DataFrame, zone: str, tyndp: dict, year: int) -> pd.D
 
     The row MUST carry `vom`. `srmc()` reads the stack's `vom` COLUMN when one exists and only falls back
     to the per-tech `VOM` table when it does not — and these stacks do have the column. So omitting `vom`
-    here bypassed `VOM["flex"]` (which has been 180 €/MWh in `stacks.costs` all along, with its own #83
-    rationale) and left the row at NaN, since `srmc()` starts from `out = vom.copy()` and `flex` is a
+    here bypassed the flex bid (`VOM["flex"]`, since raised 180 → 300 by the workbook owner; take it from
+    `costs.flex_vom()`, which honours the `DISPATCH_FLEX_VOM` sensitivity override) and left the row at
+    NaN, since `srmc()` starts from `out = vom.copy()` and `flex` is a
     non-fuel tech that never gets a fuel term to overwrite it. Writing `srmc_eur_mwh` here would not
     work: the column does not exist at this point (the stack is `unit_id, name, tech, capacity_mw,
     efficiency, min_gen_frac, ramp_frac, vom`), so `row.get(c, ...) for c in stack.columns` drops it, and
@@ -185,7 +186,7 @@ def _append_flex(stack: pd.DataFrame, zone: str, tyndp: dict, year: int) -> pd.D
     if mw < 50:
         return stack
     row = {"unit_id": f"{zone}_flex", "zone": zone, "tech": "flex", "capacity_mw": float(mw),
-           "efficiency": np.nan, "min_gen_frac": 0.0, "vom": VOM["flex"]}
+           "efficiency": np.nan, "min_gen_frac": 0.0, "vom": flex_vom()}
     return pd.concat([stack, pd.DataFrame([{c: row.get(c, np.nan) for c in stack.columns}])],
                      ignore_index=True)
 
@@ -218,10 +219,17 @@ def _window_ntc(ref, border, T, target_year: int):
 
 def project_year(config: Config, target_year: int, ref, n_weeks: int | None = None,
                  avail_rng=None, weather_shapes: dict | None = None,
-                 return_prices: bool = False, draw: int = 0) -> pd.DataFrame:
+                 return_prices: bool = False, draw: int = 0, sink: dict | None = None) -> pd.DataFrame:
     """Clear `target_year` from the preloaded reference-year shapes in `ref`; return per-zone price stats.
 
-    `draw` selects the Monte-Carlo draw for the per-draw feeds (step-v FR nuclear availability, #160)."""
+    `draw` selects the Monte-Carlo draw for the per-draw feeds (step-v FR nuclear availability, #160).
+
+    `sink` (opt-in) is a caller-supplied dict the year's VOLUMES are written into — `"dispatch"` the
+    per-(zone, tech) MW frame, `"flows"` the per-border net MW, `"smc"` the pre-markup duals. The stats
+    frame this function returns is a price summary, and prices alone cannot give revenues or congestion
+    rents: those need the volume each price was paid on. Filling `sink` needs `DISPATCH_CAPTURE_DISPATCH`
+    set for the dispatch part (flows and SMC are already in the solver output either way); left None,
+    nothing is retained and the memory profile is what it always was."""
     zones, neigh, wb, cm, basis, floors, g = (ref[key] for key in
                                               ("zones", "neigh", "wb", "cm", "basis", "floors", "growth"))
     k = target_year - ref["ref_year"]
@@ -347,9 +355,9 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
     storage_proj = None
     if flex_spec is not None:
         from ..flexibility.storage import bess_power_mw, storage_spec
-        storage_proj = storage_spec({}, target_year) or None
+        storage_proj = storage_spec({}, target_year, tyndp=tyndp) or None
         for z, st_z in [("FR", fr_stack)] + list(nb_stack.items()):
-            b = bess_power_mw(z, target_year)
+            b = bess_power_mw(z, target_year, tyndp=tyndp)
             m = st_z["unit_id"] == f"{z}_flex"
             if b > 0 and m.any():
                 st_z.loc[m, "capacity_mw"] = (st_z.loc[m, "capacity_mw"] - b).clip(lower=0.0)
@@ -419,6 +427,7 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         nuc_unavail = nuclear_unavail_daily(fr_avail, target_year, ref["ref_year"], draw, _nuc_cap)
 
     price_chunks = []
+    disp_chunks, flow_chunks = [], []   # volumes, only when the caller passed a sink
     _dropped: list[str] = []            # windows the solve budget could not clear (reported below)
     prev_flex_state = None; prev_w1 = None                     # F5: FR tail state across adjacent window seams
     for w0, w1 in zip(ref["weeks"][:-1], ref["weeks"][1:]):
@@ -481,6 +490,12 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
         if out is None:
             prev_flex_state = None; continue
         price_chunks.append(out["prices"])
+        if sink is not None:
+            # windows are half-open [w0, w1) on a shared calendar, so these concatenate without overlap
+            if out.get("dispatch") is not None:
+                disp_chunks.append(out["dispatch"])
+            if out.get("flows") is not None and len(out["flows"]):
+                flow_chunks.append(out["flows"])
         if flex_spec is not None and out.get("flex", {}).get("FR") is not None:
             from ..flexibility.fr_nuclear import tail_state
             prev_flex_state = tail_state(out["flex"]["FR"]); prev_w1 = w1
@@ -509,6 +524,12 @@ def project_year(config: Config, target_year: int, ref, n_weeks: int | None = No
                      "neg_mean": round(p[p < 0].mean(), 1) if (p < 0).any() else np.nan,
                      "trigger_h": trigger_hours(target_year)})
     stats = pd.DataFrame(rows)
+    if sink is not None:
+        sink["smc"] = smc
+        sink["spot"] = pd.DataFrame(spot).sort_index()
+        sink["dispatch"] = (pd.concat(disp_chunks).sort_index() if disp_chunks else None)
+        sink["flows"] = (pd.concat(flow_chunks, ignore_index=True) if flow_chunks else None)
+        sink["dropped"] = list(_dropped)
     return (stats, pd.DataFrame(spot).sort_index()) if return_prices else stats
 
 

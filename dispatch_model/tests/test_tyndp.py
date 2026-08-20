@@ -71,3 +71,33 @@ def test_flex_capacity_is_absolute_and_priced_as_peaking():
     # commit 236aa7f it never entered the basis, so its price was inert). Asserted as a BAND, not the
     # exact value: what the test protects is that flex sits above every thermal SRMC and below VoLL.
     assert max(VOM[t] for t in ("ccgt", "ocgt", "coal", "lignite", "oil")) < VOM["flex"] <= 500
+
+
+def test_flex_vom_is_overridable_and_read_per_call(monkeypatch):
+    """The flex bid sets 36 % of French hours in 2046, so it needs a sensitivity knob — and that knob must
+    be read at CALL time. Captured at import, a sensitivity arm would silently depend on whether the module
+    happened to be imported before or after the environment was set."""
+    from dispatch_model.stacks.costs import VOM, flex_vom
+
+    monkeypatch.delenv("DISPATCH_FLEX_VOM", raising=False)
+    assert flex_vom() == VOM["flex"]
+    monkeypatch.setenv("DISPATCH_FLEX_VOM", "180")
+    assert flex_vom() == 180.0                     # same process, no re-import
+    monkeypatch.setenv("DISPATCH_FLEX_VOM", "42.5")
+    assert flex_vom() == 42.5
+
+
+def test_the_flex_block_carries_the_overridden_bid(monkeypatch):
+    """The override has to reach the STACK ROW, not just the helper: `srmc()` reads the `vom` column, so a
+    row built before the override is applied would keep the default and the arm would be a no-op."""
+    import pandas as pd
+    from dispatch_model.rolling.projection import _append_flex
+
+    stack = pd.DataFrame([{"unit_id": "Z_gas", "zone": "Z", "tech": "gas", "capacity_mw": 1000.0,
+                           "efficiency": 0.55, "min_gen_frac": 0.0, "vom": 3.0}])
+    tyndp = {"Z": {"cap_flex_gw": {2030: 5.0, 2040: 5.0}}}
+    monkeypatch.setenv("DISPATCH_FLEX_VOM", "180")
+    out = _append_flex(stack, "Z", tyndp, 2040)
+    row = out[out["tech"] == "flex"]
+    assert len(row) == 1 and float(row["capacity_mw"].iloc[0]) == 5000.0
+    assert float(row["vom"].iloc[0]) == 180.0

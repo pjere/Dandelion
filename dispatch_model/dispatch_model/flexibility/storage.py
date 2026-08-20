@@ -29,10 +29,20 @@ _PSP_MEASURED = {"DE_LU": (4.6, 41.6), "CH": (2.8, 46.7), "ES": (2.7, 34.8),
 #: refuted as a fleet-composition artifact: FLEX_CALIBRATION_2024.md §"PSP discharge friction: REFUTED".)
 _PUMP_VOM = 5.0
 _ETA_PSP, _ETA_BESS = 0.76 ** 0.5, 0.90 ** 0.5
-#: BESS build-out factor vs the 2024 seed (starter trajectory, TYNDP-order; workbook-overridable later).
+#: BESS build-out factor vs the 2024 seed (starter trajectory, TYNDP-order). Used only where the workbook
+#: gives no `cap_bess_gw` row for the zone — see `bess_power_mw`.
 #: In PROJECTION the real storage machinery replaces the battery share of #83's crude `cap_flex_gw`
 #: block (the caller shrinks that block by the BESS power added — no double count).
 _BESS_GROWTH = [(2024, 1.0), (2030, 4.0), (2040, 10.0), (2050, 12.0)]
+
+#: Duration (h) of workbook-specified BESS. The 2024 seeds above encode 1.5–2.0 h, which is what was BUILT
+#: by 2024; new grid-scale build is procured at 4 h, which is also the duration at which a battery is
+#: credited as capacity in the markets that accredit it.
+#:
+#: **This constant, not the GW figure, decides whether a stated BESS fleet covers an evening peak.** 15 GW
+#: at 1.5 h is 22.5 GWh against a French evening deficit that runs several hours; the same 15 GW at 4 h is
+#: 60 GWh. A `cap_bess_gw` row therefore cannot be read as firm capacity without reading this too.
+_BESS_PROJ_DURATION_H = 4.0
 
 
 def bess_factor(year: int) -> float:
@@ -40,19 +50,44 @@ def bess_factor(year: int) -> float:
     return float(np.interp(year, ys, fs))
 
 
-def bess_power_mw(zone: str, year: int) -> float:
+def _tyndp_bess_mw(tyndp: dict | None, zone: str, year: int) -> float | None:
+    """BESS power (MW) from the workbook's `cap_bess_gw`, or None when the zone has no row."""
+    if not tyndp:
+        return None
+    z = tyndp.get(zone)
+    if not z or "cap_bess_gw" not in z:
+        return None
+    from ..tyndp import _interp
+    v = _interp(z["cap_bess_gw"], year)
+    return float(v) * 1e3 if v is not None else None
+
+
+def bess_power_mw(zone: str, year: int, tyndp: dict | None = None) -> float:
     """BESS power (MW) the storage spec carries for `zone`/`year` — the amount the caller must SHRINK the
-    #83 `cap_flex_gw` adequacy block by, since that block already counts batteries (no double count)."""
+    #83 `cap_flex_gw` adequacy block by, since that block already counts batteries (no double count).
+
+    Workbook `cap_bess_gw` wins where present; otherwise the 2024 seed × `bess_factor`. Both paths must
+    agree with what `storage_spec` actually builds, or the shrink and the storage unit disagree and the
+    zone silently gains or loses capacity."""
+    mw = _tyndp_bess_mw(tyndp, zone, year)
+    if mw is not None:
+        return mw
     b = _BESS_2024.get(zone)
     return b[0] * 1e3 * bess_factor(year) if b else 0.0
 
 
-def storage_spec(psp_mw: dict[str, float], year: int) -> dict:
+def storage_spec(psp_mw: dict[str, float], year: int, tyndp: dict | None = None) -> dict:
     """→ the `storage` dict for `solve_multizone(..., storage=)`: {zone: {p_dis, p_ch, e_max, eta_ch,
     eta_dis, vom}} with one PSP unit (where the zone has measured PSP capacity) and one BESS unit
-    (where the seed table has an entry). `psp_mw` = measured `hydro_psp` capacity per zone."""
+    (where the workbook or the seed table gives one). `psp_mw` = measured `hydro_psp` capacity per zone.
+
+    `tyndp` (opt-in) routes BESS through the workbook's `cap_bess_gw` at `_BESS_PROJ_DURATION_H`, which is
+    what lets a scenario state a battery fleet per zone and year instead of scaling one global factor
+    against 2024 seeds. Zones carrying a workbook row are included even if they have no 2024 seed — that is
+    the whole point for DK/GB/PT/PL_CZ, which have no measured battery fleet to scale."""
     out: dict = {}
-    for z in set(psp_mw) | set(_BESS_2024):
+    wb_zones = {z for z in (tyndp or {}) if "cap_bess_gw" in (tyndp or {}).get(z, {})}
+    for z in set(psp_mw) | set(_BESS_2024) | wb_zones:
         p_dis, p_ch, e_max, ech, edis, vch = [], [], [], [], [], []
         psp = float(psp_mw.get(z, 0.0))
         meas = _PSP_MEASURED.get(z)
@@ -63,8 +98,12 @@ def storage_spec(psp_mw: dict[str, float], year: int) -> dict:
         if p > 100:
             p_dis.append(p); p_ch.append(p); e_max.append(e)
             ech.append(_ETA_PSP); edis.append(_ETA_PSP); vch.append(_PUMP_VOM)
-        b = _BESS_2024.get(z)
-        if b:
+        wb_mw = _tyndp_bess_mw(tyndp, z, year)
+        if wb_mw is not None:                                 # workbook-stated fleet, at the build duration
+            if wb_mw > 1.0:
+                p_dis.append(wb_mw); p_ch.append(wb_mw); e_max.append(wb_mw * _BESS_PROJ_DURATION_H)
+                ech.append(_ETA_BESS); edis.append(_ETA_BESS); vch.append(1.0)
+        elif (b := _BESS_2024.get(z)):                        # fallback: 2024 seed scaled by the factor
             f = bess_factor(year)
             p_dis.append(b[0] * 1e3 * f); p_ch.append(b[0] * 1e3 * f); e_max.append(b[1] * 1e3 * f)
             ech.append(_ETA_BESS); edis.append(_ETA_BESS); vch.append(1.0)

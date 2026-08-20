@@ -26,7 +26,22 @@ from .assemble import _EXCLUDE_DISPATCH
 
 # DSR / scarcity tranches as a fraction of window peak demand (spec §2: step the price below VoLL).
 # Also absorbs modest under-modelling of peakers/emergency imports so cold snaps don't hit VoLL.
-_DSR = [(0.03, 300.0), (0.03, 1000.0), (0.05, 4000.0)]
+#: Demand-response ladder: (fraction of the zone's peak demand, bid €/MWh). Three rungs, 11 % of peak.
+#:
+#: Lowered from 300/1000/4000 (2026-08). The old top rung was the model's de-facto scarcity price once
+#: adequacy closed: measured on FR 2046 with the flexibility module on, the SMC sat at exactly 4000 for
+#: **170 hours**, which alone carried 79 €/MWh of a 221 €/MWh annual mean. A ladder written to represent
+#: emergency load-shedding was setting the average price of the year.
+#:
+#: 180/250/500 puts the ladder in the same economic register as the resources it competes with — the
+#: DSR/H2 block bids `VOM["flex"]` = 180 — so scarcity now clears through a plausible willingness-to-pay
+#: rather than through a number chosen as a stand-in for VoLL.
+#:
+#: NOTE the first rung equals `VOM["flex"]` exactly, as 300 did before. Two independent scarcity
+#: parameters again sit on the same value, so a sensitivity on one alone will find ~40 % of the affected
+#: hours pinned by the other (measured on the 300 pair: of 3140 hours at 300, 1324 did not move when the
+#: flex bid alone was lowered). Move both together.
+_DSR = [(0.03, 180.0), (0.03, 250.0), (0.05, 500.0)]
 
 
 def fr_stack_base(config, year: int | None = None) -> pd.DataFrame:

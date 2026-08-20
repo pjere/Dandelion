@@ -39,14 +39,47 @@ EFF_RANGE = {
 VOM = {"nuclear": 9.0, "gas": 2.5, "ccgt": 2.5, "ocgt": 3.5, "coal": 3.5, "lignite": 3.5,
        "oil": 4.0, "biomass": 4.0, "hydro_reservoir": 1.0, "hydro_ror": 0.5, "hydro_psp": 1.0,
        "waste": 2.0, "solar": 0.0, "wind_onshore": 0.0, "wind_offshore": 0.0,
-       # 2040 flexibility (battery + demand-response + H2-peaker) priced at its marginal cost — the peaking
-       # backstop that caps scarcity instead of VoLL as firm thermal retires (#83). Raised 180 -> 300 by
-       # the workbook owner. Still a DEFAULT, not a revealed-behaviour measurement, and it is now
-       # load-bearing: until the NaN in `_append_flex` was fixed (commit 236aa7f) this block never
-       # dispatched at all, so this number sets the scarcity ceiling in every tight zone of every
-       # projected year for the first time. Being battery + DR + H2-peaker, it should eventually come
-       # through the same revealed route as every other bid in this model.
-       "flex": 300.0}
+       # 2040 flexibility, priced at its marginal cost — the peaking backstop that caps scarcity instead
+       # of VoLL as firm thermal retires (#83).
+       #
+       # WHAT THIS NOW PRICES. It used to stand for "battery + demand-response + H2-peaker" all at once,
+       # which was wrong for the battery third: a battery's marginal cost is an intertemporal opportunity
+       # cost that varies with state of charge, not a flat number, and the flat block also had no charging
+       # leg and no energy limit (measured: at 180 it ran 2866 full-load hours in FR 2046, roughly double
+       # a 4 h battery at one cycle a day, on free energy). The battery share now goes through
+       # `flexibility.storage` from the workbook's `cap_bess_gw`, with a state of charge, a charging cost
+       # and a round-trip loss. So THIS number prices only the REMAINDER: demand response and H2 peakers.
+       #
+       # 180 is an H2 OCGT at roughly 2 €/kg hydrogen and ~40 % efficiency. Published H2-peaker SRMC spans
+       # about 150 (H2 at 2 €/kg, the EU's ambitious target) to 300 (at 4 €/kg); one published scenario
+       # models 284. The history here: 180 originally, raised to 300 by the workbook owner when the block
+       # still had to stand in for storage as well, and set back to 180 now that it does not.
+       #
+       # Still a DEFAULT, not a revealed-behaviour measurement, and still load-bearing — it sets the
+       # scarcity ceiling in every tight zone of every projected year. Override per run with
+       # `DISPATCH_FLEX_VOM` (see `flex_vom`).
+       "flex": 180.0}
+
+
+def flex_vom() -> float:
+    """The 2040-flexibility block's bid, overridable for one run via `DISPATCH_FLEX_VOM`.
+
+    Read from the environment at every call rather than captured at import, so a sensitivity arm cannot
+    depend on module-load order.
+
+    Why this is worth a knob. Measured on the 2027-46 projection, the French SMC in 2046 takes essentially
+    four values, and `300.0` — this number, exactly — is **3129 of 8640 hours (36 %)**, carrying 71 % of the
+    annual mean. The others are -0.0 (RES surplus, 22 %), 7.0 (nuclear SRMC, 16 %) and 201.0 (gas, 6 %). So
+    this single default sets more than a third of French hours and most of the price LEVEL, while the
+    comment on `VOM["flex"]` states plainly that it is a default rather than a revealed-behaviour
+    measurement.
+
+    Changing it is not a simple re-pricing of those hours: at 180 the block moves BELOW gas (~201 €/MWh in
+    2046) in the merit order, so it displaces gas rather than being displaced by it, and the marginal unit
+    in the affected hours changes identity. The effect has to be measured, not extrapolated."""
+    return float(os.environ.get("DISPATCH_FLEX_VOM", VOM["flex"]))
+
+
 NUCLEAR_FUEL_EUR_MWH = 7.0            # fuel + variable O&M proxy for nuclear (workbook-overridable)
 _OIL_MWHTH_PER_BBL = 1.7             # ~1.7 MWh_th per barrel
 _USD_PER_EUR = 1.08
