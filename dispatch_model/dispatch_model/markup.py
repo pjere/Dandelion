@@ -132,18 +132,31 @@ def _run_smc(config: Config, year: int) -> pd.DataFrame:
 
 
 def build_panel(config: Config, years: list[int], max_median_ratio: float = 1.8,
-                min_corr: float = 0.2) -> pd.DataFrame:
+                min_corr: float = 0.2, max_std_ratio: float = 2.0) -> pd.DataFrame:
     """Long training panel [zone, timestamp_utc, smc, observed, demand, musttake_res, firm_cap] across `years`.
 
     Uses each year's saved backtest SMC (re-solving only if not on the lake), joins observed spot and the
     projectable drivers, and stacks the zones. The markup target is ``observed − smc``.
 
     **Calibration-quality gate.** A zone-year the dispatch prices badly is a *failed dispatch*, not a wedge
-    the markup should learn, so it is dropped — on either symptom: (a) gross level error (median outside
-    [1/`max_median_ratio`, `max_median_ratio`] × observed median), or (b) wrong shape (SMC↔spot correlation
-    below `min_corr`). CH/IT-North in the 2022 drought / nuclear-crisis year fail (b) — level ≈ OK but
-    correlation ≈ 0 — while FR/DE-LU/BE/ES keep their crisis-price signal. So a crisis year still contributes
-    its clean zones without the broken ones poisoning the fit."""
+    the markup should learn, so it is dropped — on three symptoms: (a) gross level error (median outside
+    [1/`max_median_ratio`, `max_median_ratio`] × observed median), (b) wrong shape (SMC↔spot correlation
+    below `min_corr`), or (c) absurd DISPERSION (modelled standard deviation above `max_std_ratio` ×
+    observed). CH/IT-North in the 2022 drought / nuclear-crisis year fail (b) — level ≈ OK but correlation
+    ≈ 0 — while FR/DE-LU/BE/ES keep their crisis-price signal. So a crisis year still contributes its clean
+    zones without the broken ones poisoning the fit.
+
+    **Why (c) exists.** (a) and (b) are both blind to the tails, and the tails are where a capacity-short
+    zone fails. Great Britain reached the LP's 15000 €/MWh VOLL in 89–155 hours of *every* fitted year while
+    observed GB never exceeded 1860, giving a dispersion 5.5×/13.4×/25.8× observed — and it passed both
+    older tests, because a median does not move for 100 hours out of 8735 and the correlation bar is only
+    0.2. The regression then spent its whole budget trying to wedge away a 15000 €/MWh dispatch failure,
+    which is how GB earned a −27.41 coefficient where every other zone sits under 2. NL 2024 has the same
+    disease more mildly (4.8×, 51 hours over 1000 €/MWh) and is likewise the zone that ran away in the
+    2027-46 projection. A wedge cannot repair a dispatch that ran out of capacity; excluding those zone-years
+    means those zones project on clipped SMC, which is the honest answer.
+
+    `max_std_ratio=float("inf")` reproduces the pre-2026-08 panel exactly."""
     from .rolling.backtest import _observed_prices
 
     frames = []
@@ -165,10 +178,15 @@ def build_panel(config: Config, years: list[int], max_median_ratio: float = 1.8,
             ok = smc.notna() & o.notna()
             if ok.sum() < 100 or float(np.corrcoef(smc[ok], o[ok])[0, 1]) < min_corr:
                 continue                                    # (b) wrong shape (SMC↔spot corr too low) → excluded
+            o_sd = float(o[ok].std())
+            if o_sd > 0 and float(smc[ok].std()) / o_sd > max_std_ratio:
+                continue                                    # (c) absurd dispersion (VOLL tail) → excluded
             f = d.assign(zone=z, smc=smc.to_numpy(), observed=o.to_numpy()).reset_index()
             frames.append(f.dropna(subset=["smc", "observed"]))
-    panel = pd.concat(frames, ignore_index=True)
-    return panel[["zone", "timestamp_utc", "smc", "observed", "demand", "musttake_res", "firm_cap"]]
+    cols = ["zone", "timestamp_utc", "smc", "observed", "demand", "musttake_res", "firm_cap"]
+    if not frames:               # every zone-year failed the quality gate — an empty panel, not a crash
+        return pd.DataFrame(columns=cols)
+    return pd.concat(frames, ignore_index=True)[cols]
 
 
 # Economic sign constraints on the standardized coefficients. These are what make the wedge *projectable*:
@@ -176,7 +194,15 @@ def build_panel(config: Config, years: list[int], max_median_ratio: float = 1.8,
 # training year never contains), so unconstrained fits happily extrapolate an economically absurd wedge that
 # *shrinks* as prices rise (a plain fit gave IT-North −€68 in 2030). Requiring markup to be non-decreasing in
 # the price level and in tightness encodes the economics the data alone can't, and bounds the extrapolation.
-_SIGN_LB = {"smc": 0.0, "tight": 0.0, "peak_kink": 0.0}        # others unconstrained
+# `tight_sq` carries the same lower bound as `tight`, and must: the two are 0.96–0.99 collinear over any
+# one zone's range, so constraining only `tight` does not constrain the tightness RESPONSE — the solver
+# satisfies `tight ≥ 0` by pinning it to exactly 0 and putting the (negative) response on its unconstrained
+# partner. Measured on the 2019/2022/2024/2025 panel, five of nine zones did exactly that: BE −0.46,
+# CH −0.53, PT −1.14, NL −1.28, GB −27.41, each with `tight` sitting on its bound. GB's wedge then ran from
+# +19 €/MWh at tight=0 to −115 at tight=0.68 — strictly DECREASING in tightness, the precise thing the
+# paragraph above says these constraints exist to forbid. With β(tight²) ≥ 0 and β(tight) ≥ 0 the wedge is
+# non-decreasing and convex in tightness for tight ≥ 0, which is the stated economics.
+_SIGN_LB = {"smc": 0.0, "tight": 0.0, "tight_sq": 0.0, "peak_kink": 0.0}        # others unconstrained
 
 
 def _ridge(X: np.ndarray, y: np.ndarray, alpha: float, names: list[str]

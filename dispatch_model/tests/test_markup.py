@@ -86,3 +86,92 @@ def test_unknown_zone_falls_back_to_clipped_smc():
                         "demand": [5e4] * 3, "musttake_res": [1e4] * 3, "firm_cap": [9e4] * 3})
     out = apply_markup(m, "ZZ", smc, drv, floor=-500, voll=4000)
     assert list(out) == [50.0, -500.0, 4000.0]
+
+
+# ---------------------------------------------------------------------------------------------------
+# The tightness response must be non-decreasing, and a failed dispatch must not reach the fit
+# ---------------------------------------------------------------------------------------------------
+# Both properties below were violated in the model shipped 2026-08, and neither was visible in the fit
+# diagnostics: the sign pathology hid inside a collinear pair, and the bad zone-year passed a median and a
+# correlation test because 100 VOLL hours out of 8735 move neither.
+
+
+def _panel_falling_wedge(n=4000, seed=3):
+    """A panel whose LEAST-SQUARES answer is a wedge that falls with tightness.
+
+    Unconstrained (or constrained only on `tight`), the fit is free to express this through `tight_sq`,
+    which is what GB did. The economics say a wedge must not shrink as the system tightens, so the fit is
+    required to refuse this data rather than reproduce it."""
+    rng = np.random.default_rng(seed)
+    ts = pd.date_range("2019-01-01", periods=n, freq="h", tz="UTC")
+    demand = 50000 + 15000 * np.sin(2 * np.pi * ts.hour / 24) + rng.normal(0, 3000, n)
+    res = np.clip(rng.uniform(0, 25000, n), 0, None)
+    firm = 90000.0
+    smc = rng.uniform(-10, 120, n)
+    tight = np.clip((demand - res) / firm, 0, 1.6)
+    df = pd.DataFrame({"zone": "FR", "timestamp_utc": ts, "smc": smc, "demand": demand,
+                       "musttake_res": res, "firm_cap": firm})
+    df["observed"] = smc + (60.0 - 120.0 * tight ** 2) + rng.normal(0, 2.0, n)
+    return df
+
+
+def test_tight_sq_is_sign_constrained():
+    """`tight` alone is not enough: it is 0.96-0.99 collinear with `tight_sq`, so a bound on one is
+    satisfied by pinning it to zero and loading the other."""
+    from dispatch_model.markup import _SIGN_LB
+    assert _SIGN_LB.get("tight_sq") == 0.0
+    m = fit_markup(_panel_falling_wedge(), shrink=1.0)
+    names = _feature_names()[1:]
+    beta = dict(zip(names, m["coef"]["FR"]["beta_z"]))
+    assert beta["tight_sq"] >= -1e-9, f"tight_sq went negative: {beta['tight_sq']:.3f}"
+    assert beta["tight"] >= -1e-9
+
+
+def test_the_fitted_wedge_never_falls_with_tightness():
+    """The property the constraints exist for, asserted on the wedge itself rather than on coefficients —
+    a future reparametrisation must keep this even if the feature set changes."""
+    from dispatch_model.markup import _driver_bounds, _features as _F, _predict
+    g = _panel_falling_wedge()
+    m = fit_markup(g, shrink=1.0)
+    mz = m["coef"]["FR"]
+    lo, hi = _driver_bounds(g)["tight"]
+    grid = np.linspace(lo, hi, 25)
+    # res_share must be held CONSTANT along the sweep, or this measures the res_share slope as well:
+    # tight = (demand - res)/firm, so raising demand at fixed res raises tight and lowers res = res/demand
+    # at the same time. Fixing res = r*demand gives tight = demand*(1-r)/firm, a clean tightness axis.
+    firm, r = 90000.0, 0.20
+    demand = grid * firm / (1.0 - r)
+    probe = pd.DataFrame({"timestamp_utc": pd.to_datetime(["2019-06-15 12:00"] * len(grid), utc=True),
+                          "smc": 60.0, "firm_cap": firm, "musttake_res": r * demand,
+                          "demand": demand})
+    wedge = _predict(mz, _F(probe, mz["bounds"]))
+    assert np.all(np.diff(wedge) >= -1e-6), (
+        f"wedge falls with tightness: {wedge.round(2).tolist()}")
+
+
+def test_panel_rejects_a_zone_year_whose_dispersion_is_absurd(monkeypatch):
+    """The zone-year built here is RIGHT on both older tests and wrong only on dispersion: same median,
+    near-perfect correlation, but a modelled swing 3.5x the market's.
+
+    That is GB's bulk defect, isolated. (Its VOLL spikes are a second symptom, but spikes big enough to
+    blow the standard deviation also drag the correlation under the existing 0.2 bar, so they would be
+    caught by test (b) and would not prove this criterion adds anything.)"""
+    from dispatch_model import markup as M
+
+    n = 2000
+    rng = np.random.default_rng(11)
+    ts = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    base = 80.0 + rng.normal(0, 12.0, n)         # a real market has dispersion; a constant one is degenerate
+    obs = pd.Series(base, index=ts)
+    smc = pd.Series(80.0 + 3.5 * (base - 80.0) + rng.normal(0, 1.0, n), index=ts)
+    drv = pd.DataFrame({"timestamp_utc": ts, "demand": 50000.0,
+                        "musttake_res": 10000.0, "firm_cap": 90000.0})
+
+    monkeypatch.setattr(M, "_year_smc", lambda c, y: pd.DataFrame({"Z": smc.to_numpy()}, index=ts))
+    monkeypatch.setattr(M, "zone_drivers", lambda c, y: {"Z": drv.copy()})
+    monkeypatch.setattr("dispatch_model.rolling.backtest._observed_prices", lambda c, y, z: {"Z": obs})
+    monkeypatch.setattr("dispatch_model.rolling.assemble.modelled_zones", lambda c: ["Z"])
+
+    kept = M.build_panel(None, [2024], max_std_ratio=float("inf"))
+    assert len(kept) == n, "inf threshold must reproduce the old panel"
+    assert M.build_panel(None, [2024]).empty, "the VOLL-tail zone-year should have been excluded"

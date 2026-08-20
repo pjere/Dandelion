@@ -117,6 +117,54 @@ The honest verdict on the mechanism: **the best projectable wedge is worth ~1 % 
 2025 23.2 → 18.5. France's accuracy for a Monte Carlo is **MAE 17.6 €/MWh on a 59 €/MWh level (30 %)**,
 and that is in-sample for the dispatch too. See `DECISIONS.md`.
 
+### Repair 2026-08-16b — a zone that is fitted but never scored (GB)
+
+The refit above selected `shrink` on a LOYO score computed over **eight** zones. `build_panel` fitted
+**nine**. Great Britain was fitted and never scored, so no selection criterion could see what it did — and
+what it did was carry `beta(tight_sq) = -27.41` where every other zone sits under 2 in absolute value. Its
+projected 2027 mean came out at 30.4 EUR/MWh against a 54.9 SMC, and on the FR-GB border the wedge
+inverted the price order relative to the LP's own flow in 3895 of 8736 hours.
+
+Two independent defects produced it, and both are fixed.
+
+**1. The panel admitted a failed dispatch.** GB's backtested SMC reaches the LP's 15000 EUR/MWh VOLL in
+89-155 hours of *every* fitted year, while observed GB never exceeded 1860 — a dispersion 5.5x / 13.4x /
+25.8x observed in 2022 / 2024 / 2025. It passed the quality gate anyway, because a median does not move
+for 100 hours out of 8735 and the correlation bar is only 0.2. `build_panel` gains criterion **(c)**, a
+`max_std_ratio` (default 2.0) on modelled-vs-observed standard deviation. It removes GB entirely and NL
+2024 — the same NL that then ran away to 1522 EUR/MWh in the 2046 projection — and touches nothing else:
+the largest surviving ratio is PT 2022 at 1.32. `max_std_ratio=inf` reproduces the old panel exactly.
+
+**2. The sign constraints were one-sided across a collinear pair.** `_SIGN_LB` bounded `smc`, `tight` and
+`peak_kink` below at zero but left `tight_sq` free, and the two tightness terms are 0.96-0.99 collinear
+over any single zone's range. The solver therefore satisfied `tight >= 0` by pinning it to exactly zero and
+loading the response onto its unconstrained partner — **five of nine zones did this** (BE -0.46, CH -0.53,
+PT -1.14, NL -1.28, GB -27.41). GB's wedge consequently ran from +19 EUR/MWh at `tight=0` to -115 at
+`tight=0.68`: strictly *decreasing* in tightness, the exact behaviour the constraint block exists to
+forbid. `tight_sq` now carries the same lower bound.
+
+Neither fix alone is sufficient — constraining `tight_sq` without the panel gate still left GB's wedge
+falling and `max|beta|` at 14.3, because the regression was still being asked to wedge away a 15000
+EUR/MWh dispatch failure.
+
+Re-selected on the repaired panel with **every** zone scored: `alpha_frac=0.1, shrink=0.25`. Old
+configuration vs new, both at their own best setting, leave-one-year-out:
+
+| | LOYO MAE | RMSE | bias | worst \|beta\| |
+|---|---|---|---|---|
+| old (no dispersion gate, `tight_sq` free) | 30.49 | 66.00 | -5.12 | 13.26 (GB) |
+| new | **29.58** | **65.30** | **-4.37** | **5.04** (DE_LU) |
+
+Every zone improves except PT (+0.05, noise): GB -5.53, NL -0.91, FR -0.36. Note the old arm's own best is
+`alpha=2.0`, not the shipped `0.5` — **scoring GB would have pushed the old configuration toward more
+regularisation too**, which is the cleanest statement of the root cause. In projection GB's applied wedge
+goes from -24.5 EUR/MWh to exactly 0 (no wedge; it projects on clipped SMC, the honest answer for a zone
+whose dispatch cannot calibrate one), and NL's flips from -3.0 to +1.4.
+
+What this does **not** fix: Portugal. PT still shows a -59 EUR/MWh mean gap between SMC and spot, but that
+is the `apply_markup` clip at `voll=4000` biting an SMC that reaches the LP's 15000 — a capacity-adequacy
+failure in the scenario, not a regression artefact. See `DECISIONS.md`.
+
 ### Drivers (all projectable)
 
 | driver | captures | projectable because |
@@ -244,6 +292,27 @@ reference-year weather with a warning.
 One honest caveat remains: the neighbour models are reduced-form (a full build extends weathergen to
 neighbour stations + fits per-zone demand/RES models — the single largest remaining build). Neighbour
 availability stays the p99-firm proxy + optional #80 REMIT spread (no per-zone availability_model exists).
+
+### FR nuclear GLIDE + plan-aligned workbook — the scissor that wasn't a bug
+
+A 20-year run produced FR loss-of-load from 2037 (VOLL hours by 2040). It was NOT a code bug: `gen_nuclear_
+trajectory` faithfully executed a **strict 60-year retirement** of the real fleet (32 reactors / 31.5 GW were
+commissioned 1980-84, so they hit 60 y 2040-44 → fleet to ~18 GW by 2050), against PPE3-electrified demand
+(+59%). But that pairing is *internally inconsistent with the plans*: French policy is explicit lifetime
+EXTENSION (PPE3 ACTION NUC.1 "après 50 ans, puis 60 ans, voire au-delà"; loi 2023-491 removed the 63.2 GW cap
+and the 50%-by-2035 target); **no RTE scenario pairs high demand with a strict-60 retirement** — they pair
+higher demand with MORE nuclear. So FR now uses `nuclear_fleet.glide_closures`: a **partial oldest-first
+phase-out** — reactors become eligible at `min_life` (60 y), the oldest retire progressively, the younger
+fleet is extended past the horizon, and the total glides smoothly to `target_2050` (default 52 GW, RTE-N03-
+consistent, replacing N03's SMRs with extension). Result 64→60.9→56.5→51.6 GW (2035/40/45/50); 24 oldest
+reactors (22.4 GW) retire 2038-2050, none before 60 y. Tunable: `gen_nuclear_trajectory.py --fr-target-2050 G
+--fr-min-life Y --fr-no-glide`. **2046 winter stress: 0 VOLL hours** (was 57), prices cap at the flex ceiling
+not VoLL — tight but adequate.
+
+The workbook was also aligned to the verified national plans (`dispatch_tyndp`): demand monotonicity fixed
+(FR/DE_LU/ES no longer dip 2040→2050), PT corrected (90→58 TWh @2030, a ~50 TWh system) and extended, and the
+three zones that had NO tyndp rows — DK, PL_CZ, AT_SI — populated from their NECPs (demand + solar/wind/
+nuclear/hydro/gas), so their RES no longer CAGR-grows against frozen demand into a runaway export surplus.
 
 ### 2040 winter adequacy — the flexibility fleet (#83)
 
